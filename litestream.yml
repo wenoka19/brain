@@ -1,0 +1,34 @@
+# Continuous replication of every SQLite database to Cloudflare R2.
+#
+# `control.db` is replicated by path. Tenant databases are created at runtime,
+# so they are matched by an expansion pattern — a new `user_{id}.db` starts
+# replicating without a config change or a restart.
+access-key-id: ${R2_ACCESS_KEY_ID}
+secret-access-key: ${R2_SECRET_ACCESS_KEY}
+
+dbs:
+  - path: ${BRAIN_DATA_DIR:-/data}/control.db
+    replicas:
+      - type: s3
+        endpoint: ${R2_ENDPOINT}
+        bucket: ${R2_BUCKET}
+        path: brain/control
+        region: auto
+        force-path-style: true
+        sync-interval: 30s
+        retention: 720h          # 30 days, matching the Trash window
+        retention-check-interval: 1h
+        snapshot-interval: 6h
+
+  - path: ${BRAIN_DATA_DIR:-/data}/users/user_*.db
+    replicas:
+      - type: s3
+        endpoint: ${R2_ENDPOINT}
+        bucket: ${R2_BUCKET}
+        path: brain/users
+        region: auto
+        force-path-style: true
+        sync-interval: 30s
+        retention: 720h
+        retention-check-interval: 1h
+        snapshot-interval: 6h

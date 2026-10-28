@@ -92,35 +92,72 @@ Every `brain` prompt is therefore named `brain.*` with a `brain:` title:
 
 ## Checkpoint B — Web App Touchpoints, Hybrid Omni-Bar & Theme Feel
 
-**Status: 🛑 OPEN — three architectural options presented in chat, awaiting the
-founder's hybrid-merge.**
+**Status: ✅ LOCKED.** Three architectures were presented; the founder spliced
+two of them and corrected four details.
 
-The founder set five design-engineering rules that any accepted option must
-satisfy. They are binding on `app/static/index.html` and `app/omnibar.py`
-regardless of which layout is chosen:
+### The architecture: `B1` base + `B3` inspector pane
 
-1. **Tesler's & Jakob's Law — the Omni-Bar is a command bar, never a chatbot.**
-   No `✨` sparkle icons, no chat bubbles, no thread. Typing filters cards in
-   0ms; dropping a URL or file raises a Live Ingestion Stepper Card
-   (`[✓ URL] ➔ [● Captions] ➔ [○ Claims] ➔ [○ Grounding] ➔ [○ Links]`) ending in
-   a Peak-End Summary Banner; `Enter` on a natural-language command mutates
-   cards in place and leaves a one-line receipt bar with `[Undo / Revert to vN]`.
-   `@` scoping is supported (`@Skills`, `@Library`, `@skill-slug`).
-2. **"Russian Doll" progressive disclosure.** Skill cards and claim cards have
-   distinct silhouettes. The resting grid shows only the three highest-signal
-   elements (the Outer Doll); clicking expands the Inner Doll with the verbatim
-   quote, steps, guardrails and inline click-to-edit fields.
-3. **Semantic tokens + a locked icon dictionary.** No guessed external icon
-   names — a 12-icon inline SVG dictionary. Semantic CSS variables
-   (`--bg-canvas`, `--bg-card`, `--border-subtle`, `--accent-conflict`,
-   `--ease-ui`, `--duration-ui`) across `light`, `dark` and `warm_sunset`, the
-   last using a gentler `260ms` easing and auto-activating at 18:00 local.
-4. **Non-happy edge states designed up front:** `blocked_by_platform` recovery,
-   a 0-match search offering one-click skill synthesis, and first-run onboarding
-   pre-loaded with one demo skill and two conflicting demo claims.
-5. **A preview harness:** a top-bar Variation & Edge-State Switcher and a
-   bottom-bar Live Theme/Contrast Tuner on the preview route, so the founder can
-   test and tune every variation and state visually.
+- **Main canvas (`B1` Classic Linear):** fixed left sidebar — `220px` on
+  desktop, a slide-over drawer plus bottom bar on mobile — a centred `680px`
+  Hybrid Omni-Bar, and dense full-width single-column rows.
+- **Expansion is split by intent:**
+  - A **claim card** expands its Inner Doll **inline** (`B1` accordion), so
+    quick reading costs zero eye movement.
+  - The **`⚡ Disagreement` badge**, and inspecting or editing a **skill card**,
+    open the **`B3` right-hand inspector** — `420px` panel on desktop, a
+    full-screen slide-up sheet with a back arrow on mobile. Side-by-side
+    contradiction resolution and multi-step skill editing happen there without
+    losing scroll position in the list.
+- `B1`, `B2`, `B3` and `merged` all stay selectable in the `/preview` top bar,
+  so every layout remains testable after the splice.
 
-Blocked until this is filled in: `app/static/index.html`, `app/omnibar.py`,
-Phases 4 & 5.
+### Correction to Rule 2 — the Outer Doll headline is the distilled claim
+
+A spoken transcript quote rambles. The resting row therefore shows the crisp
+distilled **`claim`** in bold, with the `[1420s ↗]` locator badge, the
+`works: …` pill and the `⚡ Disagreement` badge. The **verbatim
+`anchor_quote`** belongs to the Inner Doll, alongside `Breaks when`,
+`metrics_and_quotes`, `domain_tags` and the inline click-to-edit controls.
+
+### Correction to Rule 4a — `blocked_by_platform` gets a rescue slot
+
+A blocked source must not dead-end at `[Try another link]`. The card carries an
+inline rescue slot: `[Paste transcript / notes ▾]` · `[Drop file instead]` ·
+`[Dismiss]`. Pasting opens a textarea **inside the card** and submits the text
+into the *existing job's* extraction and grounding pipeline, so the source is
+rescued in about five seconds and the claims still land against the original
+source record.
+
+### Addition — the 5-block `👤 Profile` modal, and a `copy` icon
+
+The icon dictionary grows to **13** with `copy`, used by the `/mcp` URL, the
+OAuth setup snippets and `[Copy tokens ⧉]`.
+
+`👤 Profile` in the bottom-left opens a modal with exactly five blocks:
+
+1. **About You & Global Context** — an auto-saved `about_you_context` textarea,
+   injected into skill synthesis and contradiction analysis.
+2. **MCP Connection & Active 30-Day OAuth Sessions** — one-click copy of the
+   `/mcp` URL, plus every active client with an `Expires in X days` badge and an
+   instant `[Revoke]`.
+3. **Appearance** — `Light` · `Dark` · `Warm Sunset (Auto 6 PM)`.
+4. **Resource Quotas** — progress bars for media minutes (X / 300) and files
+   (X / 50).
+5. **Data & Recovery** — the 30-day Trash list (`status='trash'`) with
+   `[Restore]` and `[Permanent Delete]`, and a one-click JSON / Markdown export.
+
+### Binding rules carried over
+
+The five design-engineering rules from the presentation stand as written: the
+Omni-Bar is a command bar and never a chat (no sparkle icons, no bubbles, no
+thread); Russian-doll progressive disclosure with distinct silhouettes; semantic
+CSS and motion tokens with a locked inline SVG icon dictionary and no guessed
+icon names; the three non-happy states designed up front; and the `/preview`
+harness with its Variation & Edge-State switcher and live Theme/WCAG tuner.
+
+### Implementation note — strict CSP forced a file split
+
+`script-src 'self'` admits no inline `<script>`, so the page ships as
+`app/static/index.html` + `app/static/app.css` + `app/static/app.js` rather than
+one inlined file. Same page, same tokens; it simply keeps the header strict
+instead of weakening it to `'unsafe-inline'`.

@@ -8,6 +8,7 @@ so nothing here hard-codes how `brain` speaks.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -21,7 +22,7 @@ from app.ingestion import gatekeeper
 from app.ingestion.extractor import extract_grounded_claims
 from app.ingestion.gatekeeper import GatekeeperError
 from app.ingestion.linker import link_claims
-from app.ingestion.providers import ProviderError, Providers, providers
+from app.ingestion.providers import FetchedContent, ProviderError, Providers, providers
 from app.security.sanitizer import clean_text
 
 Scope = Literal["all", "claims", "skills"]
@@ -846,6 +847,18 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
     if not content.full_text:
         return finish("failed", message="Nothing readable was found at that source.")
 
+    return _ingest_content(job, content, cfg=cfg, finish=finish)
+
+
+def _ingest_content(job, content, *, cfg, finish):
+    """Everything after a successful fetch: reconcile quota, store, extract,
+    ground, link. Shared by the normal pipeline and by a rescue."""
+    control = control_db.control()
+    user_id = job["user_id"]
+    tdb = tenant_db.tenant(user_id, cfg=cfg)
+    prov = providers(cfg)
+    job_id = job["job_id"]
+
     # True duration is only known now, so reconcile the provisional reservation.
     if content.duration_sec:
         try:
@@ -953,3 +966,575 @@ def run_pending_jobs_sync(
             break
         processed.append(process_job(job, cfg=cfg))
     return processed
+
+
+# ===========================================================================
+# web-surface operations (never exposed over MCP)
+# ===========================================================================
+# These back the Web Control Plane only. Hard deletion, trash recovery and
+# export deliberately have no MCP tool: an agent can archive, a human deletes.
+# ---------------------------------------------------------------------------
+def op_rescue_job(ctx: Context, job_id: str, pasted_text: str) -> OpResult:
+    """Rescue a blocked or failed job with text the user pastes in themselves.
+
+    Checkpoint B, Rule 4a: a platform block must not dead-end. The pasted text
+    enters the *existing* job's extraction and grounding pipeline, so the claims
+    still land against the original source record and its canonical URL.
+    """
+    job = control_db.get_job(ctx.control, job_id)
+    if job is None or job["user_id"] != ctx.user_id:
+        return _fail("rescue_job", "not_found", f"No job with id `{job_id}`.")
+    if job["status"] not in ("blocked_by_platform", "failed"):
+        return _fail(
+            "rescue_job",
+            "not_rescuable",
+            f"That job is `{job['status']}`, so there is nothing to rescue.",
+        )
+
+    text = clean_text(pasted_text)
+    if len(text.split()) < 30:
+        return _fail(
+            "rescue_job",
+            "text_too_short",
+            "Paste a bit more — at least ~30 words, or no claim can be grounded in it.",
+        )
+
+    cues = [
+        {"section": f"Pasted part {index + 1}", "text": clean_text(block)}
+        for index, block in enumerate(text.split("\n\n"))
+        if clean_text(block)
+    ] or [{"section": "Pasted notes", "text": text}]
+
+    content = FetchedContent(
+        title=job["input_target"].rsplit("/", 1)[-1] or "Rescued source",
+        full_text=text,
+        cues=cues,
+        author="",
+        source_type=job["source_type"],
+        locator_type="section",
+    ).finalise()
+
+    def finish(status: str, *, message: str = "", claims: int = 0) -> dict[str, Any]:
+        control_db.set_job_status(
+            ctx.control, job_id, status, error_message=message, claims_extracted=claims
+        )
+        control_db.audit(
+            ctx.control,
+            user_id=ctx.user_id,
+            action="rescue_job",
+            status=status,
+            surface=ctx.surface,
+            target_id=job_id,
+            detail={"claims": claims, "message": message},
+        )
+        return {"job_id": job_id, "status": status, "claims": claims, "message": message}
+
+    outcome = _ingest_content(dict(job), content, cfg=ctx.cfg, finish=finish)
+    if outcome["status"] != "ready":
+        return _fail("rescue_job", "rescue_failed", outcome["message"])
+    return OpResult(
+        ok=True,
+        action="rescue_job",
+        data={**outcome, "rescued": True, "library_counts": tenant_db.counts(ctx.tenant)},
+    )
+
+
+def op_trash_item(ctx: Context, item_type: ItemType, item_id: str) -> OpResult:
+    """Move a source to Trash — recoverable for 30 days, still not deleted."""
+    if item_type != "source":
+        # Claims and skills ride their source; Trash is a source-level concept.
+        return op_archive_item(ctx, item_type, item_id)
+    source = tenant_db.get_source(ctx.tenant, item_id)
+    if source is None:
+        return _fail("trash_item", "not_found", f"No source has the id `{item_id}`.")
+    tenant_db.set_source_status(ctx.tenant, item_id, "trash")
+    ctx.audit("trash_item", "ok", target_id=item_id)
+    return OpResult(
+        ok=True,
+        action="trash_item",
+        data={
+            "id": item_id,
+            "label": source["title"],
+            "status": "trash",
+            "recoverable_days": 30,
+            "library_counts": tenant_db.counts(ctx.tenant),
+        },
+    )
+
+
+def op_list_trash(ctx: Context) -> OpResult:
+    rows = ctx.tenant.execute(
+        "SELECT id, title, source_type, created_at FROM sources WHERE status = 'trash' "
+        "ORDER BY created_at DESC LIMIT 100"
+    ).fetchall()
+    return OpResult(
+        ok=True,
+        action="list_trash",
+        data={"items": [dict(row) for row in rows], "recoverable_days": 30},
+    )
+
+
+def op_permanent_delete(ctx: Context, item_id: str) -> OpResult:
+    """Hard delete. Only reachable from the Web UI, only from Trash.
+
+    This is the single destructive path in the product, and an agent cannot
+    reach it: there is no MCP tool that calls this function.
+    """
+    source = tenant_db.get_source(ctx.tenant, item_id)
+    if source is None:
+        return _fail("permanent_delete", "not_found", f"No source has the id `{item_id}`.")
+    if source["status"] != "trash":
+        return _fail(
+            "permanent_delete",
+            "not_in_trash",
+            "Only items in Trash can be permanently deleted. Move it to Trash first.",
+        )
+    claims = len(tenant_db.claims_for_source(ctx.tenant, item_id, active_only=False))
+    ctx.tenant.execute("DELETE FROM sources WHERE id = ?", (item_id,))
+    ctx.audit("permanent_delete", "ok", target_id=item_id, detail={"claims": claims})
+    return OpResult(
+        ok=True,
+        action="permanent_delete",
+        data={
+            "id": item_id,
+            "label": source["title"],
+            "deleted_claims": claims,
+            "library_counts": tenant_db.counts(ctx.tenant),
+        },
+    )
+
+
+def op_revert_skill(ctx: Context, skill_id: str, version: int) -> OpResult:
+    """Restore a snapshotted skill version — the Omni-Bar's `Revert to vN`."""
+    skill = tenant_db.get_skill(ctx.tenant, skill_id) or tenant_db.get_skill_by_slug(
+        ctx.tenant, skill_id
+    )
+    if skill is None:
+        return _fail("revert_skill", "not_found", f"No skill has the id `{skill_id}`.")
+    row = ctx.tenant.execute(
+        "SELECT snapshot_json FROM skill_versions WHERE skill_id = ? AND version = ?",
+        (skill["id"], int(version)),
+    ).fetchone()
+    if row is None:
+        return _fail(
+            "revert_skill", "no_such_version", f"`{skill['slug']}` has no version {version}."
+        )
+
+    snapshot = json.loads(row["snapshot_json"])
+    restored = tenant_db.upsert_skill(
+        ctx.tenant,
+        slug=snapshot["slug"],
+        name=snapshot["name"],
+        description=snapshot["description"],
+        trigger_when=snapshot["trigger_when"],
+        execution_steps=json.loads(snapshot.get("execution_steps_json") or "[]"),
+        guardrails=snapshot.get("guardrails", ""),
+        output_template=snapshot.get("output_template", ""),
+        linked_claim_ids=json.loads(snapshot.get("linked_claim_ids") or "[]"),
+        origin_type=snapshot.get("origin_type", "distilled"),
+    )
+    ctx.audit("revert_skill", "ok", target_id=restored["id"], detail={"to_version": version})
+    return OpResult(
+        ok=True,
+        action="revert_skill",
+        data={"skill": restored, "reverted_to": int(version)},
+    )
+
+
+def op_update_claim(
+    ctx: Context,
+    claim_id: str,
+    *,
+    claim: str | None = None,
+    when_it_applies: str | None = None,
+    when_it_fails: str | None = None,
+    metrics_and_quotes: str | None = None,
+    domain_tags: Sequence[str] | None = None,
+) -> OpResult:
+    """Inline click-to-edit from the Inner Doll.
+
+    The `anchor_quote` and its locator are deliberately **not** editable: they
+    are the grounded evidence, and letting the UI rewrite them would break the
+    one guarantee the library makes.
+    """
+    record = tenant_db.get_claim(ctx.tenant, claim_id)
+    if record is None:
+        return _fail("update_claim", "not_found", f"No claim has the id `{claim_id}`.")
+
+    fields: dict[str, Any] = {}
+    if claim is not None and clean_text(claim):
+        fields["claim"] = clean_text(claim)[:600]
+    if when_it_applies is not None:
+        fields["when_it_applies"] = clean_text(when_it_applies)[:300]
+    if when_it_fails is not None:
+        fields["when_it_fails"] = clean_text(when_it_fails)[:300]
+    if metrics_and_quotes is not None:
+        fields["metrics_and_quotes"] = clean_text(metrics_and_quotes)[:400]
+    if domain_tags is not None:
+        fields["domain_tags"] = json.dumps(
+            sorted({clean_text(t).lower() for t in domain_tags if clean_text(t)}),
+            ensure_ascii=False,
+        )
+    if not fields:
+        return _fail("update_claim", "nothing_to_update", "No editable field was provided.")
+
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    ctx.tenant.execute(
+        f"UPDATE epistemic_claims SET {assignments} WHERE id = ?",
+        (*fields.values(), claim_id),
+    )
+    updated = tenant_db.get_claim(ctx.tenant, claim_id)
+    # The claim text feeds the vector lane, so the embedding has to follow it.
+    tenant_db.set_claim_embedding(
+        ctx.tenant,
+        claim_id,
+        ctx.prov.embedder.embed([_claim_embedding_text(updated)])[0],
+        cfg=ctx.cfg,
+    )
+    ctx.audit("update_claim", "ok", target_id=claim_id, detail={"fields": sorted(fields)})
+    return OpResult(ok=True, action="update_claim", data={"claim": updated})
+
+
+def op_profile(ctx: Context) -> OpResult:
+    """Everything the Profile modal's five blocks need, in one call."""
+    user = control_db.get_user(ctx.control, ctx.user_id) or {}
+    sessions = []
+    for record in control_db.list_sessions(ctx.control, ctx.user_id):
+        if record["revoked"]:
+            continue
+        expires = control_db.parse_iso(record["refresh_expires_at"])
+        remaining = (expires - control_db.now_utc()).days if expires else 0
+        sessions.append(
+            {
+                "session_id": record["session_id"],
+                "client_name": record["client_name"],
+                "created_at": record["created_at"],
+                "expires_in_days": max(0, remaining),
+            }
+        )
+    return OpResult(
+        ok=True,
+        action="profile",
+        data={
+            "email": user.get("email", ""),
+            "about_you_context": user.get("about_you_context", ""),
+            "theme_mode": user.get("theme_mode", "warm_sunset"),
+            "quotas": {
+                "media_minutes_used": user.get("media_minutes_used", 0),
+                "media_minutes_cap": ctx.cfg.quota_media_minutes,
+                "files_used": user.get("files_used", 0),
+                "files_cap": ctx.cfg.quota_files,
+            },
+            "sessions": sessions,
+            "mcp_url": ctx.cfg.audience,
+            "library_counts": tenant_db.counts(ctx.tenant),
+        },
+    )
+
+
+def op_update_profile(
+    ctx: Context, *, about_you_context: str | None = None, theme_mode: str | None = None
+) -> OpResult:
+    try:
+        control_db.update_profile(
+            ctx.control,
+            ctx.user_id,
+            about_you_context=None if about_you_context is None else clean_text(about_you_context),
+            theme_mode=theme_mode,
+        )
+    except ValueError as exc:
+        return _fail("update_profile", "invalid_value", str(exc))
+    ctx.audit("update_profile", "ok")
+    return op_profile(ctx)
+
+
+def op_export(ctx: Context, fmt: str = "json") -> OpResult:
+    """One-click library export. `json` round-trips; `markdown` is for reading."""
+    sources = [
+        dict(row)
+        for row in ctx.tenant.execute(
+            "SELECT * FROM sources WHERE status != 'trash' ORDER BY created_at"
+        ).fetchall()
+    ]
+    claims = [
+        tenant_db.hydrate_claim(row)
+        for row in ctx.tenant.execute(
+            "SELECT * FROM epistemic_claims ORDER BY source_id, rowid"
+        ).fetchall()
+    ]
+    skills = [
+        tenant_db.hydrate_skill(row)
+        for row in ctx.tenant.execute("SELECT * FROM skills ORDER BY slug").fetchall()
+    ]
+    tensions = [
+        dict(row) for row in ctx.tenant.execute("SELECT * FROM tension_links").fetchall()
+    ]
+    ctx.audit("export", "ok", detail={"format": fmt, "claims": len(claims)})
+
+    if fmt == "markdown":
+        return OpResult(
+            ok=True,
+            action="export",
+            data={
+                "format": "markdown",
+                "filename": "brain-library.md",
+                "content": _export_markdown(sources, claims, skills, tensions),
+            },
+        )
+    return OpResult(
+        ok=True,
+        action="export",
+        data={
+            "format": "json",
+            "filename": "brain-library.json",
+            "content": json.dumps(
+                {
+                    "exported_at": control_db.iso(control_db.now_utc()),
+                    "schema_version": 1,
+                    "sources": sources,
+                    "claims": claims,
+                    "skills": skills,
+                    "tension_links": tensions,
+                },
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            ),
+        },
+    )
+
+
+def _export_markdown(sources, claims, skills, tensions) -> str:
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for claim in claims:
+        by_source.setdefault(claim["source_id"], []).append(claim)
+
+    lines = ["# brain library export", ""]
+    if skills:
+        lines += ["## Skills", ""]
+        for skill in skills:
+            lines.append(f"### {skill['name']} (`{skill['slug']}` · v{skill['version']})")
+            lines.append(f"**Trigger:** {skill['trigger_when']}")
+            for index, step in enumerate(skill["execution_steps"], start=1):
+                lines.append(f"{index}. {step}")
+            if skill["guardrails"]:
+                lines.append(f"**Guardrails:** {skill['guardrails']}")
+            lines.append("")
+    lines += ["## Library", ""]
+    for source in sources:
+        lines.append(f"### {source['title']}")
+        if source["canonical_url"]:
+            lines.append(f"<{source['canonical_url']}>")
+        lines.append("")
+        for claim in by_source.get(source["id"], []):
+            lines.append(f"- **{claim['claim']}**")
+            lines.append(f"  - Works when: {claim['when_it_applies']}")
+            if claim["when_it_fails"]:
+                lines.append(f"  - Breaks when: {claim['when_it_fails']}")
+            lines.append(f'  - > "{claim["anchor_quote"]}"')
+            lines.append(
+                f"  - {claim['locator_type']}: {claim['locator_value']} · `{claim['id']}`"
+            )
+        lines.append("")
+    if tensions:
+        lines += ["## Disagreements", ""]
+        for tension in tensions:
+            lines.append(
+                f"- `{tension['claim_a_id']}` {tension['link_type']} "
+                f"`{tension['claim_b_id']}` — {tension['divergence_summary']}"
+            )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# first-run demo data
+# ---------------------------------------------------------------------------
+DEMO_SOURCE_VIDEO = "src_demo_video"
+DEMO_SOURCE_REPORT = "src_demo_report"
+DEMO_SKILL_SLUG = "demo-cold-email-sprint"
+
+
+def op_seed_demo(ctx: Context) -> OpResult:
+    """Seed one skill and two genuinely contradicting claims.
+
+    First-run onboarding (Checkpoint B, Rule 4c). The rows are ordinary rows —
+    real ids, real embeddings, a real `tension_link` — so clicking into one
+    exercises exactly the same code path as a real claim, and clearing the demo
+    is an ordinary archive rather than a special case.
+    """
+    if tenant_db.get_skill_by_slug(ctx.tenant, DEMO_SKILL_SLUG):
+        return OpResult(ok=True, action="seed_demo", data={"already_seeded": True})
+
+    video = tenant_db.upsert_source(
+        ctx.tenant,
+        source_id=DEMO_SOURCE_VIDEO,
+        title="Outbound Masterclass: the morning block (demo)",
+        source_type="youtube",
+        canonical_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        author="Jane Expert",
+        duration_sec=1860,
+    )
+    report = tenant_db.upsert_source(
+        ctx.tenant,
+        source_id=DEMO_SOURCE_REPORT,
+        title="Enterprise Outbound Benchmark 2026 (demo)",
+        source_type="pdf",
+        canonical_url="https://example.com/report.pdf",
+        author="Acme Research",
+    )
+
+    batching = tenant_db.insert_claim(
+        ctx.tenant,
+        source_id=video["id"],
+        claim="Batch cold email into one morning block",
+        speaker="Jane Expert",
+        evidence_basis="case_study",
+        domain_tags=["sales", "outbound", "demo"],
+        when_it_applies="Small outbound teams without an SDR pod",
+        when_it_fails="Past 500 sends a day, when inbox placement collapses",
+        metrics_and_quotes="Reply rate up 34% the quarter they switched.",
+        anchor_quote=(
+            "we batch every single cold email into one block before ten in the morning, "
+            "and our reply rate went up 34%"
+        ),
+        locator_type="timestamp",
+        locator_value="1420",
+        salience=5,
+        cfg=ctx.cfg,
+    )
+    continuous = tenant_db.insert_claim(
+        ctx.tenant,
+        source_id=report["id"],
+        claim="Send cold email continuously through the day, never batched",
+        speaker="Acme Research",
+        evidence_basis="data",
+        domain_tags=["sales", "outbound", "demo"],
+        when_it_applies="Teams sending more than 500 emails a day",
+        when_it_fails="Under 200 sends a day, where timing makes no measurable difference",
+        metrics_and_quotes="48M sends across 310 teams; 18% better reply rate.",
+        anchor_quote=(
+            "continuous sending beat batched sending on reply rate in every cohort above "
+            "500 emails per day"
+        ),
+        locator_type="page",
+        locator_value="14",
+        salience=4,
+        cfg=ctx.cfg,
+    )
+    for record in (batching, continuous):
+        tenant_db.set_claim_embedding(
+            ctx.tenant,
+            record["id"],
+            ctx.prov.embedder.embed([_claim_embedding_text(record)])[0],
+            cfg=ctx.cfg,
+        )
+    tenant_db.add_tension_link(
+        ctx.tenant,
+        claim_a_id=batching["id"],
+        claim_b_id=continuous["id"],
+        link_type="contradicts",
+        divergence_summary=(
+            "Jane Expert batches; Acme Research's data says continuous wins above "
+            "500 sends a day. The split is daily send volume."
+        ),
+    )
+
+    skill = tenant_db.upsert_skill(
+        ctx.tenant,
+        slug=DEMO_SKILL_SLUG,
+        name="Cold Email Sprint (demo)",
+        description="Run a one-week cold email sprint.",
+        trigger_when="Starting an outbound push",
+        execution_steps=[
+            "Build the list the night before",
+            "Write the whole sequence in one sitting",
+            "Send the batch before 10am",
+        ],
+        guardrails="Never send on a Friday. Stop batching past 500 sends a day.",
+        linked_claim_ids=[batching["id"], continuous["id"]],
+        origin_type="distilled",
+    )
+    text = " ".join(
+        [skill["name"], skill["description"], skill["trigger_when"], *skill["execution_steps"]]
+    )
+    tenant_db.set_skill_embedding(
+        ctx.tenant, skill["id"], ctx.prov.embedder.embed([text])[0], cfg=ctx.cfg
+    )
+    ctx.audit("seed_demo", "ok", detail={"claims": 2, "skills": 1})
+    return OpResult(
+        ok=True,
+        action="seed_demo",
+        data={
+            "already_seeded": False,
+            "skill_id": skill["id"],
+            "claim_ids": [batching["id"], continuous["id"]],
+            "library_counts": tenant_db.counts(ctx.tenant),
+        },
+    )
+
+
+def op_clear_demo(ctx: Context) -> OpResult:
+    """Clear the demo rows the ordinary way — a source archive, nothing special."""
+    cleared = 0
+    for source_id in (DEMO_SOURCE_VIDEO, DEMO_SOURCE_REPORT):
+        if tenant_db.get_source(ctx.tenant, source_id):
+            tenant_db.set_source_status(ctx.tenant, source_id, "trash")
+            cleared += 1
+    skill = tenant_db.get_skill_by_slug(ctx.tenant, DEMO_SKILL_SLUG)
+    if skill:
+        tenant_db.set_skill_status(ctx.tenant, skill["id"], "archived")
+        cleared += 1
+    ctx.audit("clear_demo", "ok", detail={"cleared": cleared})
+    return OpResult(
+        ok=True,
+        action="clear_demo",
+        data={"cleared": cleared, "library_counts": tenant_db.counts(ctx.tenant)},
+    )
+
+
+def op_list_cards(ctx: Context, view: str = "everything", limit: int = 60) -> OpResult:
+    """The resting grid: newest-first rows for the sidebar's four views."""
+    data: dict[str, Any] = {"view": view, "claims": [], "skills": []}
+
+    if view in ("everything", "skills", "archived"):
+        status = "archived" if view == "archived" else "active"
+        rows = ctx.tenant.execute(
+            "SELECT * FROM skills WHERE status = ? ORDER BY updated_at DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+        data["skills"] = [tenant_db.hydrate_skill(row) for row in rows]
+
+    if view in ("everything", "library", "archived"):
+        status = "archived" if view == "archived" else "active"
+        rows = ctx.tenant.execute(
+            """
+            SELECT c.*, s.title AS source_title, s.canonical_url AS source_url,
+                   s.source_type AS source_type, s.author AS source_author
+            FROM epistemic_claims c JOIN sources s ON s.id = c.source_id
+            WHERE c.status = ? AND s.status != 'trash'
+            ORDER BY c.salience DESC, c.rowid DESC LIMIT ?
+            """,
+            (status, limit),
+        ).fetchall()
+        claims = [tenant_db.hydrate_claim(row) for row in rows]
+        tension_map = tenant_db.tensions_for_claims(ctx.tenant, [c["id"] for c in claims])
+        for claim in claims:
+            claim["deep_link"] = deep_link(
+                claim.get("source_url", ""), claim["locator_type"], claim["locator_value"]
+            )
+            claim["tensions"] = [
+                {
+                    **tension,
+                    "other_deep_link": deep_link(
+                        tension["other_source_url"],
+                        tension["other_locator_type"],
+                        tension["other_locator_value"],
+                    ),
+                }
+                for tension in tension_map.get(claim["id"], [])
+            ]
+        data["claims"] = claims
+
+    data["library_counts"] = tenant_db.counts(ctx.tenant)
+    data["active_jobs"] = control_db.list_jobs(ctx.control, ctx.user_id, limit=10)
+    return OpResult(ok=True, action="list_cards", data=data)

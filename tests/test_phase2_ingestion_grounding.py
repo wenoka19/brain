@@ -1157,14 +1157,35 @@ class TestEngineArchive:
         assert E.op_archive_item(ctx, "database", "x").error_reason == "bad_item_type"  # type: ignore[arg-type]
         assert E.op_archive_item(ctx, "claim", "clm_nope").error_reason == "not_found"
 
-    def test_nothing_in_the_engine_hard_deletes(self):
-        """The MCP surface must expose no destructive operation at all."""
+    def test_permanent_deletion_is_reachable_only_from_trash(self, ctx):
+        """Hard delete exists for the Web UI, but it is gated on Trash.
+
+        The invariant that matters is not that the engine contains no DELETE —
+        the founder's Profile modal needs one — but that nothing can reach it
+        except a human, from Trash. The MCP-surface half of this is asserted in
+        `tests/test_phase3_mcp_and_auth.py`.
+        """
+        E.op_ingest_source(ctx, YOUTUBE_URL)
+        E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
+        source_id = control_db.list_jobs(ctx.control, ctx.user_id)[0]["source_id"]
+
+        refused = E.op_permanent_delete(ctx, source_id)
+        assert not refused.ok and refused.error_reason == "not_in_trash"
+        assert tenant_db.get_source(ctx.tenant, source_id) is not None
+
+        E.op_trash_item(ctx, "source", source_id)
+        deleted = E.op_permanent_delete(ctx, source_id)
+        assert deleted.ok and deleted.data["deleted_claims"] >= 1
+        assert tenant_db.get_source(ctx.tenant, source_id) is None
+        assert tenant_db.counts(ctx.tenant)["claims"] == 0
+
+    def test_archiving_is_the_only_destructive_verb_an_agent_can_use(self):
+        """No `op_*` an MCP tool calls may hard-delete."""
         import inspect
 
-        source = inspect.getsource(E)
-        for forbidden in ("DELETE FROM epistemic_claims", "DELETE FROM skills", "DELETE FROM sources"):
-            assert forbidden not in source
-        assert not [name for name in dir(E) if name.startswith("op_") and "delete" in name]
+        for name in ("op_archive_item", "op_search", "op_fetch", "op_save_skill"):
+            body = inspect.getsource(getattr(E, name))
+            assert "DELETE FROM" not in body, name
 
 
 class TestEngineContext:

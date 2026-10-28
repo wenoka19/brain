@@ -1,8 +1,11 @@
-"""FastAPI/Starlette host: OAuth endpoints + the `/mcp` Streamable HTTP server.
+"""FastAPI/Starlette host: the web control plane, the OAuth endpoints and the
+`/mcp` Streamable HTTP server, behind one strict set of security headers.
 
-Phase 3 scope. The web control plane (`app/static/index.html`, `app/omnibar.py`)
-mounts here in Phases 4 & 5, once Co-Design Checkpoint B is settled — nothing
-about its layout is decided in this file.
+Route ownership, outermost first:
+
+* `/` `/app.css` `/app.js` `/preview` `/api/*` — the Web Control Plane
+* `/authorize` `/token` `/register` `/revoke` `/.well-known/*` — OAuth 2.1
+* everything under `/mcp` — the MCP Streamable HTTP transport
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from app import auth
+from app import auth, webapi
 from app.config import Settings, settings
 from app.db import control as control_db
 from app.db import tenant as tenant_db
@@ -115,7 +118,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
         lifespan=lifespan,
-        routes=list(auth.ROUTES),
+        routes=list(auth.ROUTES) + list(webapi.ROUTES),
     )
     app.add_middleware(SecurityHeadersMiddleware)
 

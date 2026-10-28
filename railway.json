@@ -1,0 +1,34 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
+  "deploy": {
+    "startCommand": "/usr/local/bin/entrypoint.sh",
+    "healthcheckPath": "/healthz",
+    "healthcheckTimeout": 30,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 5,
+    "numReplicas": 1
+  },
+  "environments": {
+    "production": {
+      "variables": {
+        "BRAIN_ENV": "prod",
+        "BRAIN_DATA_DIR": "/data",
+        "BRAIN_ROLE": "web"
+      }
+    }
+  },
+  "_notes": {
+    "volume": "Mount a Railway volume at /data — SQLite needs a real filesystem, and a single replica owns it.",
+    "required_secrets": [
+      "BRAIN_JWT_SECRET",
+      "BRAIN_PUBLIC_URL",
+      "R2_ACCESS_KEY_ID",
+      "R2_SECRET_ACCESS_KEY",
+      "R2_ENDPOINT",
+      "R2_BUCKET",
+      "LITESTREAM_REPLICA_URL"
+    ],
+    "replicas": "Keep numReplicas at 1. Two web replicas on one volume would each open the same SQLite files."
+  }
+}

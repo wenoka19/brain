@@ -1,0 +1,48 @@
+# fly.io deployment. One machine owns the volume, because SQLite is a
+# single-writer database and Litestream replicates it from that one place.
+app = "brain"
+primary_region = "iad"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  BRAIN_ENV = "prod"
+  BRAIN_DATA_DIR = "/data"
+  BRAIN_ROLE = "web"
+  PORT = "8080"
+
+[[mounts]]
+  source = "brain_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # One machine, always: a second would open the same SQLite files.
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 60
+    hard_limit = 120
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Secrets to set before the first deploy:
+#   fly secrets set BRAIN_JWT_SECRET=... BRAIN_PUBLIC_URL=https://brain.fly.dev \
+#     R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_ENDPOINT=... R2_BUCKET=... \
+#     LITESTREAM_REPLICA_URL=s3://bucket/brain

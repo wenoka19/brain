@@ -1,0 +1,103 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      BRAIN_ENV: test
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Doctor
+        run: python -m app.cli doctor
+
+      - name: Tests
+        run: python -m pytest -v
+
+      - name: Selftest
+        run: python -m app.cli selftest
+
+      - name: Agent envelopes still render
+        run: python -m app.cli preview-ax > /dev/null
+
+  browser:
+    # The design harness is a deliverable, so its behaviour is tested too.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BRAIN_ENV: test
+      BRAIN_JWT_SECRET: ci-secret-key-long-enough-for-hs256
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          npm install --no-save playwright@1.49.1
+          npx playwright install --with-deps chromium
+      - name: Smoke the control plane
+        run: python -m pytest tests/test_phase4_omnibar_and_ui.py -v
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: brain:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The image boots and answers /healthz
+        run: |
+          docker run -d --name brain-ci -p 8080:8080 \
+            -e BRAIN_ENV=prod \
+            -e BRAIN_JWT_SECRET=ci-secret-key-long-enough-for-hs256 \
+            -e BRAIN_PUBLIC_URL=http://127.0.0.1:8080 \
+            brain:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then echo; break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/healthz | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8080/.well-known/oauth-protected-resource | grep -q '"resource"'
+          docker logs brain-ci
+          docker rm -f brain-ci

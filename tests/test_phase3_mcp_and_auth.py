@@ -1492,3 +1492,33 @@ class TestPrompts:
         assert "ask me before saving" in text
         assert "without its conditions is useless" in text
         M.reset_server()
+
+
+class TestDeletionIsNotReachableOverMCP:
+    """The Web UI has a permanent delete; the agent surface must not."""
+
+    def test_no_tool_reaches_permanent_deletion(self, cfg):
+        import inspect
+
+        M.reset_server()
+        names = asyncio.run(M.tool_names(cfg))
+        source = inspect.getsource(M)
+        for destructive in ("op_permanent_delete", "op_trash_item", "op_clear_demo"):
+            assert destructive not in source, destructive
+        assert not any("delete" in name or "trash" in name for name in names)
+        M.reset_server()
+
+    def test_the_only_status_an_agent_can_set_is_archived(self, cfg, user):
+        """`archive_item` cannot be talked into reaching Trash."""
+        M.reset_server()
+        ctx = E.build_context(user["user_id"])
+        E.op_seed_demo(ctx)
+        source_id = E.DEMO_SOURCE_VIDEO
+        rendered = call_tool(
+            "archive_item", {"item_type": "source", "id": source_id}, user_id=user["user_id"]
+        )
+        assert "Archived" in rendered
+        from app.db import tenant as tenant_db
+
+        assert tenant_db.get_source(ctx.tenant, source_id)["status"] == "archived"
+        M.reset_server()

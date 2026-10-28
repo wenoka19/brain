@@ -9,8 +9,8 @@ checkpoint, per `CLAUDE.md` §0 Rule 2.
 | 2 | Gatekeeper, grounded extraction, contradiction linker | ✅ complete |
 | **Checkpoint A** | In-chat Agentic UX (AX), tone & tool surface | ✅ locked by founder |
 | 3 | MCP server + OAuth 2.1 / 30-day refresh | ✅ complete |
-| **Checkpoint B** | Web app, Omni-Bar, theme feel | 🛑 **options presented — awaiting founder** |
-| 4–5 | Web app, CLI, CI/CD, production packaging | ⬜ blocked on Checkpoint B |
+| **Checkpoint B** | Web app, Omni-Bar, theme feel | ✅ locked by founder |
+| 4–5 | Web app, CLI, CI/CD, production packaging | ✅ complete |
 
 ---
 
@@ -215,3 +215,126 @@ full OAuth 2.1 → `/mcp` → `tools/call` round trip over HTTP.
 > The consent page at `/authorize` is deliberately unstyled. It is the minimum
 > functional surface for Phase 3; how it should *look* is a Checkpoint B
 > question and nothing about it is decided yet.
+
+
+---
+
+## Checkpoint B — locked
+
+The founder spliced two of the three presented architectures — **`B1` linear
+canvas + `B3` inspector pane** — and corrected four details: the Outer Doll
+headline is the distilled `claim` rather than the raw quote, a
+`blocked_by_platform` card carries an inline rescue slot, the icon dictionary
+grows to 13 with `copy`, and the Profile modal has five named blocks. Full
+specification in `DESIGN_DECISIONS.md`.
+
+## Phase 4 — the Web Control Plane (complete)
+
+**Built**
+
+- `app/omnibar.py` — the hybrid router. Typing only ever filters (no request at
+  all); a URL or dropped file ingests; `Enter` produces a **plan**, never an
+  effect. Commands resolve by deterministic grammar — archive, restore, trash,
+  rename, `edit step N of X to Y`, remember — with targets resolved either by
+  recency ("yesterday's video") or by `rapidfuzz` against the user's own skill
+  names, source titles and claim text. An LLM is consulted only when no pattern
+  matches, and even then it can only return a plan. Execution returns a receipt
+  carrying its own undo, which for a skill edit is `Revert to vN` against the
+  `skill_versions` snapshot.
+- `app/webapi.py` — `/api/*` and the `/preview` route. Browser sessions are a
+  signed `SameSite=Strict` cookie, deliberately separate from MCP tokens, and
+  every mutation also needs a double-submit CSRF header.
+- `app/static/index.html` + `app.css` + `app.js` — the B1+B3 canvas, the
+  13-icon inline sprite, three themes on semantic tokens, the Russian-doll
+  cards, the inspector pane, the five-block Profile modal, the three non-happy
+  states, and the `/preview` harness with its layout/edge-state switcher and
+  live theme & WCAG tuner.
+- New engine operations for the web surface only: `op_rescue_job`,
+  `op_trash_item`, `op_list_trash`, `op_permanent_delete`, `op_revert_skill`,
+  `op_update_claim`, `op_profile`, `op_update_profile`, `op_export`,
+  `op_seed_demo`, `op_clear_demo`, `op_list_cards`.
+
+**Design notes**
+
+- *Hard deletion exists, and an agent cannot reach it.* `op_permanent_delete`
+  refuses anything not already in Trash, lives behind `POST /api/delete/{id}`,
+  and is not imported by `app/mcp_server.py` — asserted by test.
+- *The grounded evidence is not editable from the UI.* Inline editing covers
+  `claim`, the two conditions, metrics and tags; `anchor_quote` and its locator
+  are ignored if a client sends them, because rewriting the evidence would break
+  the library's one guarantee.
+- *Strict CSP forced a file split.* `script-src 'self'` admits no inline
+  `<script>`, so the page is three files instead of one. A test asserts there is
+  no inline script and no `on*=` attribute anywhere in the HTML.
+- *Playwright found two bugs a unit test would not have.* The fixed bottom
+  tuner covered the sidebar's Profile button, and the `⚡ Disagreement` badge —
+  which sits inside the card-head button — toggled the accordion instead of
+  opening the inspector, because the delegated handler tested `data-expand`
+  first.
+
+## Phase 5 — CLI, worker, CI/CD, packaging (complete)
+
+- `app/worker.py` — standalone async worker. Jobs are claimed under
+  `BEGIN IMMEDIATE` with a lease, so replicas never collide; a worker killed
+  mid-job leaves a lease that expires and is retried, bounded by `attempts`; a
+  crashing job fails cleanly and refunds its reserved quota.
+- `app/cli.py` — `doctor` (host capability report, and it fails in prod without
+  `BRAIN_JWT_SECRET`), `selftest` (22 end-to-end checks in a throwaway
+  directory), `preview-ax` (prints every Checkpoint A envelope against a real
+  seeded library), `preview-ui` (serves the Checkpoint B harness), plus `serve`
+  and `worker`.
+- `Dockerfile` (multi-stage, non-root, healthcheck, Litestream included),
+  `entrypoint.sh` (restores the replica *before* serving, supports
+  `BRAIN_ROLE=web|worker`, `exec`s so signals arrive), `litestream.yml` (30s
+  sync, 30-day retention matching the Trash window, tenant databases matched by
+  pattern so a new user replicates without a config change), `railway.json` and
+  `fly.toml` (both pinned to a single writer, because SQLite is
+  single-writer).
+- `.github/workflows/ci.yml` — pytest + doctor + selftest + preview-ax on
+  Python 3.11/3.12/3.13, a browser job, and a Docker job that boots the image
+  and curls `/healthz`.
+
+> `tests/test_phase5_cli_and_packaging.py` is a fifth test file, beyond the four
+> `CLAUDE.md` §3 lists. The packaging is a deliverable: a Dockerfile that stops
+> copying `app/static`, or an entrypoint that stops restoring before it serves,
+> is exactly the kind of failure no unit test catches.
+
+---
+
+## Final status
+
+| | |
+|---|---|
+| `BRAIN_ENV=test pytest` | **433 passed** |
+| `python -m app.cli selftest` | **22/22 checks, green** |
+| `python -m app.cli doctor` | 0 failures, 0 warnings |
+| `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
+
+### Environment variables
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `BRAIN_ENV` | — | `test` (deterministic, offline) or `prod`. Defaults to `test`. |
+| `BRAIN_DATA_DIR` | — | Database location. `/data` in prod. |
+| `BRAIN_JWT_SECRET` | **prod** | HS256 signing key. Signing refuses to start without it. |
+| `BRAIN_PUBLIC_URL` | prod | OAuth issuer and the `/mcp` transport Host allow-list. Without it, `/mcp` answers 421. |
+| `BRAIN_ALLOWED_HOSTS` | — | Extra comma-separated hostnames. |
+| `BRAIN_OWNER_EMAIL` | — | Single-user shortcut past the consent form. |
+| `BRAIN_PREVIEW` | — | `1` enables `/preview` outside test mode. |
+| `BRAIN_ROLE` | — | `web` (default) or `worker`. |
+| `R2_*`, `LITESTREAM_REPLICA_URL` | prod | Replication to Cloudflare R2. |
+
+### Known limitations, stated plainly
+
+- **The extraction LLM is not wired.** `BRAIN_ENV=prod` uses the same
+  rule-based extractor as the tests, which means claim *typing*
+  (`when_it_applies`, link type) is approximate. The grounding guarantee is
+  unaffected — it is `rapidfuzz` arithmetic, not judgement.
+- **Embeddings are the `v1-hash` bag of words**, not a trained model. The
+  semantic lane works and the thresholds are calibrated to it; swapping in a
+  real model means recalibrating `search_similarity_floor` and
+  `link_similarity_floor`.
+- **Image ingestion needs a vision model** and raises `vision_unavailable` in
+  prod until one is configured.
+- **Web sign-in is email-only.** It establishes the tenant on a single-person
+  server; the real credentials live on the MCP side.
