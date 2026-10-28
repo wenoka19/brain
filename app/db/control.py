@@ -522,6 +522,17 @@ def list_jobs(
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def count_active_jobs(conn: sqlite3.Connection, user_id: str) -> int:
+    """Jobs that are queued or mid-pipeline — the Omni-Bar / receipt counter."""
+    placeholders = ",".join("?" * len(TERMINAL_STATUSES))
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM ingestion_jobs WHERE user_id = ? "
+        f"AND status NOT IN ({placeholders})",
+        (user_id, *TERMINAL_STATUSES),
+    ).fetchone()
+    return int(row[0])
+
+
 def set_job_status(
     conn: sqlite3.Connection,
     job_id: str,

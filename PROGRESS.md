@@ -160,6 +160,11 @@ step-level claim ids. Full specification in `DESIGN_DECISIONS.md`.
   passing the same gate: authenticate → rate-limit / loop-break → execute →
   render → audit. Tool descriptions are written for the host LLM ("does not
   block", "never in a loop", "not deletion", "never on your own judgement").
+  Six slash helpers are registered as prompts, all namespaced `brain.*`
+  (`brain.recall`, `brain.save-rule`, `brain.run-skill`, `brain.ingest`,
+  `brain.conflicts`, `brain.distil-skill`): clients flatten every connected
+  server's prompts into one picker, so a bare `/search` or `/recall` would
+  collide with Notion, GitHub and filesystem servers.
 - `app/main.py` — FastAPI host with strict CSP, `X-Frame-Options: DENY`, HSTS
   and the `/mcp` transport's DNS-rebinding allow-list.
 
@@ -187,15 +192,16 @@ step-level claim ids. Full specification in `DESIGN_DECISIONS.md`.
   the heuristic extractor was emitting the *failure* clause as `Works when`; and
   `get_ingest_status` was the one tool whose calls were not being audited.
 
-**Verified** — `tests/test_phase3_mcp_and_auth.py`. Full suite: **309 passed**.
+**Verified** — `tests/test_phase3_mcp_and_auth.py`. Full suite: **322 passed**.
 Covers the locked envelope shape line by line, the no-tables rule across all
 three renderers, fence-breakout containment, the token budget under a loaded
 library, the RFC 7636 appendix-B PKCE vector, open-redirect refusal, code
 replay, cross-audience token refusal, forged-signature refusal, signature-only
 (no session row) refusal, rotation that never extends the 30-day ceiling,
-instant revocation, every tool's schema and description, the loop breaker and
-rate limiter through the real tool gate, and a full OAuth 2.1 → `/mcp` →
-`tools/call` round trip over HTTP.
+instant revocation, every tool's schema and description, prompt namespacing and
+argument requirements, the active-queue pulse appearing only when something else
+is running, the loop breaker and rate limiter through the real tool gate, and a
+full OAuth 2.1 → `/mcp` → `tools/call` round trip over HTTP.
 
 ### Environment variables Phase 3 introduces
 

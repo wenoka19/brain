@@ -39,7 +39,8 @@ CONDITION_PLACEHOLDERS = ("working on", "not stated by the source", "not stated"
 #: Locked verbatim at Checkpoint A, Touchpoint 1.
 INGEST_HINT = (
     "Background job queued. Do not poll or wait. Acknowledge in one short clause "
-    "(under 10 words) and immediately continue the user's current task."
+    "(under 10 words) and immediately continue the user's current task. Call "
+    "get_ingest_status only if the user explicitly asks."
 )
 
 EVIDENCE_LABELS = {
@@ -247,8 +248,12 @@ def ingestion_reply(result: OpResult) -> str:
     label = _enqueue_label(data)
     note = (data.get("user_note") or "").strip()
     note_part = f" · note: \"{truncate_words(neutralize_fences(note), 14)}\"" if note else ""
+    # Active-queue pulse: shown only when something else is already running, so
+    # a single quiet ingestion stays a single quiet line.
+    in_flight = int(data.get("in_flight") or 0)
+    pulse = f" ({in_flight} in flight)" if in_flight > 1 else ""
     return (
-        f"⚡ **Queued** — {label}{note_part} · `{data['job_id']}`\n"
+        f"⚡ **Queued** — {label}{note_part} · `{data['job_id']}`{pulse}\n"
         f"{HINT} {INGEST_HINT}"
     )
 
@@ -323,12 +328,9 @@ def _disagreement_sections(claims: Sequence[dict[str, Any]]) -> tuple[list[str],
             counterpart = _counterpart_claim(tension)
             variable = deciding_variable(claim, counterpart)
             verb = LINK_VERBS.get(tension.get("link_type", ""), tension.get("link_type", ""))
-            heading = (
-                f"## ⚡ UNRESOLVED DISAGREEMENT (Deciding variable: {variable})"
-                if verb == "contradicts"
-                else f"## ⚡ BOUNDARY DISAGREEMENT — one side {verb} the other "
-                f"(Deciding variable: {variable})"
-            )
+            # One heading form for every link type, per Checkpoint A. The link
+            # type itself stays visible on the divergence line below.
+            heading = f"## ⚡ UNRESOLVED DISAGREEMENT — Splits on: {variable}"
             summary = neutralize_fences(tension.get("divergence_summary") or "")
             sections.append(
                 "\n\n".join(
@@ -337,7 +339,7 @@ def _disagreement_sections(claims: Sequence[dict[str, Any]]) -> tuple[list[str],
                         heading,
                         claim_block(claim),
                         claim_block(counterpart),
-                        f"**Why they diverge:** {summary}" if summary else "",
+                        f"**Why they diverge** ({verb}): {summary}" if summary else "",
                     )
                     if part
                 )
@@ -414,8 +416,9 @@ def fetch_envelope(result: OpResult) -> str:
             counterpart = _counterpart_claim(tension)
             verb = LINK_VERBS.get(tension.get("link_type", ""), "conflicts with")
             sections.append(
-                f"## ⚡ This claim {verb} another in your library "
-                f"(Deciding variable: {deciding_variable(claim, counterpart)})\n\n"
+                f"## ⚡ UNRESOLVED DISAGREEMENT — Splits on: "
+                f"{deciding_variable(claim, counterpart)}\n"
+                f"*This claim {verb} another in your library.*\n\n"
                 + claim_block(counterpart)
                 + (
                     f"\n\n**Why they diverge:** {neutralize_fences(tension['divergence_summary'])}"
@@ -504,9 +507,11 @@ def _saved_skill(data: dict[str, Any]) -> str:
     steps = skill.get("execution_steps") or []
     claim_ids = list(linked.keys()) or list(skill.get("linked_claim_ids") or [])
 
+    backing = len(claim_ids)
     lines = [
-        f"✅ **SAVED SKILL — {skill['name']}** · `{skill['slug']}` · v{skill.get('version', 1)} "
-        f"· {skill.get('origin_type', 'distilled')}",
+        f"✅ **SAVED SKILL — {skill['name']}** · `{skill['slug']}` "
+        f"· v{skill.get('version', 1)} · backed by {backing} claim"
+        f"{'s' if backing != 1 else ''}",
         f"**Trigger:** {skill.get('trigger_when', '')}",
     ]
     if skill.get("description"):

@@ -79,6 +79,27 @@ class TestIngestionReply:
         assert F.estimate_tokens(rendered) < 120
         assert len(rendered.splitlines()) == 2  # one receipt line, one hint line
 
+    def test_a_single_quiet_ingestion_shows_no_queue_pulse(self, ctx):
+        rendered = F.ingestion_reply(E.op_ingest_source(ctx, YOUTUBE_URL))
+        assert "in flight" not in rendered
+
+    def test_the_queue_pulse_appears_once_something_else_is_running(self, ctx):
+        E.op_ingest_source(ctx, YOUTUBE_URL)
+        second = F.ingestion_reply(E.op_ingest_source(ctx, REPORT_URL))
+        assert "(2 in flight)" in second
+        third = F.ingestion_reply(
+            E.op_ingest_source(ctx, "https://raw.githubusercontent.com/acme/playbooks/main/SKILL.md")
+        )
+        assert "(3 in flight)" in third
+        # ...and it drops back once the queue drains.
+        E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
+        after = F.ingestion_reply(E.op_ingest_source(ctx, "https://example.com/fresh-article"))
+        assert "in flight" not in after
+
+    def test_the_hint_defers_status_checks_to_the_user(self, ctx):
+        rendered = F.ingestion_reply(E.op_ingest_source(ctx, YOUTUBE_URL))
+        assert "Call get_ingest_status only if the user explicitly asks." in rendered
+
     def test_a_duplicate_says_so_without_queueing(self, library):
         rendered = F.ingestion_reply(E.op_ingest_source(library, YOUTUBE_URL))
         assert "Already in your library" in rendered
@@ -118,8 +139,7 @@ class TestClaimEnvelope:
 
     def test_conflicts_are_hoisted_above_matched_claims(self, library):
         rendered = F.search_envelope(E.op_search(library, "batch cold emails"))
-        assert "## ⚡ UNRESOLVED DISAGREEMENT" in rendered
-        assert "Deciding variable:" in rendered
+        assert "## ⚡ UNRESOLVED DISAGREEMENT — Splits on:" in rendered
         # A claim shown inside a disagreement is not repeated below, so MATCHED
         # CLAIMS can legitimately be absent — but never *above* the conflicts.
         if "## MATCHED CLAIMS" in rendered:
@@ -139,6 +159,7 @@ class TestClaimEnvelope:
     def test_the_deciding_variable_is_derived_from_the_boundary(self, library):
         rendered = F.search_envelope(E.op_search(library, "batch cold emails"))
         header = next(line for line in rendered.splitlines() if "UNRESOLVED DISAGREEMENT" in line)
+        assert header.startswith("## ⚡ UNRESOLVED DISAGREEMENT — Splits on: ")
         assert "500" in header  # the real threshold, lifted from the claims
 
     def test_the_deciding_variable_admits_when_it_is_unknown(self):
@@ -362,7 +383,7 @@ class TestClaimEnvelope:
         rendered = F.fetch_envelope(E.op_fetch(library, claim_id))
         assert f"`{claim_id}`" in rendered
         assert "Tags:" in rendered
-        assert "Deciding variable:" in rendered
+        assert "## ⚡ UNRESOLVED DISAGREEMENT — Splits on:" in rendered
 
     def test_fetch_of_a_source_lists_its_claims(self, library):
         source_id = control_db.list_jobs(library.control, library.user_id)[-1]["source_id"]
@@ -415,6 +436,27 @@ class TestSkillEnvelope:
             assert re.search(rf"^{index}\. .*\[{claim_id}\]$", rendered, re.M)
         assert "**Backed by:**" in rendered
         assert "call `fetch` on that step's bracketed claim id" in rendered
+
+    def test_a_saved_skill_header_summarises_its_evidence(self, library):
+        claim_ids = [c["id"] for c in E.op_search(library, "batch cold emails").data["claims"][:3]]
+        self._save(library, claim_ids)
+        rendered = F.skill_envelope(
+            E.op_get_or_synthesize_skill(library, "run a cold email outbound sprint")
+        )
+        first_line = rendered.splitlines()[0]
+        assert "v1" in first_line
+        assert f"backed by {len(claim_ids)} claims" in first_line
+
+    def test_a_skill_with_one_backing_claim_reads_singular(self, library):
+        claim_id = E.op_search(library, "batch cold emails").data["claims"][0]["id"]
+        E.op_save_skill(
+            library, "solo", "Solo", "d", "t", ["one step"], linked_claim_ids=[claim_id]
+        )
+        rendered = F.skill_envelope(
+            E.op_get_or_synthesize_skill(library, "anything", skill_slug="solo")
+        )
+        assert "backed by 1 claim" in rendered.splitlines()[0]
+        assert "backed by 1 claims" not in rendered
 
     def test_a_draft_reads_as_a_sketch_with_provenance(self, library):
         rendered = F.skill_envelope(
@@ -1352,3 +1394,101 @@ class TestLiveTransport:
             "/mcp", json={"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, headers=headers
         )
         assert response.status_code == 401
+
+
+# ===========================================================================
+# prompts (slash helpers)
+# ===========================================================================
+class TestPrompts:
+    def _prompts(self, cfg):
+        M.reset_server()
+        return {p.name: p for p in asyncio.run(M.server(cfg).list_prompts())}
+
+    def test_every_prompt_is_namespaced_so_it_cannot_collide(self, cfg):
+        """Clients flatten prompts from every connected server into one picker,
+        so a bare `/search` would collide with Notion, GitHub and friends."""
+        prompts = self._prompts(cfg)
+        assert prompts
+        for name in prompts:
+            assert name.startswith(f"{M.PROMPT_NAMESPACE}.")
+        # None of the names a neighbouring MCP server is likely to claim.
+        for generic in ("search", "recall", "ingest", "save", "fetch", "run", "create-page"):
+            assert generic not in prompts
+        M.reset_server()
+
+    def test_the_expected_slash_helpers_exist(self, cfg):
+        prompts = self._prompts(cfg)
+        assert set(prompts) == {
+            "brain.recall",
+            "brain.save-rule",
+            "brain.run-skill",
+            "brain.ingest",
+            "brain.conflicts",
+            "brain.distil-skill",
+        }
+        for prompt in prompts.values():
+            assert prompt.title.startswith("brain:")  # obvious origin in the picker
+            assert prompt.description
+        M.reset_server()
+
+    def test_prompt_arguments_are_declared_correctly(self, cfg):
+        prompts = self._prompts(cfg)
+        recall = {a.name: a.required for a in prompts["brain.recall"].arguments or []}
+        assert recall == {"question": True}
+        save = {a.name: a.required for a in prompts["brain.save-rule"].arguments or []}
+        assert save == {"rule": True, "when_it_applies": False, "when_it_fails": False}
+        conflicts = {a.name: a.required for a in prompts["brain.conflicts"].arguments or []}
+        assert conflicts == {"topic": False}
+        M.reset_server()
+
+    def test_recall_tells_the_model_not_to_average_a_disagreement(self, cfg):
+        M.reset_server()
+        result = asyncio.run(
+            M.server(cfg).get_prompt("brain.recall", {"question": "should I batch cold emails?"})
+        )
+        text = result.messages[0].content.text
+        assert "should I batch cold emails?" in text
+        assert "do not pick a winner for me" in text
+        assert "Works when" in text and "Breaks when" in text
+        assert "say so plainly" in text  # and own up to an empty library
+        M.reset_server()
+
+    def test_run_skill_distinguishes_a_contract_from_a_draft(self, cfg):
+        M.reset_server()
+        text = asyncio.run(
+            M.server(cfg).get_prompt("brain.run-skill", {"task": "outbound sprint"})
+        ).messages[0].content.text
+        assert "SAVED SKILL" in text and "DRAFT" in text
+        assert "do not improvise or reorder" in text.lower()
+        assert "wait for my yes" in text
+        M.reset_server()
+
+    def test_ingest_prompt_discourages_waiting(self, cfg):
+        M.reset_server()
+        text = asyncio.run(
+            M.server(cfg).get_prompt(
+                "brain.ingest", {"url": YOUTUBE_URL, "why": "for the outbound sprint"}
+            )
+        ).messages[0].content.text
+        assert YOUTUBE_URL in text
+        assert "for the outbound sprint" in text
+        assert "do not wait for it" in text
+        M.reset_server()
+
+    def test_optional_arguments_can_be_omitted(self, cfg):
+        M.reset_server()
+        server = M.server(cfg)
+        assert asyncio.run(server.get_prompt("brain.conflicts", {})).messages
+        assert asyncio.run(
+            server.get_prompt("brain.save-rule", {"rule": "never send on Fridays"})
+        ).messages[0].content.text.startswith("Remember this as my own rule")
+        M.reset_server()
+
+    def test_save_rule_insists_on_conditions(self, cfg):
+        M.reset_server()
+        text = asyncio.run(
+            M.server(cfg).get_prompt("brain.save-rule", {"rule": "never send on Fridays"})
+        ).messages[0].content.text
+        assert "ask me before saving" in text
+        assert "without its conditions is useless" in text
+        M.reset_server()

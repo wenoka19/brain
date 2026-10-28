@@ -351,7 +351,127 @@ def build_server(cfg: Settings | None = None) -> MCPServer:
             cfg=cfg,
         )
 
+    _register_prompts(server, cfg)
     return server
+
+
+# ===========================================================================
+# prompts (slash helpers)
+# ===========================================================================
+#: Every prompt name is `brain.*`. MCP clients flatten prompts from all
+#: connected servers into one slash-command list, so a bare `/search` or
+#: `/recall` would collide with the Notion, GitHub and filesystem servers a
+#: user is likely to have connected at the same time. The namespace makes the
+#: origin obvious in the picker and keeps the names collision-free.
+PROMPT_NAMESPACE = "brain"
+
+
+def _register_prompts(server: MCPServer, cfg: Settings) -> None:
+    @server.prompt(
+        name=f"{PROMPT_NAMESPACE}.recall",
+        title="brain: recall what I've saved",
+        description=(
+            "Answer a question strictly from the user's own brain library, with "
+            "attributions, and surface any expert disagreement instead of averaging it."
+        ),
+    )
+    def recall(question: str) -> str:
+        return (
+            f"Search my brain library for: {question}\n\n"
+            "Then answer using only what comes back, and:\n"
+            "- attribute every point to its speaker and source;\n"
+            "- quote the verbatim anchor text and include the locator link so I can "
+            "check it;\n"
+            "- if the library disagrees with itself, show me both sides with their "
+            "`Works when` / `Breaks when` conditions and tell me which variable "
+            "decides between them — do not pick a winner for me;\n"
+            "- if the library has nothing on this, say so plainly before adding "
+            "anything from your own knowledge."
+        )
+
+    @server.prompt(
+        name=f"{PROMPT_NAMESPACE}.save-rule",
+        title="brain: remember this as my rule",
+        description=(
+            "Record a rule the user states as their own, with the conditions that make "
+            "it usable later."
+        ),
+    )
+    def save_rule(rule: str, when_it_applies: str = "", when_it_fails: str = "") -> str:
+        parts = [f"Remember this as my own rule in brain: {rule}"]
+        if when_it_applies:
+            parts.append(f"It applies when: {when_it_applies}")
+        if when_it_fails:
+            parts.append(f"It does not apply when: {when_it_fails}")
+        parts.append(
+            "If I have not told you the conditions, ask me before saving — a rule "
+            "without its conditions is useless when it resurfaces. Tell me if it "
+            "contradicts anything already in my library."
+        )
+        return "\n".join(parts)
+
+    @server.prompt(
+        name=f"{PROMPT_NAMESPACE}.run-skill",
+        title="brain: run my saved workflow",
+        description=(
+            "Fetch the user's saved workflow for a task and execute it as written, or "
+            "present a synthesised draft for approval when none exists."
+        ),
+    )
+    def run_skill(task: str) -> str:
+        return (
+            f"Get my brain skill for this task and run it: {task}\n\n"
+            "If it comes back as a SAVED SKILL, follow the steps exactly as written, in "
+            "order, and respect the guardrails — do not improvise or reorder. If it "
+            "comes back as a DRAFT, show it to me with the disputed steps and gaps "
+            "flagged and wait for my yes before saving it."
+        )
+
+    @server.prompt(
+        name=f"{PROMPT_NAMESPACE}.ingest",
+        title="brain: save this source to my library",
+        description="Queue a link for background processing into the user's library.",
+    )
+    def ingest(url: str, why: str = "") -> str:
+        note = f' Note why I saved it: "{why}".' if why else ""
+        return (
+            f"Add this to my brain library: {url}{note}\n\n"
+            "Queue it and carry straight on — do not wait for it or check its status."
+        )
+
+    @server.prompt(
+        name=f"{PROMPT_NAMESPACE}.conflicts",
+        title="brain: where does my library disagree?",
+        description=(
+            "Surface the unresolved expert disagreements in the user's library on a topic "
+            "and name the variable that decides each one."
+        ),
+    )
+    def conflicts(topic: str = "") -> str:
+        subject = topic or "the topics I have saved most about"
+        return (
+            f"Search my brain library on {subject} and show me only where my sources "
+            "disagree with each other.\n\n"
+            "For each disagreement: both positions with their speakers, the verbatim "
+            "quotes, and the variable the split turns on. Then ask me where my own "
+            "situation sits on that variable, so I can decide which side applies to me."
+        )
+
+    @server.prompt(
+        name=f"{PROMPT_NAMESPACE}.distil-skill",
+        title="brain: turn my library into a workflow",
+        description=(
+            "Build a reusable workflow from the claims in the user's library and save it "
+            "once they approve."
+        ),
+    )
+    def distil_skill(task: str) -> str:
+        return (
+            f"Using only my brain library, draft me a reusable workflow for: {task}\n\n"
+            "Show each step with the claim it rests on, flag any step my sources dispute, "
+            "and tell me what the library does not cover. Then ask me whether to save it "
+            "as a skill — do not save it without my yes."
+        )
 
 
 _server: MCPServer | None = None

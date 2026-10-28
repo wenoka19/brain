@@ -356,6 +356,7 @@ def op_ingest_source(
             "canonical_url": target.canonical_url,
             "user_note": job["user_note"],
             "status": job["status"],
+            "in_flight": control_db.count_active_jobs(ctx.control, ctx.user_id),
         },
     )
     if run_now:
@@ -415,6 +416,7 @@ def op_ingest_file(
             "filename": validated.filename,
             "user_note": job["user_note"],
             "status": job["status"],
+            "in_flight": control_db.count_active_jobs(ctx.control, ctx.user_id),
         },
     )
 
