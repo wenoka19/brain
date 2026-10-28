@@ -47,7 +47,10 @@ class Settings:
 
     # ---- contradiction linker --------------------------------------------
     link_top_k: int = 8
-    link_similarity_floor: float = 0.72
+    # Calibrated for the v1-hash embedder, where near-duplicate claims land
+    # around 0.2-0.4 rather than 0.8+. The shape classifier is the real gate;
+    # this floor only keeps the candidate set cheap.
+    link_similarity_floor: float = 0.15
 
     # ---- anti-abuse -------------------------------------------------------
     tool_calls_per_min: int = 30

@@ -11,6 +11,7 @@ import pytest
 from app import config
 from app.db import control as control_db
 from app.db import tenant as tenant_db
+from app.ingestion import providers as providers_module
 from app.security import ratelimit
 
 
@@ -21,10 +22,15 @@ def cfg(tmp_path, monkeypatch):
     settings = config.reload_settings()
     settings.ensure_dirs()
     ratelimit.reset_limiter()
+    # The provider bundle is a process singleton, and tests legitimately swap
+    # its fetcher/extractor to simulate failures — so it must be rebuilt per
+    # test or one test's stub leaks into the next.
+    providers_module.set_providers(None)
     yield settings
     tenant_db.close_all()
     control_db.close_all()
     ratelimit.reset_limiter()
+    providers_module.set_providers(None)
     config.reload_settings()
 
 
