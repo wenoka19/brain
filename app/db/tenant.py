@@ -1,0 +1,824 @@
+"""Per-user tenant database (`user_{id}.db`).
+
+Design notes
+------------
+* Content tables carry both ``rowid INTEGER PRIMARY KEY AUTOINCREMENT`` and
+  ``id TEXT UNIQUE`` so FTS5 external-content indexes and sqlite-vec rowids stay
+  valid across ``VACUUM``.
+* FTS5 indexes are kept in sync by ``AFTER INSERT/UPDATE/DELETE`` triggers.
+* ``claims_vec``/``skills_vec`` cannot be filled directly by a trigger on the
+  content table (the embedding does not live there), so embeddings land in the
+  staging tables ``claim_vectors``/``skill_vectors`` and triggers fan them out to
+  the vec0 index. Triggers on the content tables propagate status/source changes
+  and deletions, so the vec index is never stale.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import struct
+import uuid
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+import sqlite_vec
+
+from app.config import Settings, settings
+from app.db.control import PRAGMAS, new_id
+
+EVIDENCE_BASES = ("data", "case_study", "anecdote", "theory", "opinion", "user_axiom")
+LOCATOR_TYPES = ("timestamp", "page", "section", "none")
+LINK_TYPES = ("contradicts", "refines", "supersedes")
+ORIGIN_TYPES = ("distilled", "github_import", "synthesized")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sources (
+    rowid         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            TEXT UNIQUE NOT NULL,
+    canonical_url TEXT NOT NULL DEFAULT '',
+    content_hash  TEXT NOT NULL DEFAULT '',
+    title         TEXT NOT NULL,
+    author        TEXT NOT NULL DEFAULT '',
+    published_at  TEXT NOT NULL DEFAULT '',
+    language      TEXT NOT NULL DEFAULT 'en',
+    source_type   TEXT NOT NULL,
+    duration_sec  INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','archived','trash')),
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sources_hash ON sources(content_hash);
+CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS source_content (
+    source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    full_text TEXT NOT NULL,
+    cues_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS epistemic_claims (
+    rowid              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                 TEXT UNIQUE NOT NULL,
+    source_id          TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    claim              TEXT NOT NULL,
+    speaker            TEXT NOT NULL DEFAULT '',
+    evidence_basis     TEXT NOT NULL
+                       CHECK (evidence_basis IN ('data','case_study','anecdote',
+                                                 'theory','opinion','user_axiom')),
+    domain_tags        TEXT NOT NULL DEFAULT '[]',
+    when_it_applies    TEXT NOT NULL,
+    when_it_fails      TEXT NOT NULL DEFAULT '',
+    exact_steps_json   TEXT NOT NULL DEFAULT '[]',
+    metrics_and_quotes TEXT NOT NULL DEFAULT '',
+    anchor_quote       TEXT NOT NULL,
+    locator_type       TEXT NOT NULL DEFAULT 'timestamp'
+                       CHECK (locator_type IN ('timestamp','page','section','none')),
+    locator_value      TEXT NOT NULL DEFAULT '',
+    salience           INTEGER NOT NULL DEFAULT 3
+                       CHECK (salience BETWEEN 1 AND 5),
+    extractor_version  TEXT NOT NULL DEFAULT 'v1',
+    embedding_model    TEXT NOT NULL DEFAULT 'v1',
+    status             TEXT NOT NULL DEFAULT 'active'
+                       CHECK (status IN ('active','archived')),
+    created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_claims_source ON epistemic_claims(source_id, status);
+CREATE INDEX IF NOT EXISTS idx_claims_status ON epistemic_claims(status, salience DESC);
+
+CREATE TABLE IF NOT EXISTS tension_links (
+    id                TEXT PRIMARY KEY,
+    claim_a_id        TEXT NOT NULL REFERENCES epistemic_claims(id) ON DELETE CASCADE,
+    claim_b_id        TEXT NOT NULL REFERENCES epistemic_claims(id) ON DELETE CASCADE,
+    link_type         TEXT NOT NULL
+                      CHECK (link_type IN ('contradicts','refines','supersedes')),
+    divergence_summary TEXT NOT NULL,
+    created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (claim_a_id, claim_b_id, link_type)
+);
+CREATE INDEX IF NOT EXISTS idx_tension_a ON tension_links(claim_a_id);
+CREATE INDEX IF NOT EXISTS idx_tension_b ON tension_links(claim_b_id);
+
+CREATE TABLE IF NOT EXISTS skills (
+    rowid                INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                   TEXT UNIQUE NOT NULL,
+    slug                 TEXT UNIQUE NOT NULL,
+    name                 TEXT NOT NULL,
+    description          TEXT NOT NULL,
+    trigger_when         TEXT NOT NULL,
+    execution_steps_json TEXT NOT NULL,
+    guardrails           TEXT NOT NULL DEFAULT '',
+    output_template      TEXT NOT NULL DEFAULT '',
+    linked_claim_ids     TEXT NOT NULL DEFAULT '[]',
+    origin_type          TEXT NOT NULL DEFAULT 'distilled'
+                         CHECK (origin_type IN ('distilled','github_import','synthesized')),
+    version              INTEGER NOT NULL DEFAULT 1,
+    status               TEXT NOT NULL DEFAULT 'active'
+                         CHECK (status IN ('active','archived')),
+    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id            TEXT PRIMARY KEY,
+    skill_id      TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (skill_id, version)
+);
+
+-- Embedding staging tables; triggers fan these out to the vec0 indexes.
+CREATE TABLE IF NOT EXISTS claim_vectors (
+    claim_rowid INTEGER PRIMARY KEY
+                REFERENCES epistemic_claims(rowid) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_vectors (
+    skill_rowid INTEGER PRIMARY KEY REFERENCES skills(rowid) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL
+);
+"""
+
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
+    claim, speaker, domain_tags, when_it_applies, when_it_fails,
+    metrics_and_quotes, anchor_quote,
+    content='epistemic_claims',
+    content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+    name, slug, description, trigger_when, execution_steps_json, guardrails,
+    content='skills',
+    content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+);
+"""
+
+TRIGGERS = """
+-- ---- claims -> claims_fts -------------------------------------------------
+CREATE TRIGGER IF NOT EXISTS claims_ai AFTER INSERT ON epistemic_claims BEGIN
+    INSERT INTO claims_fts(rowid, claim, speaker, domain_tags, when_it_applies,
+                           when_it_fails, metrics_and_quotes, anchor_quote)
+    VALUES (new.rowid, new.claim, new.speaker, new.domain_tags, new.when_it_applies,
+            new.when_it_fails, new.metrics_and_quotes, new.anchor_quote);
+END;
+
+CREATE TRIGGER IF NOT EXISTS claims_ad AFTER DELETE ON epistemic_claims BEGIN
+    INSERT INTO claims_fts(claims_fts, rowid, claim, speaker, domain_tags,
+                           when_it_applies, when_it_fails, metrics_and_quotes, anchor_quote)
+    VALUES ('delete', old.rowid, old.claim, old.speaker, old.domain_tags,
+            old.when_it_applies, old.when_it_fails, old.metrics_and_quotes, old.anchor_quote);
+END;
+
+CREATE TRIGGER IF NOT EXISTS claims_au AFTER UPDATE ON epistemic_claims BEGIN
+    INSERT INTO claims_fts(claims_fts, rowid, claim, speaker, domain_tags,
+                           when_it_applies, when_it_fails, metrics_and_quotes, anchor_quote)
+    VALUES ('delete', old.rowid, old.claim, old.speaker, old.domain_tags,
+            old.when_it_applies, old.when_it_fails, old.metrics_and_quotes, old.anchor_quote);
+    INSERT INTO claims_fts(rowid, claim, speaker, domain_tags, when_it_applies,
+                           when_it_fails, metrics_and_quotes, anchor_quote)
+    VALUES (new.rowid, new.claim, new.speaker, new.domain_tags, new.when_it_applies,
+            new.when_it_fails, new.metrics_and_quotes, new.anchor_quote);
+END;
+
+-- ---- claims -> claims_vec (status / source / delete propagation) ---------
+CREATE TRIGGER IF NOT EXISTS claims_au_vec AFTER UPDATE ON epistemic_claims BEGIN
+    DELETE FROM claims_vec WHERE claim_rowid = new.rowid;
+    INSERT INTO claims_vec(claim_rowid, status, source_id, embedding)
+    SELECT new.rowid, new.status, new.source_id, v.embedding
+    FROM claim_vectors v WHERE v.claim_rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS claims_ad_vec AFTER DELETE ON epistemic_claims BEGIN
+    DELETE FROM claims_vec WHERE claim_rowid = old.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS claim_vectors_ai AFTER INSERT ON claim_vectors BEGIN
+    DELETE FROM claims_vec WHERE claim_rowid = new.claim_rowid;
+    INSERT INTO claims_vec(claim_rowid, status, source_id, embedding)
+    SELECT new.claim_rowid, c.status, c.source_id, new.embedding
+    FROM epistemic_claims c WHERE c.rowid = new.claim_rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS claim_vectors_au AFTER UPDATE ON claim_vectors BEGIN
+    DELETE FROM claims_vec WHERE claim_rowid = new.claim_rowid;
+    INSERT INTO claims_vec(claim_rowid, status, source_id, embedding)
+    SELECT new.claim_rowid, c.status, c.source_id, new.embedding
+    FROM epistemic_claims c WHERE c.rowid = new.claim_rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS claim_vectors_ad AFTER DELETE ON claim_vectors BEGIN
+    DELETE FROM claims_vec WHERE claim_rowid = old.claim_rowid;
+END;
+
+-- ---- skills -> skills_fts ------------------------------------------------
+CREATE TRIGGER IF NOT EXISTS skills_ai AFTER INSERT ON skills BEGIN
+    INSERT INTO skills_fts(rowid, name, slug, description, trigger_when,
+                           execution_steps_json, guardrails)
+    VALUES (new.rowid, new.name, new.slug, new.description, new.trigger_when,
+            new.execution_steps_json, new.guardrails);
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_ad AFTER DELETE ON skills BEGIN
+    INSERT INTO skills_fts(skills_fts, rowid, name, slug, description, trigger_when,
+                           execution_steps_json, guardrails)
+    VALUES ('delete', old.rowid, old.name, old.slug, old.description, old.trigger_when,
+            old.execution_steps_json, old.guardrails);
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_au AFTER UPDATE ON skills BEGIN
+    INSERT INTO skills_fts(skills_fts, rowid, name, slug, description, trigger_when,
+                           execution_steps_json, guardrails)
+    VALUES ('delete', old.rowid, old.name, old.slug, old.description, old.trigger_when,
+            old.execution_steps_json, old.guardrails);
+    INSERT INTO skills_fts(rowid, name, slug, description, trigger_when,
+                           execution_steps_json, guardrails)
+    VALUES (new.rowid, new.name, new.slug, new.description, new.trigger_when,
+            new.execution_steps_json, new.guardrails);
+END;
+
+-- ---- skills -> skills_vec ------------------------------------------------
+CREATE TRIGGER IF NOT EXISTS skills_au_vec AFTER UPDATE ON skills BEGIN
+    DELETE FROM skills_vec WHERE skill_rowid = new.rowid;
+    INSERT INTO skills_vec(skill_rowid, status, slug, embedding)
+    SELECT new.rowid, new.status, new.slug, v.embedding
+    FROM skill_vectors v WHERE v.skill_rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_ad_vec AFTER DELETE ON skills BEGIN
+    DELETE FROM skills_vec WHERE skill_rowid = old.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS skill_vectors_ai AFTER INSERT ON skill_vectors BEGIN
+    DELETE FROM skills_vec WHERE skill_rowid = new.skill_rowid;
+    INSERT INTO skills_vec(skill_rowid, status, slug, embedding)
+    SELECT new.skill_rowid, s.status, s.slug, new.embedding
+    FROM skills s WHERE s.rowid = new.skill_rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS skill_vectors_au AFTER UPDATE ON skill_vectors BEGIN
+    DELETE FROM skills_vec WHERE skill_rowid = new.skill_rowid;
+    INSERT INTO skills_vec(skill_rowid, status, slug, embedding)
+    SELECT new.skill_rowid, s.status, s.slug, new.embedding
+    FROM skills s WHERE s.rowid = new.skill_rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS skill_vectors_ad AFTER DELETE ON skill_vectors BEGIN
+    DELETE FROM skills_vec WHERE skill_rowid = old.skill_rowid;
+END;
+"""
+
+
+# ---------------------------------------------------------------------------
+# embedding serialization
+# ---------------------------------------------------------------------------
+def pack_embedding(vector: Sequence[float], *, dim: int | None = None) -> bytes:
+    dim = dim or settings().embedding_dim
+    if len(vector) != dim:
+        raise ValueError(f"embedding must have {dim} dims, got {len(vector)}")
+    return struct.pack(f"{dim}f", *(float(x) for x in vector))
+
+
+def unpack_embedding(blob: bytes, *, dim: int | None = None) -> list[float]:
+    dim = dim or settings().embedding_dim
+    return list(struct.unpack(f"{dim}f", blob))
+
+
+# ---------------------------------------------------------------------------
+# connection cache
+# ---------------------------------------------------------------------------
+class _LRUConnections:
+    """Bounded cache of tenant connections, keyed by resolved path."""
+
+    def __init__(self, max_size: int = 32) -> None:
+        self.max_size = max_size
+        self._cache: OrderedDict[str, sqlite3.Connection] = OrderedDict()
+
+    def get(self, path: Path, cfg: Settings) -> sqlite3.Connection:
+        key = str(path)
+        conn = self._cache.get(key)
+        if conn is not None:
+            self._cache.move_to_end(key)
+            return conn
+        conn = _open(path, cfg)
+        self._cache[key] = conn
+        self._cache.move_to_end(key)
+        while len(self._cache) > self.max_size:
+            _, evicted = self._cache.popitem(last=False)
+            try:
+                evicted.close()
+            except sqlite3.Error:
+                pass
+        return conn
+
+    def close_all(self) -> None:
+        for conn in self._cache.values():
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        self._cache.clear()
+
+
+_pool = _LRUConnections()
+
+
+def _open(path: Path, cfg: Settings) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    for pragma in PRAGMAS:
+        conn.execute(pragma)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    init_schema(conn, cfg=cfg)
+    return conn
+
+
+def init_schema(conn: sqlite3.Connection, *, cfg: Settings | None = None) -> None:
+    cfg = cfg or settings()
+    dim = cfg.embedding_dim
+    conn.executescript(SCHEMA)
+    conn.executescript(FTS_SCHEMA)
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS claims_vec USING vec0("
+        "claim_rowid INTEGER PRIMARY KEY, status TEXT, source_id TEXT, "
+        f"embedding float[{dim}] distance_metric=cosine)"
+    )
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS skills_vec USING vec0("
+        "skill_rowid INTEGER PRIMARY KEY, status TEXT, slug TEXT, "
+        f"embedding float[{dim}] distance_metric=cosine)"
+    )
+    conn.executescript(TRIGGERS)
+
+
+def tenant(user_id: str, *, cfg: Settings | None = None) -> sqlite3.Connection:
+    """Open (or reuse) the tenant DB for a *verified* ``user_id``."""
+    cfg = cfg or settings()
+    return _pool.get(cfg.tenant_db_path(user_id), cfg)
+
+
+def close_all() -> None:
+    _pool.close_all()
+
+
+# ---------------------------------------------------------------------------
+# sources
+# ---------------------------------------------------------------------------
+def upsert_source(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str | None = None,
+    title: str,
+    source_type: str,
+    canonical_url: str = "",
+    content_hash: str = "",
+    author: str = "",
+    published_at: str = "",
+    language: str = "en",
+    duration_sec: int = 0,
+) -> dict[str, Any]:
+    source_id = source_id or new_id("src")
+    conn.execute(
+        """
+        INSERT INTO sources (id, canonical_url, content_hash, title, author,
+                             published_at, language, source_type, duration_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            canonical_url = excluded.canonical_url,
+            content_hash  = excluded.content_hash,
+            title         = excluded.title,
+            author        = excluded.author,
+            published_at  = excluded.published_at,
+            language      = excluded.language,
+            duration_sec  = excluded.duration_sec
+        """,
+        (
+            source_id,
+            canonical_url,
+            content_hash,
+            title[:500],
+            author[:300],
+            published_at[:40],
+            language[:16],
+            source_type,
+            int(duration_sec or 0),
+        ),
+    )
+    return get_source(conn, source_id)  # type: ignore[return-value]
+
+
+def get_source(conn: sqlite3.Connection, source_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def find_source_by_hash(conn: sqlite3.Connection, content_hash: str) -> dict[str, Any] | None:
+    if not content_hash:
+        return None
+    row = conn.execute(
+        "SELECT * FROM sources WHERE content_hash = ? AND status != 'trash' LIMIT 1",
+        (content_hash,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def find_source_by_url(conn: sqlite3.Connection, canonical_url: str) -> dict[str, Any] | None:
+    if not canonical_url:
+        return None
+    row = conn.execute(
+        "SELECT * FROM sources WHERE canonical_url = ? AND status != 'trash' LIMIT 1",
+        (canonical_url,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_source_content(
+    conn: sqlite3.Connection, source_id: str, full_text: str, cues: list[dict[str, Any]]
+) -> None:
+    conn.execute(
+        "INSERT INTO source_content (source_id, full_text, cues_json) VALUES (?, ?, ?) "
+        "ON CONFLICT(source_id) DO UPDATE SET full_text = excluded.full_text, "
+        "cues_json = excluded.cues_json",
+        (source_id, full_text, json.dumps(cues, ensure_ascii=False)),
+    )
+
+
+def get_source_content(conn: sqlite3.Connection, source_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT full_text, cues_json FROM source_content WHERE source_id = ?", (source_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return {"full_text": row["full_text"], "cues": json.loads(row["cues_json"] or "[]")}
+
+
+# ---------------------------------------------------------------------------
+# claims
+# ---------------------------------------------------------------------------
+def insert_claim(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    claim: str,
+    when_it_applies: str,
+    anchor_quote: str,
+    evidence_basis: str = "opinion",
+    speaker: str = "",
+    domain_tags: Iterable[str] = (),
+    when_it_fails: str = "",
+    exact_steps: Iterable[str] = (),
+    metrics_and_quotes: str = "",
+    locator_type: str = "none",
+    locator_value: str = "",
+    salience: int = 3,
+    claim_id: str | None = None,
+    cfg: Settings | None = None,
+) -> dict[str, Any]:
+    cfg = cfg or settings()
+    if evidence_basis not in EVIDENCE_BASES:
+        raise ValueError(f"unknown evidence_basis: {evidence_basis}")
+    if locator_type not in LOCATOR_TYPES:
+        raise ValueError(f"unknown locator_type: {locator_type}")
+    claim_id = claim_id or new_id("clm")
+    conn.execute(
+        """
+        INSERT INTO epistemic_claims (
+            id, source_id, claim, speaker, evidence_basis, domain_tags,
+            when_it_applies, when_it_fails, exact_steps_json, metrics_and_quotes,
+            anchor_quote, locator_type, locator_value, salience,
+            extractor_version, embedding_model
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            claim_id,
+            source_id,
+            claim,
+            speaker[:200],
+            evidence_basis,
+            json.dumps(sorted({t.strip().lower() for t in domain_tags if t.strip()}), ensure_ascii=False),
+            when_it_applies,
+            when_it_fails,
+            json.dumps(list(exact_steps), ensure_ascii=False),
+            metrics_and_quotes,
+            anchor_quote,
+            locator_type,
+            str(locator_value),
+            max(1, min(5, int(salience))),
+            cfg.extractor_version,
+            cfg.embedding_model,
+        ),
+    )
+    return get_claim(conn, claim_id)  # type: ignore[return-value]
+
+
+def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM epistemic_claims WHERE id = ?", (claim_id,)).fetchone()
+    return hydrate_claim(row) if row else None
+
+
+def hydrate_claim(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    record = dict(row)
+    record["domain_tags"] = json.loads(record.get("domain_tags") or "[]")
+    record["exact_steps"] = json.loads(record.pop("exact_steps_json", "[]") or "[]")
+    return record
+
+
+def set_claim_embedding(
+    conn: sqlite3.Connection, claim_id: str, vector: Sequence[float], *, cfg: Settings | None = None
+) -> None:
+    cfg = cfg or settings()
+    row = conn.execute("SELECT rowid FROM epistemic_claims WHERE id = ?", (claim_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"unknown claim id {claim_id!r}")
+    conn.execute(
+        "INSERT INTO claim_vectors (claim_rowid, embedding) VALUES (?, ?) "
+        "ON CONFLICT(claim_rowid) DO UPDATE SET embedding = excluded.embedding",
+        (row["rowid"], pack_embedding(vector, dim=cfg.embedding_dim)),
+    )
+
+
+def set_claim_status(conn: sqlite3.Connection, claim_id: str, status: str) -> bool:
+    if status not in ("active", "archived"):
+        raise ValueError(status)
+    cur = conn.execute(
+        "UPDATE epistemic_claims SET status = ? WHERE id = ? AND status != ?",
+        (status, claim_id, status),
+    )
+    return cur.rowcount > 0
+
+
+def claims_for_source(
+    conn: sqlite3.Connection, source_id: str, *, limit: int = 50, active_only: bool = True
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM epistemic_claims WHERE source_id = ?"
+    params: list[Any] = [source_id]
+    if active_only:
+        sql += " AND status = 'active'"
+    sql += " ORDER BY salience DESC, rowid ASC LIMIT ?"
+    params.append(limit)
+    return [hydrate_claim(r) for r in conn.execute(sql, params).fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# tension links
+# ---------------------------------------------------------------------------
+def add_tension_link(
+    conn: sqlite3.Connection,
+    *,
+    claim_a_id: str,
+    claim_b_id: str,
+    link_type: str,
+    divergence_summary: str,
+) -> dict[str, Any] | None:
+    if link_type not in LINK_TYPES:
+        raise ValueError(f"unknown link_type: {link_type}")
+    if claim_a_id == claim_b_id:
+        return None
+    link_id = new_id("ten")
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO tension_links (id, claim_a_id, claim_b_id, link_type, "
+        "divergence_summary) VALUES (?, ?, ?, ?, ?)",
+        (link_id, claim_a_id, claim_b_id, link_type, divergence_summary[:1000]),
+    )
+    if cur.rowcount == 0:
+        return None
+    row = conn.execute("SELECT * FROM tension_links WHERE id = ?", (link_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def tensions_for_claims(conn: sqlite3.Connection, claim_ids: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+    """Return ``{claim_id: [{counterpart claim + link metadata}, ...]}``.
+
+    Links are symmetric for display: a claim hears about a tension whether it
+    sits on the ``a`` or the ``b`` side — and when *both* sides are in the same
+    result set, both of them get the link (fanned out below).
+    """
+    if not claim_ids:
+        return {}
+    wanted = list(dict.fromkeys(claim_ids))
+    placeholders = ",".join("?" * len(wanted))
+    rows = conn.execute(
+        f"""
+        SELECT t.id AS link_id, t.link_type, t.divergence_summary,
+               t.claim_a_id, t.claim_b_id,
+               ca.claim AS a_claim, ca.speaker AS a_speaker,
+               ca.evidence_basis AS a_evidence_basis, ca.anchor_quote AS a_anchor_quote,
+               ca.locator_type AS a_locator_type, ca.locator_value AS a_locator_value,
+               ca.status AS a_status, sa.title AS a_source_title,
+               sa.canonical_url AS a_source_url, sa.source_type AS a_source_type,
+               cb.claim AS b_claim, cb.speaker AS b_speaker,
+               cb.evidence_basis AS b_evidence_basis, cb.anchor_quote AS b_anchor_quote,
+               cb.locator_type AS b_locator_type, cb.locator_value AS b_locator_value,
+               cb.status AS b_status, sb.title AS b_source_title,
+               sb.canonical_url AS b_source_url, sb.source_type AS b_source_type
+        FROM tension_links t
+        JOIN epistemic_claims ca ON ca.id = t.claim_a_id
+        JOIN epistemic_claims cb ON cb.id = t.claim_b_id
+        JOIN sources sa ON sa.id = ca.source_id
+        JOIN sources sb ON sb.id = cb.source_id
+        WHERE t.claim_a_id IN ({placeholders}) OR t.claim_b_id IN ({placeholders})
+        """,
+        (*wanted, *wanted),
+    ).fetchall()
+
+    wanted_set = set(wanted)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        record = dict(row)
+        for near, far in (("a", "b"), ("b", "a")):
+            anchor_id = record[f"claim_{near}_id"]
+            if anchor_id not in wanted_set:
+                continue
+            if record[f"{far}_status"] != "active":
+                continue  # never surface an archived counterpart
+            out.setdefault(anchor_id, []).append(
+                {
+                    "link_id": record["link_id"],
+                    "link_type": record["link_type"],
+                    "divergence_summary": record["divergence_summary"],
+                    "other_id": record[f"claim_{far}_id"],
+                    "other_claim": record[f"{far}_claim"],
+                    "other_speaker": record[f"{far}_speaker"],
+                    "other_evidence_basis": record[f"{far}_evidence_basis"],
+                    "other_anchor_quote": record[f"{far}_anchor_quote"],
+                    "other_locator_type": record[f"{far}_locator_type"],
+                    "other_locator_value": record[f"{far}_locator_value"],
+                    "other_source_title": record[f"{far}_source_title"],
+                    "other_source_url": record[f"{far}_source_url"],
+                    "other_source_type": record[f"{far}_source_type"],
+                }
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# skills
+# ---------------------------------------------------------------------------
+def slugify(raw: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in (raw or "").strip())
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    slug = cleaned.strip("-")[:64]
+    return slug or f"skill-{uuid.uuid4().hex[:8]}"
+
+
+def upsert_skill(
+    conn: sqlite3.Connection,
+    *,
+    slug: str,
+    name: str,
+    description: str,
+    trigger_when: str,
+    execution_steps: Sequence[str],
+    guardrails: str = "",
+    output_template: str = "",
+    linked_claim_ids: Sequence[str] = (),
+    origin_type: str = "distilled",
+) -> dict[str, Any]:
+    """Create or version-bump a skill, snapshotting the previous revision."""
+    if origin_type not in ORIGIN_TYPES:
+        raise ValueError(f"unknown origin_type: {origin_type}")
+    slug = slugify(slug)
+    steps_json = json.dumps([s for s in execution_steps if str(s).strip()], ensure_ascii=False)
+    links_json = json.dumps(list(linked_claim_ids), ensure_ascii=False)
+
+    existing = conn.execute("SELECT * FROM skills WHERE slug = ?", (slug,)).fetchone()
+    if existing is None:
+        skill_id = new_id("skl")
+        conn.execute(
+            """
+            INSERT INTO skills (id, slug, name, description, trigger_when,
+                                execution_steps_json, guardrails, output_template,
+                                linked_claim_ids, origin_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                skill_id,
+                slug,
+                name[:200],
+                description,
+                trigger_when,
+                steps_json,
+                guardrails,
+                output_template,
+                links_json,
+                origin_type,
+            ),
+        )
+    else:
+        skill_id = existing["id"]
+        conn.execute(
+            "INSERT OR IGNORE INTO skill_versions (id, skill_id, version, snapshot_json) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                new_id("skv"),
+                skill_id,
+                existing["version"],
+                json.dumps(dict(existing), ensure_ascii=False, default=str),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE skills SET name = ?, description = ?, trigger_when = ?,
+                   execution_steps_json = ?, guardrails = ?, output_template = ?,
+                   linked_claim_ids = ?, origin_type = ?, version = version + 1,
+                   status = 'active', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                name[:200],
+                description,
+                trigger_when,
+                steps_json,
+                guardrails,
+                output_template,
+                links_json,
+                origin_type,
+                skill_id,
+            ),
+        )
+    return get_skill(conn, skill_id)  # type: ignore[return-value]
+
+
+def hydrate_skill(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    record = dict(row)
+    record["execution_steps"] = json.loads(record.pop("execution_steps_json", "[]") or "[]")
+    record["linked_claim_ids"] = json.loads(record.get("linked_claim_ids") or "[]")
+    return record
+
+
+def get_skill(conn: sqlite3.Connection, skill_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM skills WHERE id = ?", (skill_id,)).fetchone()
+    return hydrate_skill(row) if row else None
+
+
+def get_skill_by_slug(conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM skills WHERE slug = ?", (slugify(slug),)).fetchone()
+    return hydrate_skill(row) if row else None
+
+
+def set_skill_embedding(
+    conn: sqlite3.Connection, skill_id: str, vector: Sequence[float], *, cfg: Settings | None = None
+) -> None:
+    cfg = cfg or settings()
+    row = conn.execute("SELECT rowid FROM skills WHERE id = ?", (skill_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"unknown skill id {skill_id!r}")
+    conn.execute(
+        "INSERT INTO skill_vectors (skill_rowid, embedding) VALUES (?, ?) "
+        "ON CONFLICT(skill_rowid) DO UPDATE SET embedding = excluded.embedding",
+        (row["rowid"], pack_embedding(vector, dim=cfg.embedding_dim)),
+    )
+
+
+def set_skill_status(conn: sqlite3.Connection, skill_id: str, status: str) -> bool:
+    if status not in ("active", "archived"):
+        raise ValueError(status)
+    cur = conn.execute(
+        "UPDATE skills SET status = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE id = ? AND status != ?",
+        (status, skill_id, status),
+    )
+    return cur.rowcount > 0
+
+
+def set_source_status(conn: sqlite3.Connection, source_id: str, status: str) -> bool:
+    if status not in ("active", "archived", "trash"):
+        raise ValueError(status)
+    cur = conn.execute(
+        "UPDATE sources SET status = ? WHERE id = ? AND status != ?",
+        (status, source_id, status),
+    )
+    if cur.rowcount and status in ("archived", "trash"):
+        # Archiving a source archives the claims that came out of it.
+        conn.execute(
+            "UPDATE epistemic_claims SET status = 'archived' WHERE source_id = ? AND status = 'active'",
+            (source_id,),
+        )
+    elif cur.rowcount and status == "active":
+        conn.execute(
+            "UPDATE epistemic_claims SET status = 'active' WHERE source_id = ? AND status = 'archived'",
+            (source_id,),
+        )
+    return cur.rowcount > 0
+
+
+def counts(conn: sqlite3.Connection) -> dict[str, int]:
+    def one(sql: str) -> int:
+        return int(conn.execute(sql).fetchone()[0])
+
+    return {
+        "sources": one("SELECT COUNT(*) FROM sources WHERE status = 'active'"),
+        "claims": one("SELECT COUNT(*) FROM epistemic_claims WHERE status = 'active'"),
+        "skills": one("SELECT COUNT(*) FROM skills WHERE status = 'active'"),
+        "tensions": one("SELECT COUNT(*) FROM tension_links"),
+        "archived_claims": one("SELECT COUNT(*) FROM epistemic_claims WHERE status = 'archived'"),
+    }

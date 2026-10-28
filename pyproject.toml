@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brain"
+version = "0.1.0"
+description = "Personal knowledge & procedural skills MCP server"
+requires-python = ">=3.11"
+dependencies = [
+  "rapidfuzz>=3.9",
+  "sqlite-vec>=0.1.6",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "httpx>=0.27",
+  "PyJWT>=2.8",
+  "pypdf>=4.0",
+  "python-docx>=1.1",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.0",
+  "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
