@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
-from app.config import Settings, settings
+from app.config import Settings, settings, vendor_for
 from app.security.sanitizer import clean_text
 
 LOGGER = logging.getLogger("brain.providers")
@@ -712,9 +712,12 @@ def _post_json(
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        # OpenRouter asks for these; harmless elsewhere.
-        "X-Title": "brain",
     }
+    if vendor_for(url) == "openrouter":
+        # Attribution headers OpenRouter asks for. They are meaningless to a
+        # first-party endpoint, and telling a vendor's gateway about a
+        # marketplace we are not using is not information it is owed.
+        headers.update({"X-Title": "brain", "HTTP-Referer": "https://github.com/brain"})
     last_error: Exception | None = None
     for attempt in range(max(1, retries) + 1):
         try:
@@ -892,7 +895,7 @@ class LiveLLMExtractor:
             if part != ""
         )
         payload = {
-            "model": self.cfg.llm_model,
+            "model": self.cfg.resolved_llm_model,
             "temperature": 0,
             "max_tokens": self.cfg.llm_max_output_tokens,
             "response_format": {"type": "json_object"},
@@ -952,7 +955,7 @@ class LiveLinkClassifier:
             )
 
         payload = {
-            "model": self.cfg.llm_model,
+            "model": self.cfg.resolved_llm_model,
             "temperature": 0,
             "max_tokens": 600,
             "response_format": {"type": "json_object"},
@@ -1023,11 +1026,17 @@ class LiveEmbedder:
         if not inputs:
             return []
         payload = {
-            "model": self.cfg.embedding_model_name,
+            "model": self.cfg.resolved_embedding_model,
             "input": inputs,
             # Matryoshka truncation: ask the host for 256 dims directly so the
-            # vector arrives at the width `claims_vec` is declared with.
+            # vector arrives at the width `claims_vec` is declared with. Every
+            # host we default to honours it — DashScope `text-embedding-v4` and
+            # Z.ai `embedding-3` both do — and `_normalise` covers the one that
+            # does not.
             "dimensions": self.dim,
+            # Otherwise a host may answer in base64, which `_normalise` would
+            # see as a string rather than a vector.
+            "encoding_format": "float",
         }
         try:
             response = _post_json(
@@ -1078,7 +1087,7 @@ class LiveEmbedder:
             if not self._logged_truncation:
                 LOGGER.info(
                     "%s returned %s dimensions; using the leading %s (Matryoshka prefix)",
-                    self.cfg.embedding_model_name,
+                    self.cfg.resolved_embedding_model,
                     len(values),
                     self.dim,
                 )
@@ -1121,7 +1130,7 @@ class LiveVisionProvider:
         data_uri = f"data:{media};base64,{base64.b64encode(data).decode('ascii')}"
 
         payload = {
-            "model": self.cfg.llm_model,
+            "model": self.cfg.resolved_llm_model,
             "temperature": 0,
             "max_tokens": self.cfg.llm_max_output_tokens,
             "response_format": {"type": "json_object"},
@@ -1181,7 +1190,7 @@ class LiveVisionProvider:
             source_type="image",
             locator_type="section",
             content_hash=validated.content_hash,
-            metadata={"vision_model": self.cfg.llm_model},
+            metadata={"vision_model": self.cfg.resolved_llm_model},
         ).finalise()
 
 

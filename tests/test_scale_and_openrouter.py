@@ -11,16 +11,19 @@ Three mechanisms, tested here without a network:
    of a tenant from `crc32(user_id) % shard_total`, so there is no router to
    keep in sync.
 
-3. **One key, one host, three jobs** (`app/config.py`,
-   `app/ingestion/providers.py`) — `LLM_API_KEY` alone drives chat extraction,
-   vision and 256-dim embeddings off OpenRouter, with the Matryoshka guard that
-   keeps a 4096-float reply fitting a `float[256]` column.
+3. **First-party vendor endpoints** (`app/config.py`,
+   `app/ingestion/providers.py`) — one Z.ai key drives chat, vision *and*
+   `embedding-3`; a DashScope key moves embeddings to Qwen3 and nothing else.
+   A marketplace model prefix is stripped before it can 404 on a direct host,
+   marketplace-only payload fields and headers never reach one, and the
+   Matryoshka guard keeps whatever width comes back fitting a `float[256]`
+   column.
 
 Every R2 call goes through an `httpx.MockTransport` that keeps objects in a
 dict, so the suite exercises the real signing, the real `VACUUM INTO`, and the
 real atomic rename — just not a real bucket. The provider tests use the same
-transport, so they assert on the exact request body that would go to
-OpenRouter.
+transport, so they assert on the exact URL, headers and request body that would
+reach Z.ai or DashScope.
 
 What these tests cannot prove: that the SigV4 signature is one Cloudflare
 accepts. `botocore` is not installed here, so there is no reference
@@ -32,6 +35,7 @@ PUT is still the real verification.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import sqlite3
@@ -121,18 +125,36 @@ def claim_count(path: Path) -> int:
         conn.close()
 
 
-def openrouter_settings(cfg, monkeypatch):
-    """Prod settings on the shipped OpenRouter defaults, with no network behind
-    them and the throwaway data directory kept."""
+PROVIDER_ENV = (
+    "LLM_API_KEY", "ZAI_API_KEY", "LLM_MODEL", "LLM_BASE_URL", "LLM_REASONING_EFFORT",
+    "EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY", "DASHSCOPE_API_KEY",
+)
+
+
+def live_settings(cfg, monkeypatch, **env: str):
+    """Prod settings with no network behind them, on the shipped defaults unless
+    `env` says otherwise, and the throwaway data directory kept."""
     import dataclasses
 
     monkeypatch.setenv("BRAIN_ENV", "prod")
-    monkeypatch.setenv("LLM_API_KEY", "sk-single-key")
-    for name in ("LLM_MODEL", "LLM_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_BASE_URL",
-                 "EMBEDDING_API_KEY", "LLM_REASONING_EFFORT"):
+    for name in PROVIDER_ENV:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "sk-zai-key")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     return dataclasses.replace(load_settings(), data_dir=cfg.data_dir)
 
+
+def marketplace_settings(cfg, monkeypatch):
+    """The OpenRouter route, which is now opt-in rather than the default. Its
+    catalogue is namespaced, so the ids carry a vendor prefix."""
+    return live_settings(
+        cfg,
+        monkeypatch,
+        LLM_BASE_URL="https://openrouter.ai/api/v1",
+        LLM_MODEL="z-ai/glm-5.3-flash",
+        EMBEDDING_MODEL="qwen/qwen3-embedding-8b",
+    )
 
 @pytest.fixture
 def capture():
@@ -721,112 +743,251 @@ class TestDeploymentContract:
 
 
 # ===========================================================================
-# single-key OpenRouter setup
+# first-party vendor endpoints
 # ===========================================================================
-class TestSingleKeyDefaults:
-    """One key must be enough. Every `EMBEDDING_*` variable exists only for the
-    operator who deliberately wants a second host."""
+class TestDirectVendorDefaults:
+    """A marketplace fee is a standing percentage on every token this product
+    will ever extract, so the default path must reach the vendors themselves."""
 
-    def test_the_shipped_defaults_target_openrouter(self):
+    def test_no_marketplace_is_in_the_default_path(self):
         defaults = Settings()
-        assert defaults.llm_base_url == "https://openrouter.ai/api/v1"
-        assert defaults.llm_model == "z-ai/glm-5.3-flash"
-        assert defaults.embedding_model_name == "qwen/qwen3-embedding-8b"
+        assert defaults.llm_base_url == "https://api.z.ai/api/paas/v4"
+        assert defaults.llm_vendor == "zai"
+        assert defaults.targets_openrouter is False
+        assert "openrouter" not in defaults.llm_base_url
+
+    def test_the_shipped_defaults_are_the_first_party_slugs(self):
+        defaults = Settings()
+        assert defaults.llm_model == "glm-5.3-flash"
+        assert defaults.resolved_llm_model == "glm-5.3-flash"
         assert defaults.embedding_dim == 256
 
-    def test_one_key_powers_chat_vision_and_embeddings(self, cfg, monkeypatch):
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("LLM_API_KEY", "sk-single-key")
-        prod = load_settings()
+    def test_one_zai_key_powers_chat_vision_and_embeddings(self, cfg, monkeypatch):
+        """Z.ai serves `embedding-3` itself, so a single key is a whole setup."""
+        prod = live_settings(cfg, monkeypatch)
 
         assert prod.live_llm and prod.live_vision and prod.live_embeddings
-        assert prod.resolved_embedding_api_key == "sk-single-key"
-        assert prod.resolved_embedding_base_url == "https://openrouter.ai/api/v1"
-        # And the identity recorded on every claim follows from the models, so
-        # a later re-embedding knows what produced a vector.
-        assert prod.extractor_version == "llm:z-ai/glm-5.3-flash"
-        assert prod.embedding_provider == "qwen/qwen3-embedding-8b"
+        assert prod.resolved_embedding_base_url == "https://api.z.ai/api/paas/v4"
+        assert prod.resolved_embedding_api_key == "sk-zai-key"
+        assert prod.resolved_embedding_model == "embedding-3"
+        assert prod.embedding_vendor == "zai"
+        # And what is stamped on every claim names the model actually used.
+        assert prod.extractor_version == "llm:glm-5.3-flash"
+        assert prod.embedding_provider == "embedding-3"
 
-    def test_a_second_host_is_still_one_variable_away(self, cfg, monkeypatch):
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("LLM_API_KEY", "sk-chat")
-        monkeypatch.setenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
-        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-embeddings")
-        monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-small")
-        prod = load_settings()
+    def test_the_vendors_own_key_names_are_accepted(self, cfg, monkeypatch):
+        """`ZAI_API_KEY` and `DASHSCOPE_API_KEY` are what the consoles hand out,
+        so neither has to be re-exported under another name."""
+        live_settings(cfg, monkeypatch, ZAI_API_KEY="sk-from-zai-console")
+        monkeypatch.delenv("LLM_API_KEY")  # the console gives you only the alias
+        prod = dataclasses.replace(load_settings(), data_dir=cfg.data_dir)
+        assert prod.llm_api_key == "sk-from-zai-console"
+        assert prod.live_llm
 
-        assert prod.resolved_embedding_base_url == "https://api.openai.com/v1"
-        assert prod.resolved_embedding_api_key == "sk-embeddings"
-        assert prod.llm_base_url == "https://openrouter.ai/api/v1"  # chat unaffected
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-from-alibaba-console")
+        prod = dataclasses.replace(load_settings(), data_dir=cfg.data_dir)
+        assert prod.resolved_embedding_api_key == "sk-from-alibaba-console"
+        assert prod.embedding_vendor == "dashscope"
 
-    def test_the_alternate_models_are_a_pure_env_override(self, cfg, monkeypatch):
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("LLM_API_KEY", "sk-key")
-        for model in ("deepseek/deepseek-v4.1-flash", "qwen/qwen3.8-flash"):
-            monkeypatch.setenv("LLM_MODEL", model)
-            swapped = load_settings()
-            assert swapped.llm_model == model
-            assert swapped.extractor_version == f"llm:{model}"
-            assert swapped.chat_extras == {"reasoning": {"effort": "low"}}
+    def test_a_dashscope_key_moves_embeddings_and_nothing_else(self, cfg, monkeypatch):
+        prod = live_settings(cfg, monkeypatch, DASHSCOPE_API_KEY="sk-dashscope")
+
+        assert prod.resolved_embedding_base_url == (
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        )
+        assert prod.resolved_embedding_model == "text-embedding-v4"
+        assert prod.resolved_embedding_api_key == "sk-dashscope"
+        # Chat is untouched: it is still Z.ai, on the Z.ai key.
+        assert prod.llm_base_url == "https://api.z.ai/api/paas/v4"
+        assert prod.llm_api_key == "sk-zai-key"
+
+    def test_qwen3_embedding_8b_is_still_reachable_on_dashscope(self, cfg, monkeypatch):
+        prod = live_settings(
+            cfg, monkeypatch, DASHSCOPE_API_KEY="sk-d", EMBEDDING_MODEL="qwen3-embedding-8b"
+        )
+        assert prod.resolved_embedding_model == "qwen3-embedding-8b"
+        assert prod.embedding_vendor == "dashscope"
+
+    @pytest.mark.parametrize(
+        "base,vendor",
+        [
+            ("https://api.z.ai/api/paas/v4", "zai"),
+            ("https://open.bigmodel.cn/api/paas/v4", "zai"),
+            ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "dashscope"),
+            ("https://openrouter.ai/api/v1", "openrouter"),
+            ("http://localhost:8000/v1", "custom"),
+        ],
+    )
+    def test_each_supported_base_url_is_recognised(self, cfg, monkeypatch, base, vendor):
+        assert live_settings(cfg, monkeypatch, LLM_BASE_URL=base).llm_vendor == vendor
+
+    def test_dashscope_can_serve_chat_too(self, cfg, monkeypatch):
+        prod = live_settings(
+            cfg,
+            monkeypatch,
+            LLM_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            LLM_MODEL="qwen3.8-flash",
+        )
+        assert prod.llm_vendor == "dashscope"
+        assert prod.resolved_llm_model == "qwen3.8-flash"
+        assert prod.chat_extras == {}
 
     def test_no_key_means_no_live_provider_at_all(self, cfg, monkeypatch):
         """The defaults must not make an unconfigured deployment *look* live."""
         monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        for name in PROVIDER_ENV:
+            monkeypatch.delenv(name, raising=False)
         prod = load_settings()
         assert not (prod.live_llm or prod.live_vision or prod.live_embeddings)
         assert prod.embedding_provider == "deterministic_v1"
 
 
-class TestReasoningEffort:
-    """`z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` reason before
-    answering. Extraction is structured transcription, not a puzzle, so the
-    lowest setting keeps latency and output tokens down."""
+class TestModelIdNormalisation:
+    """Carrying a marketplace prefix to a first-party host is the likeliest
+    mistake when migrating, and it surfaces as a 404 on the first ingestion
+    rather than at startup — so it is corrected before the request goes out."""
 
-    def test_openrouter_requests_carry_low_reasoning_effort(self, cfg, monkeypatch):
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("LLM_API_KEY", "sk-key")
-        assert load_settings().chat_extras == {"reasoning": {"effort": "low"}}
+    @pytest.mark.parametrize(
+        "raw,sent",
+        [
+            ("z-ai/glm-5.3-flash", "glm-5.3-flash"),
+            ("qwen/qwen3.8-flash", "qwen3.8-flash"),
+            ("deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash"),
+            ("glm-5.3-flash", "glm-5.3-flash"),
+        ],
+    )
+    def test_a_vendor_prefix_is_stripped_for_zai(self, cfg, monkeypatch, raw, sent):
+        prod = live_settings(cfg, monkeypatch, LLM_MODEL=raw)
+        assert prod.llm_model == raw, "the raw setting is preserved for reporting"
+        assert prod.resolved_llm_model == sent
+        assert prod.extractor_version == f"llm:{sent}"
 
-    def test_a_non_openrouter_host_is_sent_no_reasoning_field(self, cfg, monkeypatch):
-        """An unknown field is not harmless everywhere — some OpenAI-compatible
-        hosts reject the whole request for one, so it is gated on the host."""
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("LLM_API_KEY", "sk-key")
-        monkeypatch.setenv("LLM_BASE_URL", "https://api.openai.com/v1")
-        prod = load_settings()
-        assert prod.targets_openrouter is False
-        assert prod.chat_extras == {}
+    @pytest.mark.parametrize(
+        "raw,sent",
+        [("qwen/text-embedding-v4", "text-embedding-v4"),
+         ("qwen/qwen3-embedding-8b", "qwen3-embedding-8b")],
+    )
+    def test_a_vendor_prefix_is_stripped_for_dashscope(self, cfg, monkeypatch, raw, sent):
+        prod = live_settings(cfg, monkeypatch, DASHSCOPE_API_KEY="sk-d", EMBEDDING_MODEL=raw)
+        assert prod.resolved_embedding_model == sent
 
-    def test_the_effort_can_be_raised_or_switched_off(self, cfg, monkeypatch):
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("LLM_API_KEY", "sk-key")
+    def test_the_marketplace_keeps_its_namespace(self, cfg, monkeypatch):
+        """Stripping there would break the id, not fix it."""
+        prod = marketplace_settings(cfg, monkeypatch)
+        assert prod.resolved_llm_model == "z-ai/glm-5.3-flash"
+        assert prod.resolved_embedding_model == "qwen/qwen3-embedding-8b"
+
+    def test_an_unrecognised_host_is_left_alone(self, cfg, monkeypatch):
+        """A self-hosted vLLM legitimately serves `meta-llama/Llama-3-8B`, so
+        only hosts known to namespace nothing get the treatment."""
+        prod = live_settings(
+            cfg,
+            monkeypatch,
+            LLM_BASE_URL="http://localhost:8000/v1",
+            LLM_MODEL="meta-llama/Llama-3-8B-Instruct",
+        )
+        assert prod.llm_vendor == "custom"
+        assert prod.resolved_llm_model == "meta-llama/Llama-3-8B-Instruct"
+
+    def test_the_stripped_id_is_what_reaches_the_wire(self, cfg, monkeypatch, capture):
+        prod = live_settings(cfg, monkeypatch, LLM_MODEL="z-ai/glm-5.3-flash")
+        capture.install().reply(chat_reply({"claims": []}))
+        P.LiveLLMExtractor(prod).extract("Some source text about batching.", {"title": "t"})
+
+        assert str(capture.requests[0].url) == "https://api.z.ai/api/paas/v4/chat/completions"
+        assert capture.bodies[0]["model"] == "glm-5.3-flash"
+
+
+class TestPayloadCleanliness:
+    """A first-party schema rejects an unknown top-level key with a 400, so a
+    marketplace-only field must never reach one."""
+
+    @pytest.mark.parametrize("call", ["extract", "classify", "vision"])
+    def test_no_reasoning_field_reaches_zai(self, cfg, monkeypatch, capture, tmp_path, call):
+        prod = live_settings(cfg, monkeypatch)
+        assert prod.llm_reasoning_effort == "low", "the setting is still there, just not sent"
+        self._invoke(call, prod, capture, tmp_path)
+
+        body = capture.bodies[0]
+        assert "reasoning" not in body
+        assert body["model"] == "glm-5.3-flash"
+        # And what the parser depends on is still present.
+        assert body["response_format"] == {"type": "json_object"}
+        assert body["temperature"] == 0
+
+    @pytest.mark.parametrize("call", ["extract", "classify", "vision"])
+    def test_no_reasoning_field_reaches_dashscope_chat(
+        self, cfg, monkeypatch, capture, tmp_path, call
+    ):
+        prod = live_settings(
+            cfg,
+            monkeypatch,
+            LLM_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            LLM_MODEL="qwen3.8-flash",
+        )
+        self._invoke(call, prod, capture, tmp_path)
+        assert "reasoning" not in capture.bodies[0]
+
+    @pytest.mark.parametrize("call", ["extract", "classify", "vision"])
+    def test_no_attribution_headers_reach_a_first_party_host(
+        self, cfg, monkeypatch, capture, tmp_path, call
+    ):
+        """Telling a vendor's gateway about a marketplace we are not using is
+        not information it is owed."""
+        prod = live_settings(cfg, monkeypatch)
+        self._invoke(call, prod, capture, tmp_path)
+
+        headers = capture.requests[0].headers
+        assert "x-title" not in headers
+        assert "http-referer" not in headers
+        assert headers["authorization"] == "Bearer sk-zai-key"
+        assert headers["content-type"] == "application/json"
+
+    def test_no_attribution_headers_reach_dashscope_embeddings(
+        self, cfg, monkeypatch, capture
+    ):
+        prod = live_settings(cfg, monkeypatch, DASHSCOPE_API_KEY="sk-dashscope")
+        capture.install().reply({"data": [{"index": 0, "embedding": [0.5] * 256}]})
+        P.LiveEmbedder(prod).embed(["one text"])
+
+        request = capture.requests[0]
+        assert str(request.url) == (
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/embeddings"
+        )
+        assert "x-title" not in request.headers
+        assert request.headers["authorization"] == "Bearer sk-dashscope"
+
+    def test_the_marketplace_still_gets_what_it_asks_for(self, cfg, monkeypatch, capture):
+        """The OpenRouter path is opt-in now, not gone — so it keeps its own
+        field and its own attribution headers."""
+        prod = marketplace_settings(cfg, monkeypatch)
+        capture.install().reply(chat_reply({"claims": []}))
+        P.LiveLLMExtractor(prod).extract("Some source text.", {"title": "t"})
+
+        assert capture.bodies[0]["reasoning"] == {"effort": "low"}
+        assert capture.requests[0].headers["x-title"] == "brain"
+
+    def test_the_reasoning_effort_is_still_configurable_on_the_marketplace(
+        self, cfg, monkeypatch
+    ):
+        prod = marketplace_settings(cfg, monkeypatch)
+        assert prod.chat_extras == {"reasoning": {"effort": "low"}}
         monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
         assert load_settings().chat_extras == {"reasoning": {"effort": "high"}}
         monkeypatch.setenv("LLM_REASONING_EFFORT", "")
         assert load_settings().chat_extras == {}
 
-    @pytest.mark.parametrize("call", ["extract", "classify", "vision"])
-    def test_every_chat_call_carries_it(self, cfg, monkeypatch, capture, tmp_path, call):
-        prod = openrouter_settings(cfg, monkeypatch)
+    def _invoke(self, call, prod, capture, tmp_path):
         capture.install().reply(
             chat_reply({"claims": [], "link_type": "none", "title": "t", "description": "d"}),
             repeat=2,
         )
-
         if call == "extract":
             P.LiveLLMExtractor(prod).extract("Some source text about batching.", {"title": "t"})
         elif call == "classify":
             P.LiveLinkClassifier(prod).classify({"claim": "a"}, {"claim": "b"})
         else:
             P.LiveVisionProvider(prod).describe(fake_image(tmp_path))
-
-        body = capture.bodies[0]
-        assert body["reasoning"] == {"effort": "low"}
-        assert body["model"] == "z-ai/glm-5.3-flash"
-        # The reasoning field must not displace what the parser depends on.
-        assert body["response_format"] == {"type": "json_object"}
-        assert body["temperature"] == 0
 
 
 class TestFencedJsonParsing:
@@ -859,7 +1020,7 @@ class TestFencedJsonParsing:
     def test_a_fenced_reply_still_reaches_the_grounder(self, cfg, monkeypatch, capture):
         """End to end: the fence is stripped, and the quote is then held to the
         same `rapidfuzz >= 88` standard as any other."""
-        prod = openrouter_settings(cfg, monkeypatch)
+        prod = live_settings(cfg, monkeypatch)
         verbatim = "We batch every single cold email into one block before ten in the morning"
         source = f"{verbatim}, and our reply rate went up 34% that quarter."
         capture.install().reply(
@@ -893,8 +1054,9 @@ class TestFencedJsonParsing:
 
 
 class TestMatryoshkaGuard:
-    """`qwen/qwen3-embedding-8b` natively returns 4096 floats. `claims_vec` is
-    declared `float[256]`, so a wider reply must be narrowed, not rejected."""
+    """`claims_vec` is declared `float[256]`. Whether the operator lands on
+    DashScope `text-embedding-v4`, `qwen3-embedding-8b` or Z.ai `embedding-3`,
+    what comes back has to fit that column."""
 
     def embedding_reply(self, *vectors: list[float]) -> dict:
         return {
@@ -903,21 +1065,38 @@ class TestMatryoshkaGuard:
             ]
         }
 
-    def test_the_request_asks_for_256_dimensions(self, cfg, monkeypatch, capture):
-        prod = openrouter_settings(cfg, monkeypatch)
+    @pytest.mark.parametrize(
+        "env,url,model",
+        [
+            ({}, "https://api.z.ai/api/paas/v4/embeddings", "embedding-3"),
+            (
+                {"DASHSCOPE_API_KEY": "sk-d"},
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/embeddings",
+                "text-embedding-v4",
+            ),
+            (
+                {"DASHSCOPE_API_KEY": "sk-d", "EMBEDDING_MODEL": "qwen3-embedding-8b"},
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/embeddings",
+                "qwen3-embedding-8b",
+            ),
+        ],
+    )
+    def test_every_route_asks_for_256_floats(self, cfg, monkeypatch, capture, env, url, model):
+        prod = live_settings(cfg, monkeypatch, **env)
         capture.install().reply(self.embedding_reply([0.5] * 256))
         P.LiveEmbedder(prod).embed(["one text"])
 
-        request = capture.requests[0]
-        assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
-        assert request.headers["authorization"] == "Bearer sk-single-key"
+        assert str(capture.requests[0].url) == url
         body = capture.bodies[0]
-        assert body["model"] == "qwen/qwen3-embedding-8b"
+        assert body["model"] == model
         assert body["dimensions"] == 256
+        # Without this a host may answer in base64, which `_normalise` would
+        # see as a string rather than a vector.
+        assert body["encoding_format"] == "float"
         assert body["input"] == ["one text"]
 
     def test_a_4096_float_reply_is_sliced_and_renormalised(self, cfg, monkeypatch, capture):
-        prod = openrouter_settings(cfg, monkeypatch)
+        prod = live_settings(cfg, monkeypatch, DASHSCOPE_API_KEY="sk-d")
         native = [float(index + 1) for index in range(4096)]
         capture.install().reply(self.embedding_reply(native))
 
@@ -930,17 +1109,16 @@ class TestMatryoshkaGuard:
         assert vector == pytest.approx([value / prefix_norm for value in native[:256]])
 
     def test_a_native_256_reply_is_only_renormalised(self, cfg, monkeypatch, capture):
-        prod = openrouter_settings(cfg, monkeypatch)
-        raw = [0.2] * 256
-        capture.install().reply(self.embedding_reply(raw))
+        prod = live_settings(cfg, monkeypatch)
+        capture.install().reply(self.embedding_reply([0.2] * 256))
         vector = P.LiveEmbedder(prod).embed(["one text"])[0]
         assert len(vector) == 256
         assert pytest.approx(sum(value * value for value in vector), abs=1e-9) == 1.0
 
     def test_a_narrower_reply_is_refused_rather_than_padded(self, cfg, monkeypatch, capture):
-        """Zero-padding to 256 would make a vector that is comparable to
-        nothing, and cosine distance would not complain."""
-        prod = openrouter_settings(cfg, monkeypatch)
+        """Zero-padding to 256 would make a vector comparable to nothing, and
+        cosine distance would not complain."""
+        prod = live_settings(cfg, monkeypatch)
         capture.install().reply(self.embedding_reply([0.1] * 128))
         with pytest.raises(P.ProviderError) as raised:
             P.LiveEmbedder(prod).embed(["one text"])
@@ -948,7 +1126,7 @@ class TestMatryoshkaGuard:
         assert "128" in raised.value.message
 
     def test_a_zero_vector_is_refused(self, cfg, monkeypatch, capture):
-        prod = openrouter_settings(cfg, monkeypatch)
+        prod = live_settings(cfg, monkeypatch)
         capture.install().reply(self.embedding_reply([0.0] * 256))
         with pytest.raises(P.ProviderError):
             P.LiveEmbedder(prod).embed(["one text"])
@@ -956,7 +1134,7 @@ class TestMatryoshkaGuard:
     def test_rows_are_reordered_by_index_not_trusted_in_arrival_order(
         self, cfg, monkeypatch, capture
     ):
-        prod = openrouter_settings(cfg, monkeypatch)
+        prod = live_settings(cfg, monkeypatch)
         first = [1.0] + [0.0] * 4095
         second = [0.0, 1.0] + [0.0] * 4094
         capture.install().reply(
@@ -970,7 +1148,7 @@ class TestMatryoshkaGuard:
         self, cfg, monkeypatch, capture, user
     ):
         """The point of the guard: what comes back must survive the column."""
-        prod = openrouter_settings(cfg, monkeypatch)
+        prod = live_settings(cfg, monkeypatch, DASHSCOPE_API_KEY="sk-d")
         capture.install().reply(self.embedding_reply([float(i + 1) for i in range(4096)]))
         vector = P.LiveEmbedder(prod).embed(["one text"])[0]
 
@@ -999,7 +1177,7 @@ class TestMatryoshkaGuard:
     ):
         """A hashed fallback here would put two incompatible vector spaces in
         one index, where every later search would silently be wrong."""
-        prod = openrouter_settings(cfg, monkeypatch)
+        prod = live_settings(cfg, monkeypatch)
         capture.install().reply({"error": "upstream"}, status=500, repeat=4)
         with pytest.raises(P.ProviderError):
             P.LiveEmbedder(prod).embed(["one text"])

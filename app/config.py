@@ -23,6 +23,59 @@ USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 MB = 1024 * 1024
 
+#: Hosts we recognise, so we know which dialect of "OpenAI-compatible" we are
+#: speaking. Every one of these serves `/chat/completions` and `/embeddings`,
+#: but they disagree about what *else* a payload may contain.
+OPENROUTER_HOSTS = ("openrouter.ai",)
+ZAI_HOSTS = ("api.z.ai", "open.bigmodel.cn")
+DASHSCOPE_HOSTS = ("aliyuncs.com",)
+
+ZAI_BASE_URL = "https://api.z.ai/api/paas/v4"
+DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+#: Alibaba's API id for Qwen3-Embedding, with native `dimensions` support.
+DASHSCOPE_EMBEDDING_MODEL = "text-embedding-v4"
+#: Z.ai's own 256-dimension embedding model, so a single Z.ai key is enough.
+ZAI_EMBEDDING_MODEL = "embedding-3"
+#: Only reached on a marketplace host, where ids keep their vendor namespace.
+MARKETPLACE_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
+
+VENDOR_LABELS = {
+    "zai": "Z.ai Direct",
+    "dashscope": "Alibaba DashScope Direct",
+    "openrouter": "OpenRouter (marketplace, +5.5% platform fee)",
+    "custom": "custom OpenAI-compatible host",
+}
+
+
+def vendor_for(base_url: str) -> str:
+    """Which vendor dialect a base URL speaks: zai, dashscope, openrouter, custom."""
+    url = (base_url or "").lower()
+    if any(host in url for host in OPENROUTER_HOSTS):
+        return "openrouter"
+    if any(host in url for host in ZAI_HOSTS):
+        return "zai"
+    if any(host in url for host in DASHSCOPE_HOSTS):
+        return "dashscope"
+    return "custom"
+
+
+def normalise_model_id(model: str, base_url: str) -> str:
+    """Strip a marketplace vendor prefix when talking to a first-party host.
+
+    OpenRouter namespaces its catalogue (`z-ai/glm-5.3-flash`), and the vendors
+    themselves do not (`glm-5.3-flash`). Carrying the prefix over is the single
+    likeliest mistake when moving off a marketplace, and it fails as a 404 on
+    the first ingestion rather than at startup — so it is corrected here.
+
+    Only for hosts we *know* namespace nothing. A self-hosted vLLM legitimately
+    serves ids like `meta-llama/Llama-3-8B`, so a `custom` host is left alone.
+    """
+    raw = (model or "").strip()
+    if "/" not in raw or vendor_for(base_url) not in ("zai", "dashscope"):
+        return raw
+    return raw.split("/", 1)[1]
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -97,27 +150,33 @@ class Settings:
     link_floor_override: float | None = None
 
     # ---- live AI providers ------------------------------------------------
-    # One key, one host, three jobs. OpenRouter serves chat, vision and
-    # `/embeddings`, so `LLM_API_KEY` alone turns the whole live stack on and
-    # `EMBEDDING_*` exists only for the operator who wants a second host.
-    llm_base_url: str = "https://openrouter.ai/api/v1"
+    # First-party endpoints, no marketplace in the path: a reseller's platform
+    # fee is a standing percentage on every token the product will ever extract,
+    # and these vendors serve the same OpenAI-compatible surface themselves.
+    #
+    # `LLM_API_KEY` (or `ZAI_API_KEY`) alone is a complete setup: Z.ai serves
+    # chat, vision *and* `embedding-3`. Adding `DASHSCOPE_API_KEY` (or
+    # `EMBEDDING_API_KEY`) moves embeddings to Alibaba's Qwen3 endpoint without
+    # touching anything else.
+    llm_base_url: str = ZAI_BASE_URL
     llm_api_key: str = ""
     #: Native vision, a very large context, and cheap enough to extract every
-    #: chunk of a two-hour transcript. `deepseek/deepseek-v4.1-flash` and
-    #: `qwen/qwen3.8-flash` are drop-in alternatives via `LLM_MODEL`.
-    llm_model: str = "z-ai/glm-5.3-flash"
-    #: This class of model reasons before answering. Extraction is a structured
-    #: transcription task, not a puzzle, so the lowest setting keeps latency and
-    #: output tokens down; `""` omits the field for hosts that reject it.
+    #: chunk of a two-hour transcript. `deepseek-v4.1-flash` and `qwen3.8-flash`
+    #: are drop-in alternatives via `LLM_MODEL` (with the matching base URL).
+    llm_model: str = "glm-5.3-flash"
+    #: OpenRouter's own `reasoning.effort`. Extraction is structured
+    #: transcription, not a puzzle, so the lowest setting keeps latency and
+    #: output tokens down — but it is only ever sent to OpenRouter, because a
+    #: first-party schema rejects an unknown top-level key with a 400.
     llm_reasoning_effort: str = "low"
     llm_timeout_sec: float = 60.0
     llm_max_retries: int = 2
     llm_max_output_tokens: int = 4096
+    #: All three are "unset" sentinels. What they resolve to depends on which
+    #: keys exist — see `resolved_embedding_*`.
     embedding_base_url: str = ""
     embedding_api_key: str = ""
-    #: Matryoshka-trained, so a 256-float prefix of its native vector is itself
-    #: a valid embedding — see `LiveEmbedder._normalise`.
-    embedding_model_name: str = "qwen/qwen3-embedding-8b"
+    embedding_model_name: str = ""
     embedding_timeout_sec: float = 30.0
     vision_max_bytes: int = 8 * MB
 
@@ -186,10 +245,58 @@ class Settings:
     def live_vision(self) -> bool:
         return self.live_llm
 
+    # ---- which host, and under which name --------------------------------
+    @property
+    def llm_vendor(self) -> str:
+        return vendor_for(self.llm_base_url)
+
+    @property
+    def embedding_vendor(self) -> str:
+        return vendor_for(self.resolved_embedding_base_url)
+
+    @property
+    def targets_openrouter(self) -> bool:
+        return self.llm_vendor == "openrouter"
+
+    @property
+    def resolved_llm_model(self) -> str:
+        """The model id as the active host spells it."""
+        return normalise_model_id(self.llm_model, self.llm_base_url)
+
+    @property
+    def resolved_embedding_base_url(self) -> str:
+        """Where `/embeddings` lives.
+
+        A separate embedding key means the operator wants a separate embedding
+        host, and the only reason to hold a second key today is DashScope — so
+        that is what an unqualified second key resolves to. One key means one
+        host, whichever host the chat model is on.
+        """
+        if self.embedding_base_url:
+            return self.embedding_base_url.rstrip("/")
+        if self.embedding_api_key:
+            return DASHSCOPE_BASE_URL
+        return self.llm_base_url.rstrip("/")
+
+    @property
+    def resolved_embedding_api_key(self) -> str:
+        return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def resolved_embedding_model(self) -> str:
+        raw = self.embedding_model_name
+        if not raw:
+            vendor = self.embedding_vendor
+            raw = {
+                "dashscope": DASHSCOPE_EMBEDDING_MODEL,
+                "zai": ZAI_EMBEDDING_MODEL,
+            }.get(vendor, MARKETPLACE_EMBEDDING_MODEL)
+        return normalise_model_id(raw, self.resolved_embedding_base_url)
+
     @property
     def embedding_provider(self) -> str:
         """The id recorded on every claim, and the key the floors are chosen by."""
-        return self.embedding_model_name if self.live_embeddings else "deterministic_v1"
+        return self.resolved_embedding_model if self.live_embeddings else "deterministic_v1"
 
     @property
     def embedding_model(self) -> str:
@@ -200,11 +307,7 @@ class Settings:
     def extractor_version(self) -> str:
         # Stored per claim: which extractor proposed it, and therefore how much
         # the non-grounded fields are worth.
-        return f"llm:{self.llm_model}" if self.live_llm else "heuristic-v1"
-
-    @property
-    def targets_openrouter(self) -> bool:
-        return "openrouter.ai" in self.llm_base_url
+        return f"llm:{self.resolved_llm_model}" if self.live_llm else "heuristic-v1"
 
     @property
     def chat_extras(self) -> dict[str, object]:
@@ -217,14 +320,6 @@ class Settings:
         if self.targets_openrouter and self.llm_reasoning_effort:
             return {"reasoning": {"effort": self.llm_reasoning_effort}}
         return {}
-
-    @property
-    def resolved_embedding_base_url(self) -> str:
-        return (self.embedding_base_url or self.llm_base_url).rstrip("/")
-
-    @property
-    def resolved_embedding_api_key(self) -> str:
-        return self.embedding_api_key or self.llm_api_key
 
     @property
     def search_similarity_floor(self) -> float:
@@ -359,13 +454,17 @@ def load_settings() -> Settings:
         ),
         audience=os.environ.get("BRAIN_AUDIENCE", defaults.audience),
         llm_base_url=(os.environ.get("LLM_BASE_URL") or defaults.llm_base_url).rstrip("/"),
-        llm_api_key=(os.environ.get("LLM_API_KEY") or "").strip(),
+        # `ZAI_API_KEY` is the name the vendor's own console hands out, so it is
+        # accepted directly rather than making the operator re-export it.
+        llm_api_key=(os.environ.get("LLM_API_KEY") or os.environ.get("ZAI_API_KEY") or "").strip(),
         llm_model=os.environ.get("LLM_MODEL") or defaults.llm_model,
         embedding_base_url=(os.environ.get("EMBEDDING_BASE_URL") or "").strip(),
-        # Most hosts serve both endpoints off one key, so the LLM key is the
-        # fallback rather than a second thing to configure.
-        embedding_api_key=(os.environ.get("EMBEDDING_API_KEY") or "").strip(),
-        embedding_model_name=os.environ.get("EMBEDDING_MODEL") or defaults.embedding_model_name,
+        # A second key is what switches embeddings to a second host; `DASHSCOPE_
+        # API_KEY` is the name Alibaba's console uses for it.
+        embedding_api_key=(
+            os.environ.get("EMBEDDING_API_KEY") or os.environ.get("DASHSCOPE_API_KEY") or ""
+        ).strip(),
+        embedding_model_name=(os.environ.get("EMBEDDING_MODEL") or "").strip(),
         llm_reasoning_effort=(
             os.environ["LLM_REASONING_EFFORT"].strip()
             if "LLM_REASONING_EFFORT" in os.environ

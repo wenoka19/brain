@@ -306,7 +306,7 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **632 passed** |
+| `BRAIN_ENV=test pytest` | **657 passed** |
 | `python -m app.cli selftest` | **28/28 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
@@ -324,13 +324,13 @@ specification in `DESIGN_DECISIONS.md`.
 | `BRAIN_PREVIEW` | — | `1` enables `/preview` outside test mode. |
 | `BRAIN_ROLE` | — | `web` (default) or `worker`. |
 | `R2_*`, `LITESTREAM_REPLICA_URL` | prod | Replication to Cloudflare R2. |
-| `LLM_API_KEY` | prod (for live AI) | Turns on the live extractor, link classifier and vision. Unset = rule-based fallback. |
-| `LLM_BASE_URL` | — | OpenAI-compatible base. Default `https://openrouter.ai/api/v1`. |
-| `LLM_MODEL` | — | Default `z-ai/glm-5.3-flash`. Must be vision-capable for image ingestion. `deepseek/deepseek-v4.1-flash` and `qwen/qwen3.8-flash` are drop-in. |
-| `LLM_REASONING_EFFORT` | — | Default `low`, sent as OpenRouter's `reasoning.effort`. Empty string omits the field. Ignored for non-OpenRouter hosts. |
-| `EMBEDDING_API_KEY` | — | Defaults to `LLM_API_KEY`. |
-| `EMBEDDING_BASE_URL` | — | Defaults to `LLM_BASE_URL`. |
-| `EMBEDDING_MODEL` | — | Default `qwen/qwen3-embedding-8b`, requested at 256 dimensions and prefix-sliced if the host returns its native 4096. |
+| `LLM_API_KEY` / `ZAI_API_KEY` | prod (for live AI) | Turns on the live extractor, link classifier, vision **and** embeddings. Unset = rule-based fallback. One Z.ai key is a complete setup. |
+| `LLM_BASE_URL` | — | OpenAI-compatible base. Default `https://api.z.ai/api/paas/v4`. Also recognised: `https://open.bigmodel.cn/api/paas/v4`, `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`, `https://openrouter.ai/api/v1`. |
+| `LLM_MODEL` | — | Default `glm-5.3-flash`. Must be vision-capable for image ingestion. `deepseek-v4.1-flash` and `qwen3.8-flash` are drop-in with the matching base URL. A marketplace prefix (`z-ai/…`) is stripped automatically on a first-party host. |
+| `LLM_REASONING_EFFORT` | — | Default `low`, sent **only** to OpenRouter as its `reasoning.effort`. Never sent to Z.ai or DashScope, which reject unknown top-level keys with a 400. |
+| `DASHSCOPE_API_KEY` / `EMBEDDING_API_KEY` | — | Setting either moves embeddings to DashScope (`text-embedding-v4`) on its own key. Unset = the LLM key and host. |
+| `EMBEDDING_BASE_URL` | — | Overrides the derived host. Default: DashScope when an embedding key is set, otherwise `LLM_BASE_URL`. |
+| `EMBEDDING_MODEL` | — | Default `text-embedding-v4` on DashScope, `embedding-3` on Z.ai. Requested at 256 dimensions and prefix-sliced if the host returns its native width. |
 | `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` | — | Override the auto-calibrated retrieval floors. |
 | `R2_ENDPOINT_URL` (or `R2_ENDPOINT`) | for portability | S3 endpoint for tenant snapshots. All four R2 vars must be set, or snapshotting is off and tenants live only on the node's disk. |
 | `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | for portability | Credentials for the same. |
@@ -659,3 +659,68 @@ calibrate` measures the real on-topic vs. off-topic spread in one command and
 prints the floors to set via `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR`. Until
 that runs, `search` may be either too strict or too permissive — the hashed
 floors (0.18 / 0.15) remain measured and correct for `BRAIN_ENV=test`.
+
+
+---
+
+## Phase 7c — Off the marketplace: first-party Z.ai + DashScope
+
+A reseller's platform fee is not a one-off cost, it is a standing percentage on
+every token this product will ever extract — and both vendors serve the same
+OpenAI-compatible surface themselves. The default path now goes direct, and
+OpenRouter becomes an opt-in route rather than the only one.
+
+### What one key buys
+
+| keys set | chat + vision | embeddings |
+| --- | --- | --- |
+| `LLM_API_KEY` (or `ZAI_API_KEY`) | Z.ai `glm-5.3-flash` | Z.ai `embedding-3`, same key, same host |
+| …plus `DASHSCOPE_API_KEY` (or `EMBEDDING_API_KEY`) | unchanged | DashScope `text-embedding-v4` on its own key |
+| `LLM_BASE_URL=…openrouter.ai/api/v1` | marketplace, namespaced ids | marketplace |
+
+Each vendor's own key name is accepted directly, because `ZAI_API_KEY` and
+`DASHSCOPE_API_KEY` are what the two consoles hand out — there is nothing to
+re-export. Resolution lives in properties (`resolved_llm_model`,
+`resolved_embedding_base_url` / `_api_key` / `_model`) rather than in
+`load_settings`, so a `Settings` built directly in a test resolves identically
+to one built from the environment.
+
+### Three ways this would have broken, closed
+
+1. **The migration 404.** OpenRouter namespaces its catalogue
+   (`z-ai/glm-5.3-flash`); the vendors do not (`glm-5.3-flash`). Carrying the
+   prefix over fails as a 404 on the first ingestion, not at startup.
+   `normalise_model_id` strips it for hosts known to namespace nothing — and
+   **only** those: a self-hosted vLLM legitimately serves
+   `meta-llama/Llama-3-8B`, so a `custom` host is left verbatim. The raw
+   setting is preserved for reporting, and `doctor` prints the rewrite when one
+   happens. The mirror case is caught too: an un-namespaced id on OpenRouter
+   now draws a warning naming the prefix it wants.
+2. **The 400 from an unknown key.** `reasoning: {"effort": "low"}` is
+   OpenRouter's own parameter, and a first-party schema rejects an entire
+   request for one unrecognised top-level field. It is gated on
+   `cfg.targets_openrouter`, with a test per call site (extractor, classifier,
+   vision) per host asserting the key is absent.
+3. **Attribution headers going to the wrong gateway.** `X-Title` and
+   `HTTP-Referer` are now set from the request URL inside `_post_json` rather
+   than by each caller, so there is no site that can forget. A vendor's gateway
+   is not owed the name of a marketplace we are not using.
+
+`encoding_format: "float"` joins `dimensions: 256` on every embedding request:
+without it a host may answer in base64, which `_normalise` would see as a
+string rather than a vector. The Matryoshka guard is unchanged and now tested
+across all three routes — Z.ai `embedding-3`, DashScope `text-embedding-v4` and
+`qwen3-embedding-8b` — so whatever width comes back lands in `claims_vec` as a
+unit-length `float[256]`.
+
+`doctor` names the active vendor per slot (`Z.ai Direct`,
+`Alibaba DashScope Direct`, `custom OpenAI-compatible host`), and warns rather
+than stays silent when a route still goes through the marketplace.
+
+### Still the one thing to do with the live key
+
+**The neural floors (0.42 / 0.38) remain uncalibrated**, and the embedding model
+has now changed again — `embedding-3` or `text-embedding-v4` rather than a
+256-native OpenAI model. Run `python -m app.cli calibrate` once with the live
+key and set `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` from what it measures.
+The hashed floors (0.18 / 0.15) stay measured and correct for `BRAIN_ENV=test`.

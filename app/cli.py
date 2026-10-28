@@ -62,6 +62,7 @@ def scoped_env(**overrides: str):
 # doctor
 # ===========================================================================
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from app.config import VENDOR_LABELS as config_labels
     from app.config import settings
 
     cfg = settings()
@@ -135,8 +136,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # Each provider slot degrades independently, so report them separately
         # rather than as one "AI configured" line that hides a half-setup host.
         if cfg.live_llm:
-            line("ok", "extraction + linking", f"{cfg.llm_model} via {cfg.llm_base_url}")
-            line("ok", "vision (images)", cfg.llm_model)
+            line(
+                "ok",
+                "extraction + linking",
+                f"{cfg.resolved_llm_model} — {config_labels[cfg.llm_vendor]} "
+                f"({cfg.llm_base_url})",
+            )
+            line("ok", "vision (images)", cfg.resolved_llm_model)
+            if cfg.llm_model != cfg.resolved_llm_model:
+                line(
+                    "ok",
+                    "model id normalised",
+                    f"LLM_MODEL is '{cfg.llm_model}'; a first-party host namespaces nothing, "
+                    f"so it is sent as '{cfg.resolved_llm_model}'",
+                )
             if cfg.chat_extras:
                 line(
                     "ok",
@@ -144,6 +157,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"{cfg.llm_reasoning_effort} — extraction is structured transcription, "
                     "so it does not need deliberation (LLM_REASONING_EFFORT)",
                 )
+            if cfg.llm_vendor == "openrouter":
+                line(
+                    "warn",
+                    "marketplace route",
+                    "chat is going through OpenRouter, which takes a platform fee on every "
+                    "token. Z.ai serves the same models first-party: unset LLM_BASE_URL",
+                )
+                warnings += 1
+                if "/" not in cfg.resolved_llm_model:
+                    # The mirror image of the prefix we strip for a direct host.
+                    line(
+                        "warn",
+                        "model id",
+                        f"OpenRouter namespaces its catalogue, so '{cfg.resolved_llm_model}' "
+                        "will 404 there — it wants a vendor prefix like "
+                        f"'z-ai/{cfg.resolved_llm_model}'",
+                    )
+                    warnings += 1
         else:
             line(
                 "warn",
@@ -158,8 +189,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             line(
                 "ok",
                 "embeddings",
-                f"{cfg.embedding_model_name} @ {cfg.embedding_dim}d via {cfg.resolved_embedding_base_url}",
+                f"{cfg.resolved_embedding_model} @ {cfg.embedding_dim}d — "
+                f"{config_labels[cfg.embedding_vendor]} ({cfg.resolved_embedding_base_url})",
             )
+            if cfg.embedding_vendor == "zai" and not cfg.embedding_api_key:
+                line(
+                    "ok",
+                    "embedding key",
+                    "the same Z.ai key — set DASHSCOPE_API_KEY to move embeddings to "
+                    "Alibaba's Qwen3 endpoint instead",
+                )
+            if cfg.embedding_vendor == "openrouter":
+                line(
+                    "warn",
+                    "marketplace route",
+                    "embeddings are going through OpenRouter and its platform fee; "
+                    "DASHSCOPE_API_KEY or a Z.ai key routes them first-party",
+                )
+                warnings += 1
+            if cfg.embedding_vendor == "custom" and "/" in cfg.resolved_embedding_model:
+                line(
+                    "warn",
+                    "embedding model id",
+                    f"'{cfg.resolved_embedding_model}' still carries a marketplace prefix and "
+                    "this host is unrecognised, so it was left as-is — set EMBEDDING_MODEL",
+                )
+                warnings += 1
         else:
             line("warn", "embeddings", "no key — using the hashed bag-of-words embedder")
             warnings += 1
