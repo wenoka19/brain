@@ -78,6 +78,12 @@
       <span class="nav-label">Archived</span><span class="nav-count" data-count="archived"></span>
     </button>
     <div class="sidebar-foot">
+      <!-- The door to the whole point of the product: it opens Profile at
+           block 2, where the /mcp link and the live sessions are. -->
+      <button class="nav-item" id="connect-claude">
+        <svg class="icon"><use href="#i-copy"/></svg>
+        <span class="nav-label">Connect to Claude &#9656;</span>
+      </button>
       <button class="nav-item" id="open-profile">
         <svg class="icon"><use href="#i-profile"/></svg>
         <span class="nav-label">Profile</span>
@@ -88,14 +94,31 @@
   <main class="main">
     <div class="col">
 
-      <!-- sign-in (V1: the email establishes the tenant) -->
-      <section id="signin" class="empty hidden">
-        <h2>Connect to your brain</h2>
-        <p>Your library is keyed to your email. The MCP connection is where the real credentials live.</p>
-        <div class="empty-actions">
-          <input class="omni-input" id="signin-email" type="email" placeholder="you@example.com"
-                 autocomplete="email" style="max-width:260px">
+      <!-- the human entry door. One field, because the email *is* the tenant:
+           there is no password to lose, and the credentials that matter are the
+           OAuth tokens on the MCP side. -->
+      <section id="signin" class="enter-wrap hidden">
+        <div class="enter-card">
+          <span class="enter-mark" aria-hidden="true">&#9670;</span>
+          <h1>Sign in to brain</h1>
+          <p class="enter-sub">Your library is keyed to your email. Same address next
+             time signs you back into the same library; a new one creates it.</p>
+          <p class="enter-error hidden" id="signin-error"></p>
+          <div class="enter-field">
+            <label for="signin-email">Email</label>
+            <input class="omni-input" id="signin-email" type="email"
+                   placeholder="you@example.com" autocomplete="email" inputmode="email">
+          </div>
           <button class="btn btn-primary" id="signin-go">Continue</button>
+          <ul class="enter-points">
+            <li><span class="tick" aria-hidden="true">&#10003;</span>
+                <span>Lands you in a workspace with three editable demo items.</span></li>
+            <li><span class="tick" aria-hidden="true">&#10003;</span>
+                <span>Connects to Claude, ChatGPT or Cursor with one link.</span></li>
+            <li><span class="tick" aria-hidden="true">&#10003;</span>
+                <span>Agents can archive, never permanently delete.</span></li>
+          </ul>
+          <p class="enter-note">No password. Nothing is shared with anyone else.</p>
         </div>
       </section>
 
@@ -203,7 +226,8 @@
   <button id="open-profile-mobile"><svg class="icon"><use href="#i-profile"/></svg>Profile</button>
 </nav>
 
-<div class="tuner hidden" id="tuner">
+<div class="tuner hidden" id="tuner" data-collapsed="false">
+  <button class="btn btn-sm tuner-handle" id="tuner-handle" aria-expanded="true">Tuner</button>
   <div class="harness-group">
     <button class="btn btn-sm" data-theme-pick="light">light</button>
     <button class="btn btn-sm" data-theme-pick="dark">dark</button>

@@ -12,6 +12,9 @@ DATA_DIR="${BRAIN_DATA_DIR:-/data}"
 CONTROL_DB="${DATA_DIR}/control.db"
 ROLE="${BRAIN_ROLE:-web}"
 
+# `app.cli serve` passes uvicorn --proxy-headers --forwarded-allow-ips=* itself,
+# so the flags live in one place rather than in three launchers that can drift.
+
 # `snapshots` holds the `VACUUM INTO` staging file on its way to R2.
 mkdir -p "${DATA_DIR}/users" "${DATA_DIR}/uploads" "${DATA_DIR}/snapshots"
 

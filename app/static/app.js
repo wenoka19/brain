@@ -13,6 +13,11 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+//: One screen of cards is ~15; 100 is several flicks of scrolling and still
+//: lays out instantly on a phone. At 2,000 claims the unbounded version spends
+//: seconds in layout and then drops frames on every scroll.
+const PAGE_SIZE = 100;
+
 const state = {
   view: "everything",
   scope: "all",
@@ -28,6 +33,12 @@ const state = {
   expanded: new Set(),
   preview: location.pathname === "/preview",
   banners: {},
+  //: How many cards are in the DOM. The *filtering* always runs over the full
+  //: arrays in memory, which is what keeps it at 0ms; this only bounds what the
+  //: browser has to lay out and paint.
+  rendered: PAGE_SIZE,
+  watermark: null,
+  openInspector: null,
 };
 
 function readCookie(name) {
@@ -51,7 +62,12 @@ async function api(path, options = {}) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(init.body);
   }
-  if ((init.method || "GET") !== "GET") init.headers["X-Brain-CSRF"] = state.csrf;
+  if ((init.method || "GET") !== "GET") {
+    init.headers["X-Brain-CSRF"] = state.csrf;
+    // A cross-origin HTML form post rides the cookie but cannot set a custom
+    // header, and a custom header forces a preflight that /api/* never answers.
+    init.headers["X-Brain-Request"] = "1";
+  }
   if (state.forceOffline) return offlinePayload();
   let response;
   try {
@@ -148,6 +164,7 @@ function onType() {
   const text = $("#omni-input").value;
   // 0ms: filtering is local, never a request.
   state.filter = text.trim().toLowerCase();
+  resetPaging();
   const isUrl = /^(https?:\/\/|www\.)\S+$/i.test(text.trim());
   setMode(isUrl ? "ingest" : text.trim() ? "command" : "filter");
   $("#omni-hint").innerHTML = isUrl
@@ -188,6 +205,7 @@ async function onSubmit() {
   if (plan.mode === "clarify") { showError(plan.message); return; }
   // A filter: nothing to confirm, the grid already reflects it.
   state.filter = plan.text.toLowerCase();
+  resetPaging();
   if (plan.message) showError(plan.message);
   renderCards();
 }
@@ -396,11 +414,32 @@ function trim(text, limit) {
 function renderCards() {
   const claims = visibleClaims();
   const skills = visibleSkills();
-  $("#cards").innerHTML = [...skills.map(skillCard), ...claims.map(claimCard)].join("");
+  // Skills first, then claims — one flat list so the cap counts cards, not
+  // sections, and a library of 2,000 claims cannot push the skills off-screen.
+  const all = [...skills.map(skillCard), ...claims.map(claimCard)];
+  const shown = all.slice(0, state.rendered);
+  const remaining = all.length - shown.length;
+  $("#cards").innerHTML =
+    shown.join("") +
+    (remaining > 0
+      ? `<div class="more-slot"><button class="btn" id="show-more">Show more
+           (${remaining} remaining)</button></div>`
+      : "");
+  if (remaining > 0) {
+    $("#show-more").onclick = () => {
+      state.rendered += PAGE_SIZE;
+      renderCards();
+    };
+  }
   $("#omni-counts").textContent = state.filter || state.scope !== "all"
     ? `${claims.length} claim${claims.length === 1 ? "" : "s"} · ${skills.length} skill${skills.length === 1 ? "" : "s"}`
     : "";
   renderEmptyState(claims.length + skills.length);
+}
+
+/** Anything that changes *which* cards match starts the list over. */
+function resetPaging() {
+  state.rendered = PAGE_SIZE;
 }
 
 function renderEmptyState(visible) {
@@ -459,6 +498,7 @@ function openInspector(title, html) {
 }
 
 function closeInspector() {
+  state.openInspector = null;
   $("#inspector").dataset.open = "false";
   $("#inspector").setAttribute("aria-hidden", "true");
 }
@@ -480,6 +520,7 @@ function sideBlock(claim, cls) {
 }
 
 function inspectTension(claimId) {
+  state.openInspector = { kind: "tension", id: claimId };
   const claim = state.claims.find((item) => item.id === claimId);
   if (!claim || !(claim.tensions || []).length) return;
   const blocks = claim.tensions.map((tension) => {
@@ -499,6 +540,7 @@ function inspectTension(claimId) {
 }
 
 function inspectSkill(skillId) {
+  state.openInspector = { kind: "skill", id: skillId };
   const skill = state.skills.find((item) => item.id === skillId);
   if (!skill) return;
   const ids = skill.linked_claim_ids || [];
@@ -698,6 +740,19 @@ function initHarness() {
     }
   };
   $("#copy-tokens").onclick = copyTokens;
+  const handle = $("#tuner-handle");
+  const tuner = $("#tuner");
+  // Collapsed from the start on a phone: 160px of dev chrome over the bottom
+  // of the page is how a bottom action becomes unreachable.
+  if (window.matchMedia("(max-width: 640px)").matches) {
+    tuner.dataset.collapsed = "true";
+    handle.setAttribute("aria-expanded", "false");
+  }
+  handle.onclick = () => {
+    const collapsed = tuner.dataset.collapsed !== "true";
+    tuner.dataset.collapsed = String(collapsed);
+    handle.setAttribute("aria-expanded", String(!collapsed));
+  };
   updateContrast();
   syncPreviewUrl();
 }
@@ -815,7 +870,7 @@ function copyText(text, button) {
   const done = () => {
     if (!button) return;
     const original = button.innerHTML;
-    button.innerHTML = icon("check") + " Copied";
+    button.textContent = "Copied \u2713";
     setTimeout(() => { button.innerHTML = original; }, 1200);
   };
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -865,8 +920,20 @@ function setView(view) {
 }
 
 async function signIn(email) {
+  const slot = $("#signin-error");
+  slot.classList.add("hidden");
+  if (!email || !email.includes("@")) {
+    slot.textContent = "That does not look like an email address.";
+    slot.classList.remove("hidden");
+    return;
+  }
   const out = await api("/api/login", { method: "POST", body: { email } });
-  if (!out.ok) { showError(out.message || "Could not sign in."); return; }
+  if (!out.ok) {
+    // On the card, not in a strip the card would hide.
+    slot.textContent = out.message || "Could not sign in.";
+    slot.classList.remove("hidden");
+    return;
+  }
   state.csrf = out.csrf;
   await boot();
 }
@@ -877,6 +944,9 @@ async function boot() {
   state.profile = me;
   $("#signin").classList.toggle("hidden", state.signedIn);
   $("#omni-wrap").classList.toggle("hidden", !state.signedIn);
+  // Signed out, the card is the entire page: a sidebar of empty counts and a
+  // nav bar you cannot use is noise in front of the one thing to do.
+  document.body.dataset.signedIn = String(state.signedIn);
   if (!state.signedIn) return;
   if (me.theme_mode) {
     let stored = null;
@@ -884,6 +954,12 @@ async function boot() {
     if (!stored) applyTheme(me.theme_mode, { persist: false });
   }
   await refresh();
+  // One probe at boot so the baseline is what this render actually showed.
+  // Without it the first focus would only be able to *establish* a baseline,
+  // and a change made while the tab was in the background would be missed.
+  const probe = await api("/api/sync-watermark");
+  if (probe.ok) state.watermark = `${probe.counter}:${probe.updated_at}`;
+  window.__brainWatermark = state.watermark;
   if (state.preview) applyEdgeState($("#state-pick").value);
   pumpJobs();
 }
@@ -1083,22 +1159,125 @@ document.addEventListener("focusout", async (event) => {
   });
 });
 
+/* ===================== keyboard ===================== */
+function isTyping() {
+  const node = document.activeElement;
+  if (!node) return false;
+  if (node.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(node.tagName);
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closeInspector();
-    closeProfile();
-    state.plan = null;
-    clearStrips();
+    // One layer at a time, outermost first. Escape in an open inspector means
+    // "close this", not "close this and throw away what I typed in the bar".
+    if ($("#profile-scrim") && !$("#profile-scrim").classList.contains("hidden")) {
+      closeProfile();
+      return;
+    }
+    if ($("#inspector").dataset.open === "true") {
+      closeInspector();
+      return;
+    }
+    if (state.plan) {
+      state.plan = null;
+      clearStrips();
+      return;
+    }
+    if (state.filter || $("#omni-input").value) {
+      $("#omni-input").value = "";
+      state.filter = "";
+      resetPaging();
+      renderCards();
+      return;
+    }
+    $("#omni-input").blur();
+    return;
   }
-  if (event.key === "/" && document.activeElement !== $("#omni-input")) {
+  // Cmd/Ctrl+K works from anywhere, including mid-typing — it is an explicit
+  // chord. Bare `/` only when the keystroke is not going into a field, or it
+  // would eat the slash in a URL someone is pasting into About you.
+  const chord = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
+  if (chord || (event.key === "/" && !isTyping())) {
     event.preventDefault();
     $("#omni-input").focus();
+    $("#omni-input").select();
   }
 });
+
+/* ===================== cross-tab sync ===================== */
+/* An agent writing through /mcp is invisible to an open tab, so a tab left on
+ * a second screen would show a stale library indefinitely. On regaining focus
+ * we compare a cheap watermark and only re-fetch when it moved — and then
+ * restore what the person was in the middle of, because a refresh that loses
+ * your filter, your scroll position or the conflict you had open is worse than
+ * stale data. */
+async function syncIfChanged() {
+  if (!state.signedIn || document.visibilityState !== "visible") return;
+  const probe = await api("/api/sync-watermark");
+  if (!probe.ok) return;
+  const stamp = `${probe.counter}:${probe.updated_at}`;
+  if (state.watermark === null) { state.watermark = stamp; return; }
+  if (state.watermark === stamp) return;
+  // Something changed somewhere else — an agent through /mcp, or this user in
+  // another tab.
+  state.watermark = stamp;
+  window.__brainWatermark = stamp;
+
+  const keep = {
+    filter: state.filter,
+    input: $("#omni-input").value,
+    scroll: window.scrollY,
+    inspector: $("#inspector").dataset.open === "true" ? state.openInspector : null,
+    rendered: state.rendered,
+    expanded: new Set(state.expanded),
+  };
+  await refresh();
+  state.filter = keep.filter;
+  $("#omni-input").value = keep.input;
+  state.rendered = Math.max(keep.rendered, PAGE_SIZE);
+  state.expanded = keep.expanded;
+  renderCards();
+  if (keep.inspector) reopenInspector(keep.inspector);
+  window.scrollTo({ top: keep.scroll, behavior: "auto" });
+}
+
+function reopenInspector(handle) {
+  if (!handle) return;
+  if (handle.kind === "tension") inspectTension(handle.id);
+  else if (handle.kind === "skill") inspectSkill(handle.id);
+}
+
+document.addEventListener("visibilitychange", syncIfChanged);
+window.addEventListener("focus", syncIfChanged);
+
+/* ===================== mobile viewport ===================== */
+/* The virtual keyboard shrinks the *visual* viewport without changing `vh`, so
+ * a bottom-anchored sheet keeps its full height and its actions end up behind
+ * the keyboard. `--vvh` tracks the real visible height; the CSS uses it for
+ * every overlay that contains a text field. */
+function trackVisualViewport() {
+  const vv = window.visualViewport;
+  const apply = () => {
+    const height = vv ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty("--vvh", `${height}px`);
+    const keyboard = Math.max(0, window.innerHeight - height);
+    document.documentElement.style.setProperty("--kb", `${keyboard}px`);
+    // 120px is well past browser-chrome jitter and well under any keyboard.
+    document.body.dataset.keyboard = String(keyboard > 120);
+  };
+  apply();
+  if (vv) {
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+  }
+  window.addEventListener("orientationchange", apply);
+}
 
 /* ===================== wiring ===================== */
 window.addEventListener("DOMContentLoaded", () => {
   initTheme();
+  trackVisualViewport();
   initHarness();
   const input = $("#omni-input");
   input.addEventListener("input", onType);
@@ -1110,6 +1289,14 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   $("#open-profile").onclick = openProfile;
   $("#open-profile-mobile").onclick = openProfile;
+  $("#connect-claude").onclick = async () => {
+    await openProfile();
+    // Land on block 2 rather than the top of a six-block modal.
+    const block = $("#mcp-url").closest(".block");
+    if (block) block.scrollIntoView({ block: "start", behavior: "smooth" });
+    $("#mcp-url").focus();
+    $("#mcp-url").select();
+  };
   $("#profile-close").onclick = closeProfile;
   $("#profile-scrim").addEventListener("click", (event) => {
     if (event.target === $("#profile-scrim")) closeProfile();

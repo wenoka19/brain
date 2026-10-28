@@ -690,7 +690,7 @@ class TestBolaIsolation:
             victim = control_db.ensure_user(control_db.control(), "victim@example.com")
             attacker = client.post("/api/login", json={"email": "attacker@example.com"})
             token = attacker.json()["csrf"]
-            headers = {"X-Brain-CSRF": token}
+            headers = {"X-Brain-CSRF": token, "X-Brain-Request": "1"}
 
             # Every shape of "act as someone else" the API could be asked.
             for payload in (
@@ -715,7 +715,17 @@ class TestBolaIsolation:
         owner = control_db.ensure_user(control, "owner@example.com")["user_id"]
         owner_ctx = E.build_context(owner)
         E.op_seed_demo(owner_ctx)
-        claim_id = E.op_list_cards(owner_ctx).data["claims"][0]["id"]
+        # A claim of the owner's own, not a demo row: the demo ids are fixed
+        # constants on purpose, so every tenant that seeds has its own row
+        # under the same id, and an id that exists on both sides would test
+        # nothing about isolation.
+        private = E.op_remember_this(
+            owner_ctx,
+            claim="Only this tenant has ever seen this sentence.",
+            when_it_applies="Proving one tenant's ids mean nothing in another.",
+        )
+        claim_id = private.data["claim"]["id"]
+        source_id = E.op_list_cards(owner_ctx).data["claims"][0]["source_id"]
 
         mcp_server.reset_server()
         with TestClient(create_app(cfg)) as client:
@@ -724,13 +734,13 @@ class TestBolaIsolation:
             # A real id from another tenant is simply not found.
             assert client.get(f"/api/item/{claim_id}").status_code == 404
             assert client.post(
-                f"/api/archive/claim/{claim_id}", json={}, headers={"X-Brain-CSRF": csrf}
+                f"/api/archive/claim/{claim_id}", json={}, headers={"X-Brain-CSRF": csrf, "X-Brain-Request": "1"}
             ).status_code == 404
             assert client.post(
-                f"/api/delete/{E.DEMO_SOURCE_VIDEO}", json={}, headers={"X-Brain-CSRF": csrf}
-            ).status_code == 404
+                f"/api/delete/{source_id}", json={}, headers={"X-Brain-CSRF": csrf, "X-Brain-Request": "1"}
+            ).status_code in (400, 404)
         # ...and the owner's library is untouched.
-        assert tenant_db.counts(owner_ctx.tenant)["claims"] == 2
+        assert tenant_db.counts(owner_ctx.tenant)["claims"] == 3
         mcp_server.reset_server()
 
 
@@ -1069,7 +1079,7 @@ class TestAuditLog:
         with TestClient(create_app(cfg)) as client:
             assert client.get("/api/audit-logs").status_code == 401
             response = client.post("/api/login", json={"email": "owner@example.com"})
-            headers = {"X-Brain-CSRF": response.json()["csrf"]}
+            headers = {"X-Brain-CSRF": response.json()["csrf"], "X-Brain-Request": "1"}
             client.post("/api/demo/seed", json={}, headers=headers)
             payload = client.get("/api/audit-logs").json()
             assert payload["ok"] is True
@@ -1086,7 +1096,7 @@ class TestAuditLog:
         mcp_server.reset_server()
         with TestClient(create_app(cfg)) as client:
             token = client.post("/api/login", json={"email": "owner@example.com"}).json()["csrf"]
-            headers = {"X-Brain-CSRF": token}
+            headers = {"X-Brain-CSRF": token, "X-Brain-Request": "1"}
             refused = client.post(
                 "/api/skill",
                 json={

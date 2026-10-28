@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1275,6 +1276,89 @@ def op_update_claim(
     return OpResult(ok=True, action="update_claim", data={"claim": updated})
 
 
+def seed_first_run_library(user_id: str, *, cfg: Settings | None = None) -> bool:
+    """Put the three demo items in a brand-new library.
+
+    Lives here rather than in `webapi` for one reason: the control plane must
+    contain exactly one `build_context` call, which is the structural proof
+    that no endpoint can resolve a tenant any other way. Tenant resolution
+    belongs to the engine.
+
+    Guarded on the counts rather than on a flag, so a user who cleared the demo
+    on purpose never has it handed back, and a second sign-in never duplicates
+    it.
+    """
+    cfg = cfg or settings()
+    try:
+        ctx = build_context(user_id, client_name="web", surface="web_ui", cfg=cfg)
+    except ValueError:
+        return False
+    # Two conditions, because `counts` only sees *active* rows: clearing the
+    # demo archives it, so counts alone would hand it straight back on the next
+    # sign-in. The slug check is the same one `op_seed_demo` uses for
+    # idempotence, and it sees archived rows too.
+    if tenant_db.get_skill_by_slug(ctx.tenant, DEMO_SKILL_SLUG):
+        return False
+    counts = tenant_db.counts(ctx.tenant)
+    if counts.get("claims") or counts.get("skills") or counts.get("sources"):
+        return False
+    return bool(op_seed_demo(ctx).ok)
+
+
+#: The actions that change what a library *shows*. A read is audited too, and
+#: including those would move the watermark on every poll — so a tab would
+#: refresh itself forever. `export` and `profile` are reads of a different
+#: shape; `update_profile` changes settings, not cards.
+MUTATING_ACTIONS = frozenset(
+    {
+        "remember_this",
+        "save_skill",
+        "revert_skill",
+        "update_claim",
+        "archive_item",
+        "restore_item",
+        "trash_item",
+        "permanent_delete",
+        "rescue_job",
+        "process_job",
+        "seed_demo",
+        "clear_demo",
+    }
+)
+
+
+def tenant_watermark(ctx: Context) -> dict[str, Any]:
+    """A change stamp for the tenant: `{counter, updated_at}`.
+
+    Taken from `audit_logs`, because that table already *is* the mutation
+    record: it is append-only, it has an autoincrementing id, and every write
+    operation writes to it. The obvious alternative — counting tenant rows and
+    taking the newest timestamp — was what this did first, and it silently
+    missed an *edit*: editing a claim changes neither the row count nor any
+    timestamp, because `epistemic_claims` has no `updated_at` column. A tab
+    would have shown stale text indefinitely.
+
+    `max(id)` alone would be enough for the counter, but the count is kept as
+    well so that the stamp is still meaningful if the log is ever pruned.
+    """
+    row = ctx.control.execute(
+        f"""
+        SELECT count(*) AS writes, coalesce(max(id), 0) AS latest,
+               coalesce(max(created_at), '') AS updated_at
+          FROM audit_logs
+         WHERE user_id = ?
+           AND status = 'ok'
+           AND action IN ({",".join("?" * len(MUTATING_ACTIONS))})
+        """,
+        (ctx.user_id, *sorted(MUTATING_ACTIONS)),
+    ).fetchone()
+    return {
+        "counter": int(row["latest"] or 0),
+        "updated_at": row["updated_at"] or "",
+        "writes": int(row["writes"] or 0),
+    }
+
+
 def op_profile(ctx: Context) -> OpResult:
     """Everything the Profile modal's five blocks need, in one call."""
     user = control_db.get_user(ctx.control, ctx.user_id) or {}
@@ -1283,7 +1367,12 @@ def op_profile(ctx: Context) -> OpResult:
         if record["revoked"]:
             continue
         expires = control_db.parse_iso(record["refresh_expires_at"])
-        remaining = (expires - control_db.now_utc()).days if expires else 0
+        # Ceiling, not `.days`: a token minted a moment ago has 29 days and
+        # some hours left, and `.days` truncates that to 29 — so a connection
+        # the user just made would read "Expires in 29 days" on the screen
+        # where they made it.
+        seconds = (expires - control_db.now_utc()).total_seconds() if expires else 0
+        remaining = math.ceil(seconds / 86400) if seconds > 0 else 0
         sessions.append(
             {
                 "session_id": record["session_id"],

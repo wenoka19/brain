@@ -35,6 +35,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "brain_session"
 CSRF_COOKIE = "brain_csrf"
 CSRF_HEADER = "x-brain-csrf"
+#: Present on every mutating request from the app. A cross-origin HTML form
+#: post cannot set it, and setting it forces a preflight we do not answer.
+REQUEST_HEADER = "x-brain-request"
 SESSION_TTL = 30 * 24 * 3600
 
 
@@ -94,7 +97,21 @@ def _context(request: Request, *, surface: str = "web_ui") -> E.Context:
 
 
 def _require_csrf(request: Request) -> None:
-    """Double-submit: the header must equal the cookie."""
+    """Two independent checks, because they fail to different attacks.
+
+    The double-submit token stops a forged request that *can* read nothing but
+    still rides the cookie. `X-Brain-Request` stops the one shape of request a
+    token cannot: an HTML form post, which a browser will send cross-origin
+    with the cookie attached and which cannot set a custom header at all. A
+    custom header forces a preflight, and the preflight for `/api/*` is not
+    answered — see `MCP_CORS_PREFIXES`.
+    """
+    if request.headers.get(REQUEST_HEADER) != "1":
+        raise ApiError(
+            403,
+            "not_an_app_request",
+            "This request did not come from the brain web app. Reload the page.",
+        )
     cookie = request.cookies.get(CSRF_COOKIE) or ""
     header = request.headers.get(CSRF_HEADER) or ""
     if not cookie or not hmac.compare_digest(cookie, header):
@@ -164,8 +181,20 @@ async def api_login(request: Request) -> Response:
     except ValueError as exc:
         raise ApiError(400, "invalid_email", str(exc)) from exc
 
+    # A first sign-in lands in an empty workspace, which teaches nothing about
+    # what the product is. Three editable demo items (Rule 4c) mean the first
+    # screen shows a claim card, a skill card and a disagreement — all of which
+    # the user can edit or archive like any other.
+    seeded = E.seed_first_run_library(user["user_id"], cfg=cfg)
+
     csrf = base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
-    response = _json({"ok": True, "user_id": user["user_id"], "email": user["email"], "csrf": csrf})
+    response = _json({
+        "ok": True,
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "csrf": csrf,
+        "seeded": seeded,
+    })
     secure = not cfg.is_test
     response.set_cookie(
         SESSION_COOKIE,
@@ -491,6 +520,20 @@ async def api_synthesize(request: Request) -> Response:
 # profile
 # ---------------------------------------------------------------------------
 @endpoint
+async def api_sync_watermark(request: Request) -> Response:
+    """A cheap "has anything changed?" probe for a tab that regains focus.
+
+    An agent writing through `/mcp` is invisible to an open browser tab, so the
+    tab would quietly show a stale library for as long as it stays open. This
+    is deliberately the cheapest thing that answers the question: one count and
+    one max() per content table, no rows, no rendering. The tab compares it to
+    what it last saw and only re-fetches when it differs.
+    """
+    ctx = _context(request)
+    return _json({"ok": True, **E.tenant_watermark(ctx)})
+
+
+@endpoint
 async def api_profile(request: Request) -> Response:
     ctx = _context(request)
     if request.method == "GET":
@@ -593,6 +636,7 @@ ROUTES = [
     Route("/", _static("index.html", "text/html; charset=utf-8"), methods=["GET"]),
     Route("/app.css", _static("app.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/app.js", _static("app.js", "application/javascript; charset=utf-8"), methods=["GET"]),
+    Route("/consent.js", _static("consent.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/preview", preview, methods=["GET"]),
     Route("/api/login", api_login, methods=["POST"]),
     Route("/api/logout", api_logout, methods=["POST"]),
@@ -618,6 +662,7 @@ ROUTES = [
     Route("/api/skill/{skill_id}/revert", api_revert_skill, methods=["POST"]),
     Route("/api/synthesize", api_synthesize, methods=["POST"]),
     Route("/api/profile", api_profile, methods=["GET", "POST"]),
+    Route("/api/sync-watermark", api_sync_watermark, methods=["GET"]),
     Route("/api/audit-logs", api_audit_logs, methods=["GET"]),
     Route("/api/sessions/{session_id}/revoke", api_revoke_session, methods=["POST"]),
     Route("/api/demo/{action}", api_demo, methods=["POST"]),

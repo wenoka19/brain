@@ -368,3 +368,111 @@ body[data-preview="true"] .inspector{padding-bottom:56px}
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:1ms !important;transition-duration:1ms !important}
 }
+
+/* ===================================================================
+   Phase 7 — the human entry door, the mobile keyboard, and paging
+   =================================================================== */
+
+/* `--vvh` is the *visual* viewport height, maintained by app.js. The virtual
+   keyboard shrinks that without changing `vh`, so anything bottom-anchored
+   that contains a text field has to measure against it or its actions end up
+   behind the keyboard. `dvh` handles the browser chrome; only `--vvh` handles
+   the keyboard. */
+:root{--vvh:100vh;--kb:0px}
+
+.shell{min-height:100dvh}
+
+.more-slot{display:flex;justify-content:center;padding:14px 0 4px}
+
+/* ---- sign-in / create account ------------------------------------- */
+.enter-wrap{
+  min-height:min(100dvh,var(--vvh));display:flex;align-items:center;
+  justify-content:center;padding:24px 16px calc(24px + env(safe-area-inset-bottom))
+}
+.enter-card{
+  width:100%;max-width:420px;background:var(--bg-card);
+  border:1px solid var(--border-subtle);border-radius:14px;
+  box-shadow:var(--shadow-pane);padding:26px 22px;
+  animation:rise var(--duration-ui) var(--ease-ui)
+}
+.enter-mark{
+  display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
+  border-radius:9px;background:var(--accent-quiet);color:var(--accent);
+  font-size:1.05em;margin-bottom:12px
+}
+.enter-card h1{margin:0 0 6px;font-size:1.32em;letter-spacing:-.01em}
+.enter-card .enter-sub{margin:0 0 18px;color:var(--text-muted);font-size:.93em;line-height:1.5}
+.enter-field{display:flex;flex-direction:column;gap:7px;margin-bottom:14px}
+.enter-field label{font-size:.84em;color:var(--text-muted)}
+.enter-card .btn-primary{width:100%;justify-content:center;padding:10px 14px}
+.enter-points{list-style:none;margin:18px 0 0;padding:16px 0 0;border-top:1px solid var(--border-subtle)}
+.enter-points li{
+  display:flex;gap:9px;align-items:flex-start;margin-bottom:9px;
+  font-size:.87em;color:var(--text-muted);line-height:1.45
+}
+.enter-points li:last-child{margin-bottom:0}
+.enter-points .tick{color:var(--accent);flex:0 0 auto}
+.enter-note{margin:16px 0 0;font-size:.8em;color:var(--text-muted)}
+.enter-error{margin:0 0 12px;font-size:.87em;color:var(--accent-conflict)}
+
+/* ---- the OAuth consent card (shares every token above) ------------- */
+.consent-page{
+  margin:0;min-height:min(100dvh,var(--vvh));display:flex;align-items:center;
+  justify-content:center;padding:24px 16px calc(24px + env(safe-area-inset-bottom));
+  background:var(--bg-canvas);color:var(--text-primary)
+}
+.consent-card{
+  width:100%;max-width:460px;background:var(--bg-card);
+  border:1px solid var(--border-subtle);border-radius:14px;
+  box-shadow:var(--shadow-pane);padding:26px 22px
+}
+.consent-mark{
+  display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
+  border-radius:9px;background:var(--accent-quiet);color:var(--accent);margin-bottom:12px
+}
+.consent-card h1{margin:0 0 5px;font-size:1.22em;letter-spacing:-.01em;line-height:1.3}
+.consent-sub{margin:0 0 18px;color:var(--text-muted);font-size:.92em}
+.consent-grants{list-style:none;margin:0 0 20px;padding:0;display:grid;gap:11px}
+.consent-grants li{display:grid;grid-template-columns:84px minmax(0,1fr);gap:10px;font-size:.88em;line-height:1.45}
+.consent-key{
+  color:var(--text-muted);font-size:.86em;text-transform:uppercase;letter-spacing:.03em;
+  padding-top:1px
+}
+.consent-identity{margin:0 0 14px;font-size:.9em;color:var(--text-muted)}
+.consent-label{display:block;margin-bottom:6px;font-size:.84em;color:var(--text-muted)}
+.consent-form .omni-input{width:100%;margin-bottom:14px}
+.consent-actions{display:flex;gap:9px;flex-wrap:wrap}
+.consent-actions .btn-primary{flex:1;justify-content:center}
+.consent-foot{margin:18px 0 0;font-size:.8em;color:var(--text-muted)}
+
+@media (max-width:860px){
+  /* Overlays that contain a text field measure against the visual viewport,
+     so the keyboard never sits on top of their actions. */
+  .inspector{height:min(92vh,calc(var(--vvh) - 24px))}
+  .scrim{max-height:var(--vvh);padding:16px 12px calc(16px + env(safe-area-inset-bottom))}
+  .mobile-bar{padding-bottom:env(safe-area-inset-bottom)}
+  /* With the keyboard up there is no room for a nav bar as well. */
+  body[data-keyboard="true"] .mobile-bar{display:none}
+}
+
+.tuner-handle{display:none;margin-right:auto}
+
+@media (max-width:640px){
+  /* The tuner is 160px+ of dev chrome on a phone. Collapsed by default with a
+     handle, so it can never be the reason a bottom action is unreachable. */
+  .tuner{
+    max-height:50vh;overflow-y:auto;padding-bottom:calc(8px + env(safe-area-inset-bottom))
+  }
+  .tuner[data-collapsed="true"]{
+    max-height:34px;overflow:hidden;padding-top:4px;padding-bottom:4px
+  }
+  .tuner-handle{display:inline-flex}
+}
+
+/* Signed out, the card is the whole page. */
+body[data-signed-in="false"] .sidebar,
+body[data-signed-in="false"] .mobile-bar,
+body[data-signed-in="false"] #cards,
+body[data-signed-in="false"] #empty-slot,
+body[data-signed-in="false"] #jobs{display:none}
+body[data-signed-in="false"] .main{padding:0}

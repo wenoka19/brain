@@ -45,8 +45,24 @@ def client(cfg, monkeypatch):
 def signed_in(client):
     response = client.post("/api/login", json={"email": "founder@example.com"})
     assert response.status_code == 200
-    client.headers.update({"X-Brain-CSRF": response.json()["csrf"]})
+    client.headers.update({
+        "X-Brain-CSRF": response.json()["csrf"],
+        # The app sends this on every mutation; a cross-origin form cannot.
+        "X-Brain-Request": "1",
+    })
     return client
+
+
+@pytest.fixture
+def blank(signed_in):
+    """A signed-in client with an *empty* library.
+
+    Signing in now seeds the three demo items (Rule 4c), which is what a new
+    user should land in — but a test about ingesting a source, or about the
+    first-run state, needs the library those items would otherwise occupy.
+    """
+    assert signed_in.post("/api/demo/clear", json={}).status_code == 200
+    return signed_in
 
 
 # ===========================================================================
@@ -288,10 +304,10 @@ class TestWebApiAuth:
         # Cookie present, header absent: a cross-site form post.
         assert client.post("/api/demo/seed", json={}).status_code == 403
         assert client.post(
-            "/api/demo/seed", json={}, headers={"X-Brain-CSRF": "wrong"}
+            "/api/demo/seed", json={}, headers={"X-Brain-CSRF": "wrong", "X-Brain-Request": "1"}
         ).status_code == 403
         assert client.post(
-            "/api/demo/seed", json={}, headers={"X-Brain-CSRF": token}
+            "/api/demo/seed", json={}, headers={"X-Brain-CSRF": token, "X-Brain-Request": "1"}
         ).status_code == 200
 
     def test_reads_do_not_require_csrf(self, signed_in):
@@ -302,11 +318,21 @@ class TestWebApiAuth:
         signed_in.cookies.clear()
         assert signed_in.get("/api/cards").status_code == 401
 
-    def test_me_reports_first_run_before_anything_exists(self, signed_in):
-        payload = signed_in.get("/api/me").json()
+    def test_signing_in_lands_in_a_seeded_workspace(self, client):
+        """Rule 4c: the first screen shows the product, not an empty canvas."""
+        assert client.post("/api/login", json={"email": "new@example.com"}).json()["seeded"] is True
+        counts = client.get("/api/cards").json()["library_counts"]
+        assert counts["claims"] == 2 and counts["skills"] == 1 and counts["tensions"] == 1
+        assert client.get("/api/me").json()["first_run"] is False
+
+    def test_the_first_run_state_is_reachable_by_clearing_the_demo(self, blank):
+        """Clearing it has to put the onboarding card back, or a user who
+        clears the demo is left staring at a blank page with no next step."""
+        payload = blank.get("/api/me").json()
         assert payload["signed_in"] is True and payload["first_run"] is True
-        signed_in.post("/api/demo/seed", json={})
-        assert signed_in.get("/api/me").json()["first_run"] is False
+
+    def test_seeding_an_already_seeded_library_is_a_no_op(self, signed_in):
+        assert signed_in.post("/api/demo/seed", json={}).json()["already_seeded"] is True
 
 
 class TestWebApiSurface:
@@ -362,19 +388,19 @@ class TestWebApiSurface:
         plan = client.post(
             "/api/omnibar",
             json={"text": "cold email", "submitted": False},
-            headers={"X-Brain-CSRF": token},
+            headers={"X-Brain-CSRF": token, "X-Brain-Request": "1"},
         ).json()["plan"]
         assert client.post("/api/omnibar/run", json={"plan": plan}).status_code == 403
 
     def test_a_bogus_plan_is_refused(self, signed_in):
         assert signed_in.post("/api/omnibar/run", json={"plan": {}}).status_code == 400
 
-    def test_the_ingestion_pipeline_runs_from_the_browser(self, signed_in):
-        queued = signed_in.post("/api/ingest", json={"url": YOUTUBE_URL}).json()
+    def test_the_ingestion_pipeline_runs_from_the_browser(self, blank):
+        queued = blank.post("/api/ingest", json={"url": YOUTUBE_URL}).json()
         assert queued["ok"] and queued["status"] == "queued"
-        processed = signed_in.post("/api/jobs/run", json={}).json()["processed"]
+        processed = blank.post("/api/jobs/run", json={}).json()["processed"]
         assert processed and processed[0]["status"] == "ready"
-        jobs = signed_in.get("/api/jobs").json()["jobs"]
+        jobs = blank.get("/api/jobs").json()["jobs"]
         assert jobs[0]["status"] == "ready" and jobs[0]["claims_extracted"] >= 1
 
     def test_an_upload_is_stored_outside_the_project_and_sanitised(self, signed_in, cfg):
@@ -394,14 +420,14 @@ class TestWebApiSurface:
         assert response.status_code == 413
         assert response.json()["reason"] == "file_too_large"
 
-    def test_a_blocked_job_can_be_rescued_with_pasted_text(self, signed_in, cfg):
+    def test_a_blocked_job_can_be_rescued_with_pasted_text(self, blank, cfg):
         """Rule 4a, end to end over HTTP."""
-        job_id = signed_in.post("/api/ingest", json={"url": YOUTUBE_URL}).json()["job_id"]
+        job_id = blank.post("/api/ingest", json={"url": YOUTUBE_URL}).json()["job_id"]
         control_db.set_job_status(
             control_db.control(), job_id, "blocked_by_platform",
             error_message="YouTube refused that video.",
         )
-        thin = signed_in.post(f"/api/jobs/{job_id}/rescue", json={"text": "too short"})
+        thin = blank.post(f"/api/jobs/{job_id}/rescue", json={"text": "too short"})
         assert thin.status_code == 400 and thin.json()["reason"] == "text_too_short"
 
         notes = (
@@ -409,9 +435,9 @@ class TestWebApiSurface:
             "volume, because the reputation has not been established yet. It breaks down if you "
             "skip the warm up and start at full volume on day one."
         )
-        rescued = signed_in.post(f"/api/jobs/{job_id}/rescue", json={"text": notes}).json()
+        rescued = blank.post(f"/api/jobs/{job_id}/rescue", json={"text": notes}).json()
         assert rescued["ok"] and rescued["claims"] >= 1
-        assert signed_in.get("/api/jobs").json()["jobs"][0]["status"] == "ready"
+        assert blank.get("/api/jobs").json()["jobs"][0]["status"] == "ready"
 
     def test_claims_are_editable_but_their_evidence_is_not(self, signed_in):
         signed_in.post("/api/demo/seed", json={})
@@ -519,10 +545,10 @@ class TestWebApiSurface:
         assert "Disagreements" in md.text
 
     def test_demo_data_is_real_and_clearable(self, signed_in):
-        seeded = signed_in.post("/api/demo/seed", json={}).json()
-        assert seeded["library_counts"]["claims"] == 2
-        assert seeded["library_counts"]["tensions"] == 1
-        # Seeding twice is a no-op, not a duplicate.
+        # Sign-in already seeded it, so this asserts what the user actually has.
+        counts = signed_in.get("/api/cards").json()["library_counts"]
+        assert counts["claims"] == 2 and counts["tensions"] == 1
+        # Seeding again is a no-op, not a duplicate.
         assert signed_in.post("/api/demo/seed", json={}).json()["already_seeded"] is True
         cleared = signed_in.post("/api/demo/clear", json={}).json()
         assert cleared["ok"] and cleared["library_counts"]["claims"] == 0

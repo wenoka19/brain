@@ -35,6 +35,7 @@
     ],
     "replicas": "Keep numReplicas at 1. Two web replicas on one volume would each open the same SQLite files.",
     "storage": "The same four R2 credentials serve two jobs: Litestream ships control.db continuously, and app/storage/r2_sync.py snapshots each tenant database after a write. R2_ENDPOINT_URL and R2_ENDPOINT are interchangeable — set either and both consumers read it.",
-    "scaling": "Stage 2+: MAX_LOCAL_TENANTS caps tenant files on local disk (0 = unlimited), and BRAIN_SHARD_INDEX/BRAIN_SHARD_TOTAL plus BRAIN_SHARD_URLS or BRAIN_SHARD_INSTANCES spread tenants across nodes. Both default to off, and both need R2 configured."
+    "scaling": "Stage 2+: MAX_LOCAL_TENANTS caps tenant files on local disk (0 = unlimited), and BRAIN_SHARD_INDEX/BRAIN_SHARD_TOTAL plus BRAIN_SHARD_URLS or BRAIN_SHARD_INSTANCES spread tenants across nodes. Both default to off, and both need R2 configured.",
+    "proxy": "Railway terminates TLS and forwards plain HTTP. The entrypoint runs uvicorn with --proxy-headers --forwarded-allow-ips=* so the app sees the real scheme and client address, and BRAIN_PUBLIC_URL must be the https origin clients will use — every discovery document is built from it."
   }
 }

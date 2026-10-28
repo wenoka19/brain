@@ -26,8 +26,8 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import urlencode
+from typing import Any, Sequence
+from urllib.parse import urlencode, urlsplit
 
 import jwt
 from starlette.exceptions import HTTPException
@@ -66,17 +66,37 @@ def signing_key(cfg: Settings | None = None) -> str:
     )
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+
 def resource_identifier(cfg: Settings | None = None) -> str:
     cfg = cfg or settings()
     return cfg.audience
 
 
 def issuer(cfg: Settings | None = None) -> str:
+    """The public origin, always as a client will actually reach it.
+
+    Behind Railway's or Nginx's TLS terminator the app itself speaks plain
+    HTTP, so an operator who sets `BRAIN_PUBLIC_URL=http://...` would have
+    every metadata document advertise `http://` endpoints — which a browser
+    client on an https page refuses as mixed content, and which would put an
+    authorization code on the wire in the clear. The scheme is upgraded here, in
+    the one place every URL in the discovery documents is built from.
+    """
     cfg = cfg or settings()
-    base = os.environ.get("BRAIN_PUBLIC_URL")
-    if base:
-        return base.rstrip("/")
-    return resource_identifier(cfg).rsplit("/mcp", 1)[0] or "https://brain.local"
+    base = (os.environ.get("BRAIN_PUBLIC_URL") or "").strip()
+    if not base:
+        base = resource_identifier(cfg).rsplit("/mcp", 1)[0] or "https://brain.local"
+    base = base.rstrip("/")
+    if base.startswith("http://"):
+        host = urlsplit(base).hostname or ""
+        # Loopback and a bare `testserver` are genuinely plain HTTP.
+        # `testserver` is Starlette's TestClient host, and loopback is
+        # genuinely plain HTTP. Everything else is behind a terminator.
+        if host not in LOOPBACK_HOSTS and host != "testserver":
+            base = "https://" + base[len("http://") :]
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +335,59 @@ async def authorization_server_metadata(request: Request) -> Response:
     )
 
 
+def _split_redirect(uri: str) -> tuple[str, str, int | None, str]:
+    parts = urlsplit(uri)
+    return parts.scheme, (parts.hostname or "").lower(), parts.port, parts.path or "/"
+
+
+def is_loopback_redirect(uri: str) -> bool:
+    scheme, host, _port, _path = _split_redirect(uri)
+    return scheme == "http" and host in ("127.0.0.1", "localhost", "::1")
+
+
+def redirect_uri_acceptable(uri: str) -> bool:
+    """What may be *registered*.
+
+    RFC 8252: a native app redirects to a loopback address over plain http,
+    because there is no transport to protect on the same machine. Anywhere else
+    plain http would put an authorization code on the wire in the clear, so it
+    is https only.
+    """
+    if not isinstance(uri, str) or not uri.startswith(("http://", "https://")):
+        return False
+    scheme, host, _port, _path = _split_redirect(uri)
+    if not host:
+        return False
+    if scheme == "https":
+        return True
+    return is_loopback_redirect(uri)
+
+
+def redirect_uri_matches(requested: str, registered: Sequence[str]) -> bool:
+    """Whether a redirect_uri may be used, given what the client registered.
+
+    Exact match, or — for loopback only — the same scheme, host and path on a
+    **different port**. RFC 8252 §7.3 requires that: a desktop bridge binds an
+    ephemeral port at launch, so the port it registered yesterday is not the
+    port it is listening on now. Everything else stays exact, because a loose
+    match anywhere else turns this endpoint into an open redirector.
+    """
+    if requested in registered:
+        return True
+    if not is_loopback_redirect(requested):
+        return False
+    scheme, host, _port, path = _split_redirect(requested)
+    for candidate in registered:
+        if not is_loopback_redirect(candidate):
+            continue
+        c_scheme, c_host, _c_port, c_path = _split_redirect(candidate)
+        # `127.0.0.1` and `localhost` are not interchangeable: a client that
+        # registered one must keep using it.
+        if (scheme, host, path) == (c_scheme, c_host, c_path):
+            return True
+    return False
+
+
 async def register(request: Request) -> Response:
     """RFC 7591 dynamic client registration (public clients, no secret)."""
     try:
@@ -324,8 +397,12 @@ async def register(request: Request) -> Response:
     redirect_uris = payload.get("redirect_uris") or []
     if not isinstance(redirect_uris, list) or not redirect_uris:
         return _oauth_error("invalid_redirect_uri", "At least one redirect_uri is required.")
-    if not all(isinstance(uri, str) and uri.startswith(("http://", "https://")) for uri in redirect_uris):
-        return _oauth_error("invalid_redirect_uri", "Redirect URIs must be absolute http(s) URLs.")
+    if not all(redirect_uri_acceptable(uri) for uri in redirect_uris):
+        return _oauth_error(
+            "invalid_redirect_uri",
+            "Redirect URIs must be absolute https URLs, or http on a loopback "
+            "address (127.0.0.1 / localhost) for a native client.",
+        )
 
     conn = control_db.control()
     client = control_db.register_client(
@@ -354,24 +431,110 @@ async def register(request: Request) -> Response:
     )
 
 
-#: Deliberately bare. The *look* of the consent screen is a Checkpoint B
-#: decision; this is the minimum functional surface so Phase 3 can be tested.
+#: Linear-styled, and deliberately sharing `/app.css` rather than carrying its
+#: own copy of the theme tokens — one definition of `--accent` for the whole
+#: product. `/consent.js` applies the stored theme (and the 18:00 Warm Sunset
+#: switch) because the CSP forbids inline script, which is the right trade.
 CONSENT_PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connect brain</title></head>
-<body>
-<h1>Connect <code>brain</code></h1>
-<p><strong>{client_name}</strong> is asking to read and write your personal
-knowledge library.</p>
-<form method="post" action="/authorize">
-  <input type="hidden" name="state_blob" value="{state_blob}">
-  <label for="email">Your email</label>
-  <input id="email" name="email" type="email" required autocomplete="email">
-  <button type="submit">Allow access</button>
-</form>
+<html lang="en" data-theme="light"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Connect {client_name} to brain</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/consent.js" defer></script></head>
+<body class="consent-page">
+<main class="consent-card">
+  <header class="consent-head">
+    <span class="consent-mark" aria-hidden="true">◆</span>
+    <h1>Connect <strong>{client_name}</strong> to brain</h1>
+    <p class="consent-sub">It is asking for access to your personal knowledge library.</p>
+  </header>
+
+  <ul class="consent-grants">
+    <li><span class="consent-key">Can read</span>
+        <span>Search your claims and skills, and fetch any one in full.</span></li>
+    <li><span class="consent-key">Can write</span>
+        <span>Save new claims and skills, and queue sources you paste into the chat.</span></li>
+    <li><span class="consent-key">Safety</span>
+        <span>Cannot permanently delete items &mdash; soft archive only. Deleting for good
+        takes a human click in this web app, after 30 days in Trash.</span></li>
+    <li><span class="consent-key">Duration</span>
+        <span>30 days, revocable anytime in <strong>&#128100; Profile &rarr; MCP connection</strong>.</span></li>
+  </ul>
+
+  <form method="post" action="{action}" class="consent-form">
+    <input type="hidden" name="state_blob" value="{state_blob}">
+    {identity}
+    <div class="consent-actions">
+      <button type="submit" class="btn btn-primary">Authorize Connection</button>
+      <button type="button" class="btn btn-quiet" id="consent-cancel">Cancel</button>
+    </div>
+  </form>
+  <p class="consent-foot">Signing in here creates your library if you do not have one yet.</p>
+</main>
 </body></html>
 """
+
+#: Already signed in to the web app: no reason to ask again.
+CONSENT_KNOWN_IDENTITY = """<p class="consent-identity">Connecting as
+<strong>{email}</strong></p>
+<input type="hidden" name="email" value="{email}">"""
+
+#: Not signed in: the email is the sign-in, inline, without leaving the flow.
+CONSENT_SIGN_IN = """<label class="consent-label" for="email">Your email</label>
+<input class="omni-input" id="email" name="email" type="email" required
+       autocomplete="email" placeholder="you@example.com" value="{email}">"""
+
+
+def consent_csp(redirect_uri: str) -> str:
+    """The consent page's CSP: as tight as the rest, plus one form target."""
+    parts = urlsplit(redirect_uri)
+    origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+    return "; ".join(
+        [
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data:",
+            "connect-src 'self'",
+            "frame-ancestors 'none'",
+            "base-uri 'none'",
+            "object-src 'none'",
+            f"form-action 'self' {origin}".strip(),
+        ]
+    )
+
+
+def signed_in_email(request: Request, cfg: Settings) -> str:
+    """The browser session's email, if this person is already signed in here.
+
+    Imported lazily: `webapi` imports `auth` for the signing key, so importing
+    it at module scope would be a cycle.
+    """
+    from app import webapi
+
+    raw = request.cookies.get(webapi.SESSION_COOKIE)
+    user_id = webapi.read_session_cookie(raw, cfg=cfg)
+    if not user_id:
+        return ""
+    record = control_db.get_user(control_db.control(), user_id)
+    return (record or {}).get("email", "") or ""
+
+
+def consent_page(request: Request, parsed: dict[str, Any], cfg: Settings) -> str:
+    email = signed_in_email(request, cfg)
+    identity = (
+        CONSENT_KNOWN_IDENTITY.format(email=_escape(email))
+        if email
+        else CONSENT_SIGN_IN.format(email="")
+    )
+    return CONSENT_PAGE.format(
+        client_name=_escape(parsed["client_name"]),
+        state_blob=_escape(_pack_state(parsed, cfg)),
+        # Posting back to the path the browser is on keeps the `/oauth/*` alias
+        # working for a client that discovered it that way.
+        action=_escape(request.url.path),
+        identity=identity,
+    )
 
 
 def _pack_state(payload: dict[str, Any], cfg: Settings) -> str:
@@ -418,7 +581,7 @@ def _validate_authorize_params(params) -> tuple[dict[str, Any] | None, Response 
     client = control_db.get_client(conn, client_id)
     if client is None:
         return None, _oauth_error("invalid_client", "Unknown client_id; register first.")
-    if redirect_uri not in client["redirect_uris"]:
+    if not redirect_uri_matches(redirect_uri, client["redirect_uris"]):
         # Never redirect to an unregistered URI — that is an open redirector.
         return None, _oauth_error("invalid_request", "redirect_uri is not registered for this client.")
 
@@ -459,11 +622,19 @@ async def authorize(request: Request) -> Response:
         if owner:
             return _issue_code_redirect(parsed, owner, cfg)
         return HTMLResponse(
-            CONSENT_PAGE.format(
-                client_name=_escape(parsed["client_name"]),
-                state_blob=_escape(_pack_state(parsed, cfg)),
-            ),
-            headers={"Cache-Control": "no-store"},
+            consent_page(request, parsed, cfg),
+            headers={
+                "Cache-Control": "no-store",
+                # The page's own CSP, which the global middleware then leaves
+                # alone. Approving posts to `/authorize`, which answers 302 to
+                # the client's `redirect_uri` — and a browser applies
+                # `form-action` to the *redirect target* too, so the global
+                # `form-action 'self'` blocks the last step of the flow. Rather
+                # than loosen it everywhere, this one page names the one origin
+                # it is allowed to end up at: the redirect URI this client
+                # registered, which has already been validated above.
+                "Content-Security-Policy": consent_csp(parsed["redirect_uri"]),
+            },
         )
 
     form = await request.form()
@@ -640,6 +811,10 @@ def unauthorized_headers(error: str = "invalid_token") -> dict[str, str]:
     }
 
 
+#: `/oauth/...` aliases alongside the canonical paths. The metadata document
+#: advertises the canonical ones and a conforming client reads them from there,
+#: but enough clients and docs assume an `/oauth` prefix that answering both
+#: costs one line each and saves a confusing 404.
 ROUTES = [
     Route("/.well-known/oauth-protected-resource", protected_resource_metadata, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server", authorization_server_metadata, methods=["GET"]),
@@ -647,4 +822,8 @@ ROUTES = [
     Route("/authorize", authorize, methods=["GET", "POST"]),
     Route("/token", token, methods=["POST"]),
     Route("/revoke", revoke, methods=["POST"]),
+    Route("/oauth/register", register, methods=["POST"]),
+    Route("/oauth/authorize", authorize, methods=["GET", "POST"]),
+    Route("/oauth/token", token, methods=["POST"]),
+    Route("/oauth/revoke", revoke, methods=["POST"]),
 ]

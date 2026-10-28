@@ -306,7 +306,7 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **721 passed** |
+| `BRAIN_ENV=test pytest` | **805 passed** |
 | `python -m app.cli selftest` | **28/28 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
@@ -827,3 +827,118 @@ failed payload, so the error strip the app already had does the talking — no
 new affordance, just the approved one actually firing. `offline` joins the
 harness state list, shaped like every other one: nothing faked, the real
 request path made to fail.
+
+
+---
+
+## Phase 7e — The human entry door, real-client interop, and the races
+
+### 1. The entry door
+
+`/` signed out is now a single card built from the theme tokens — no literal
+colours, so the dark and Warm Sunset themes follow automatically, and the
+sidebar and nav bar get out of the way so the one thing to do is the only thing
+on screen. A bad address is answered **on the card**, not in a strip the card
+would hide.
+
+A first sign-in seeds the three demo items (Rule 4c), so nobody lands in an
+empty canvas. Two conditions guard it, because the obvious one is wrong on its
+own: `counts` sees only *active* rows, and clearing the demo archives it — so
+counts alone would hand it straight back on the next sign-in. The demo slug
+check (the same one `op_seed_demo` uses) sees archived rows too. The seeding
+lives in `engine.seed_first_run_library`, not in `webapi`, because the control
+plane must contain **exactly one** `build_context` call — that count is the
+structural proof that no endpoint resolves a tenant any other way, and the
+Phase 6 BOLA test asserts it.
+
+`Connect to Claude ▸` opens Profile scrolled to block 2 and selects the link;
+`[Copy]` flips to `Copied ✓` for 1.2s. Sessions read `Expires in 30 days` —
+**not 29**, which is what `.days` truncation produced for a token minted a
+moment earlier, on the very screen where the user made the connection.
+
+### 2. The OAuth consent card — and the CSP that blocked the whole flow
+
+The card is Linear-styled from `/app.css` (one definition of `--accent` for the
+product) with `/consent.js` for the theme, because the CSP forbids inline
+script. It states what the agent can do, that it **cannot permanently delete —
+soft archive only**, and that the grant is 30 days revocable in Profile. It
+asks who you are only when it does not already know.
+
+**Found in the browser, not in any unit test:** approving never worked.
+`form-action 'self'` is applied by the browser to the *redirect target* of a
+form submission, and approving redirects to the client's own callback — so our
+own CSP blocked the last step of every OAuth flow. Rather than loosen it
+globally, the consent response now carries its own CSP naming the one origin it
+is allowed to end at: the `redirect_uri` that client registered, already
+validated. Everything else stays as tight as before.
+
+### 3. Real-client interop
+
+* **Behind a terminator.** `cmd_serve` passes `--proxy-headers
+  --forwarded-allow-ips=*`, so all three launchers inherit it from one
+  definition rather than three that drift. `auth.issuer()` upgrades `http://`
+  to `https://` for any non-loopback host, in the single place every discovery
+  URL is built from — an `http://` endpoint in a metadata document is refused
+  as mixed content by a browser client and would put an authorization code in
+  the clear.
+* **RFC 8252 loopback.** A native client may register `http://127.0.0.1:…` or
+  `http://localhost:…`; plain http anywhere else is refused, because a code on
+  the wire in the clear is not a client's choice to make. At authorize time
+  **only the port may vary** — a different path, host spelling, scheme or
+  address is still a 400, since anything looser is an open redirector.
+* **`/oauth/*` aliases** alongside the canonical paths, and the consent form
+  posts back to whichever path it was served on.
+* **Stream headers.** `X-Accel-Buffering: no` and `Cache-Control: no-cache,
+  no-transform` on `/mcp` only — a buffered SSE stream looks to a client exactly
+  like a hung tool call. `OPTIONS /mcp` still answers 204 before any auth check,
+  advertising `MCP-Protocol-Version` and `DELETE`.
+
+### 4. The five frontend safeguards
+
+1. **Cross-tab sync.** `GET /api/sync-watermark` + `visibilitychange`, restoring
+   filter text, scroll position, open inspector, paging and expanded cards —
+   a refresh that loses your place is worse than stale data. **The first
+   implementation was wrong:** counting tenant rows and taking the newest
+   timestamp silently missed an *edit*, because editing a claim changes neither
+   the count nor any timestamp (`epistemic_claims` has no `updated_at`). The
+   watermark now comes from `audit_logs`, which already *is* the append-only
+   mutation record — filtered to mutating actions, or a read would move it and
+   the tab would refresh itself forever.
+2. **100-row DOM cap** with `[Show more (X remaining)]`. Filtering still runs
+   over the full in-memory arrays, so a term in claim 1,500 still matches; only
+   layout cost is bounded.
+3. **Mobile viewport.** `100dvh`, `env(safe-area-inset-bottom)` and a
+   `visualViewport` listener maintaining `--vvh`/`--kb`, because the keyboard
+   shrinks the *visual* viewport without changing `vh`. The `/preview` tuner is
+   collapsed by default under 640px with a handle.
+4. **Keyboard.** `/` focuses the bar only when the keystroke is not going into
+   a field (otherwise it would eat the slash in a pasted URL); `Cmd/Ctrl+K`
+   works from anywhere. `Escape` closes **one layer at a time** — profile, then
+   inspector, then the pending plan, then the filter.
+5. **`X-Brain-Request: 1`** on every mutating request, enforced server-side
+   alongside the double-submit token. The two fail to different attacks: the
+   token stops a forged request that can read nothing, and the header stops the
+   one shape a token cannot — an HTML form post, which rides the cookie
+   cross-origin and cannot set a custom header at all.
+
+### 5. The races
+
+**Singleflight hydration.** A cold node gets `/api/cards`, `/api/profile` and
+`/api/jobs` at once; without a per-tenant lock each starts its own R2 GET and
+they race on the same `.hydrating` path — one gets renamed into place and then
+overwritten underneath an open connection. Five concurrent opens of a cold
+tenant now cost **one** GET, and the test asserts exactly that under a
+deliberately slow link.
+
+### What the browser caught that nothing else did
+
+The CSP form-action block (above), and one more: `#tuner-handle` was declared
+`display:none` *after* the media query that reveals it, so same-specificity
+ordering kept it hidden and the collapse control did not exist on a phone.
+
+**XSS canary.** An `<img src=x onerror=window.__xss=1>` payload is written into
+every claim, skill and profile field through the real API, then rendered through
+cards, the expanded accordion, the inspector and the Profile modal.
+`window.__xss` stays undefined, zero `img` elements appear, and the payload is
+present **as text** — which proves it round-tripped and was escaped by `esc()`
+rather than silently dropped.

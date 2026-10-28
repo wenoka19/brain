@@ -586,7 +586,7 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
             assert client.post("/api/demo/seed", json={}).status_code == 403  # no CSRF header
             assert client.get("/api/cards").json()["ok"] is True
             assert client.post(
-                "/api/demo/seed", json={}, headers={"X-Brain-CSRF": token}
+                "/api/demo/seed", json={}, headers={"X-Brain-CSRF": token, "X-Brain-Request": "1"}
             ).status_code == 200
 
     @check("security: an injected skill is refused and audited")
@@ -869,7 +869,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from app.config import settings
 
     settings().ensure_dirs()
-    uvicorn.run("app.main:app", host=args.host, port=args.port, log_level=args.log_level)
+    uvicorn.run(
+        "app.main:app",
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+        # Railway, Fly and Nginx all terminate TLS and forward plain HTTP, so
+        # without these the app sees `http` and `127.0.0.1` for every request:
+        # redirects and any request-derived URL come out as `http://`, and the
+        # audit log records the proxy's address instead of the client's. The
+        # trust list is `*` because the only route to this process is through
+        # that proxy — nothing else can reach the port.
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
     return 0
 
 

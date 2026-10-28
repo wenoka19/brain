@@ -302,6 +302,9 @@ _lock = threading.Lock()
 #: One lock per tenant, so the background loop and a shutdown flush racing on
 #: the same tenant serialise instead of both running `VACUUM INTO` on it.
 _snapshot_locks: dict[str, threading.Lock] = {}
+#: Likewise for hydration, which is the hotter race: a cold node that receives
+#: two requests for the same unhydrated tenant at once.
+_hydration_locks: dict[str, threading.Lock] = {}
 _dirty: dict[str, float] = {}
 _synced: dict[str, float] = {}
 _accessed: dict[str, float] = {}
@@ -338,11 +341,17 @@ def reset_state() -> None:
         _synced.clear()
         _accessed.clear()
         _snapshot_locks.clear()
+        _hydration_locks.clear()
 
 
 def _snapshot_lock(user_id: str) -> threading.Lock:
     with _lock:
         return _snapshot_locks.setdefault(user_id, threading.Lock())
+
+
+def _hydration_lock(user_id: str) -> threading.Lock:
+    with _lock:
+        return _hydration_locks.setdefault(user_id, threading.Lock())
 
 
 def snapshot_and_upload(user_id: str, *, cfg: Settings | None = None) -> bool:
@@ -466,7 +475,9 @@ def stop_background(*, flush: bool = True, cfg: Settings | None = None) -> list[
     flushed = flush_all_dirty_tenants(cfg=cfg)
     if flushed:
         LOGGER.info("flushed %s dirty tenant(s) on shutdown", len(flushed))
-    stranded = dirty_user_ids()
+    # Only a concern when there *is* somewhere to push: with no R2 configured
+    # the dirty flags are bookkeeping for a feature that is off.
+    stranded = dirty_user_ids() if enabled() else []
     if stranded:
         # Said out loud rather than swallowed: these are writes that exist on
         # this disk and not in R2, and if the volume goes with the container
@@ -485,11 +496,26 @@ def hydrate(user_id: str, destination: Path, *, cfg: Settings | None = None) -> 
 
     This is what lets any node serve any tenant: a cold node with an empty
     volume fills in on demand instead of being wrong.
+
+    **Singleflight.** A cold node commonly gets several requests for the same
+    tenant at once — a page load fires `/api/cards`, `/api/profile` and
+    `/api/jobs` together. Without a lock each one starts its own GET, and they
+    race on the same `.hydrating` staging path: whichever finishes first is
+    renamed into place and then *overwritten* by the next one mid-read, which
+    is how a live database gets replaced underneath an open connection. So the
+    first caller downloads and the rest wait on it, then find the file already
+    there — one GET, one rename, no partial file ever visible.
     """
     r2 = config()
-    if not r2.enabled or Path(destination).exists():
+    destination = Path(destination)
+    if not r2.enabled or destination.exists():
         return False
-    pulled = get_object(r2.key_for(user_id), Path(destination))
+    with _hydration_lock(user_id):
+        # Re-checked inside the lock: by the time we hold it, the caller that
+        # held it before us has usually already done the work.
+        if destination.exists():
+            return False
+        pulled = get_object(r2.key_for(user_id), destination)
     if pulled:
         LOGGER.info("hydrated tenant %s from r2", user_id)
     return pulled

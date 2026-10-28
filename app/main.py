@@ -99,6 +99,26 @@ CORS_EXPOSE_HEADERS = ("WWW-Authenticate", "Mcp-Session-Id")
 
 CORS_METHODS = ("GET", "POST", "DELETE", "OPTIONS")
 
+#: Headers that stop an intermediary from buffering or rewriting an SSE stream.
+#: Railway fronts the app with a proxy, and a buffered stream looks to the
+#: client exactly like a hung tool call — the response arrives only when the
+#: whole thing is done, or never.
+STREAM_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
+class StreamPassthroughMiddleware(BaseHTTPMiddleware):
+    """Keep `/mcp` responses unbuffered and unrewritten end to end."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        if request.url.path.startswith("/mcp"):
+            for header, value in STREAM_HEADERS.items():
+                response.headers[header] = value
+        return response
+
 
 def allowed_origins(cfg: Settings | None = None) -> list[str]:
     """The Origin policy for the MCP surface. `["*"]` means unrestricted.
@@ -341,6 +361,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         routes=list(auth.ROUTES) + list(webapi.ROUTES),
     )
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(StreamPassthroughMiddleware)
     app.add_middleware(McpCorsMiddleware, cfg=cfg)
     # Added last, so it runs first: a replayed request should not cost
     # this node a routing pass it is going to throw away.
