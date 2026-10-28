@@ -137,6 +137,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if cfg.live_llm:
             line("ok", "extraction + linking", f"{cfg.llm_model} via {cfg.llm_base_url}")
             line("ok", "vision (images)", cfg.llm_model)
+            if cfg.chat_extras:
+                line(
+                    "ok",
+                    "reasoning effort",
+                    f"{cfg.llm_reasoning_effort} — extraction is structured transcription, "
+                    "so it does not need deliberation (LLM_REASONING_EFFORT)",
+                )
         else:
             line(
                 "warn",
@@ -219,12 +226,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 "bad",
                 "shard routing",
                 f"shard {cfg.shard_index}/{cfg.shard_total} but shards {unaddressed} have no "
-                "BRAIN_SHARD_URLS/BRAIN_SHARD_INSTANCES entry — their tenants would be "
+                "address and BRAIN_SHARD_INSTANCE_TEMPLATE is empty — their tenants would be "
                 "served here, and two nodes writing one tenant is last-snapshot-wins",
             )
             failures += 1
         else:
+            by_template = [
+                index
+                for index in range(cfg.shard_total)
+                if index != cfg.shard_index
+                and index >= len(cfg.shard_instances)
+                and index >= len(cfg.shard_urls)
+            ]
             line("ok", "shard routing", f"shard {cfg.shard_index} of {cfg.shard_total} (crc32)")
+            if by_template:
+                line(
+                    "warn",
+                    "shard addresses",
+                    f"shards {by_template} are addressed by convention as "
+                    f"'{cfg.shard_instance_template}' — correct only if the Fly machines are "
+                    "named that way; set BRAIN_SHARD_INSTANCES to their real ids otherwise",
+                )
+                warnings += 1
         if not r2.enabled:
             line(
                 "bad",

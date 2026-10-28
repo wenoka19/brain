@@ -1,6 +1,7 @@
-"""Phase 7 — the scale-ready portability layer.
+"""Phase 7 — the scale-ready portability layer and the single-key OpenRouter
+setup.
 
-Two mechanisms, tested here without a network:
+Three mechanisms, tested here without a network:
 
 1. **Tenant snapshots to object storage** (`app/storage/r2_sync.py`) — every
    tenant database is a self-contained file in R2, pushed after a write and
@@ -10,9 +11,16 @@ Two mechanisms, tested here without a network:
    of a tenant from `crc32(user_id) % shard_total`, so there is no router to
    keep in sync.
 
+3. **One key, one host, three jobs** (`app/config.py`,
+   `app/ingestion/providers.py`) — `LLM_API_KEY` alone drives chat extraction,
+   vision and 256-dim embeddings off OpenRouter, with the Matryoshka guard that
+   keeps a 4096-float reply fitting a `float[256]` column.
+
 Every R2 call goes through an `httpx.MockTransport` that keeps objects in a
 dict, so the suite exercises the real signing, the real `VACUUM INTO`, and the
-real atomic rename — just not a real bucket.
+real atomic rename — just not a real bucket. The provider tests use the same
+transport, so they assert on the exact request body that would go to
+OpenRouter.
 
 What these tests cannot prove: that the SigV4 signature is one Cloudflare
 accepts. `botocore` is not installed here, so there is no reference
@@ -24,6 +32,8 @@ PUT is still the real verification.
 
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -35,6 +45,7 @@ from starlette.testclient import TestClient
 
 from app import mcp_server as M
 from app import webapi
+from app.ingestion import providers as P
 from app.config import Settings, load_settings
 from app.core import engine as E
 from app.db import control as control_db
@@ -108,6 +119,70 @@ def claim_count(path: Path) -> int:
         return conn.execute("SELECT count(*) FROM epistemic_claims").fetchone()[0]
     finally:
         conn.close()
+
+
+def openrouter_settings(cfg, monkeypatch):
+    """Prod settings on the shipped OpenRouter defaults, with no network behind
+    them and the throwaway data directory kept."""
+    import dataclasses
+
+    monkeypatch.setenv("BRAIN_ENV", "prod")
+    monkeypatch.setenv("LLM_API_KEY", "sk-single-key")
+    for name in ("LLM_MODEL", "LLM_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_BASE_URL",
+                 "EMBEDDING_API_KEY", "LLM_REASONING_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
+    return dataclasses.replace(load_settings(), data_dir=cfg.data_dir)
+
+
+@pytest.fixture
+def capture():
+    """Record every outbound provider request and reply with a queued body."""
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.requests: list[httpx.Request] = []
+            self.bodies: list[dict] = []
+            self.responses: list[httpx.Response] = []
+
+        def reply(self, payload, status: int = 200, repeat: int = 1):
+            for _ in range(repeat):
+                self.responses.append(httpx.Response(status, json=payload))
+            return self
+
+        def _handler(self, request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            self.bodies.append(json.loads(request.content or b"{}"))
+            return self.responses.pop(0) if self.responses else httpx.Response(200, json={})
+
+        def install(self):
+            P.set_http_client_factory(
+                lambda: httpx.Client(transport=httpx.MockTransport(self._handler))
+            )
+            return self
+
+    recorder = Recorder()
+    yield recorder
+    P.set_http_client_factory(None)
+
+
+def chat_reply(payload: dict) -> dict:
+    return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+
+def fake_image(tmp_path: Path):
+    """The smallest thing `LiveVisionProvider` will accept as an image."""
+    from app.ingestion.gatekeeper import ValidatedFile
+
+    path = tmp_path / "shot.png"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    return ValidatedFile(
+        path=path,
+        filename="shot.png",
+        extension="png",
+        source_type="image",
+        size_bytes=path.stat().st_size,
+        content_hash="0" * 64,
+    )
 
 
 def remember(ctx: E.Context, text: str) -> E.OpResult:
@@ -461,8 +536,14 @@ class TestShardMath:
         assert cfg.shard_address(1) == ("instance", "bbbb")
         monkeypatch.delenv("BRAIN_SHARD_INSTANCES")
         assert load_settings().shard_address(1) == ("url", "https://s1.example")
-        monkeypatch.delenv("BRAIN_SHARD_URLS")
-        assert load_settings().shard_address(1) == ("", "")
+
+    def test_an_unlisted_shard_falls_back_to_the_naming_convention(self, monkeypatch):
+        """`fly-replay` takes a machine name, so a deployment that names its
+        machines by index needs no address table at all."""
+        monkeypatch.setenv("BRAIN_SHARD_TOTAL", "3")
+        assert load_settings().shard_address(2) == ("instance", "shard-2")
+        monkeypatch.setenv("BRAIN_SHARD_INSTANCE_TEMPLATE", "")
+        assert load_settings().shard_address(2) == ("", "")
 
 
 SHARD_SECRET = "shard-test-secret-key-long-enough"
@@ -637,3 +718,288 @@ class TestDeploymentContract:
             r2_sync.stop_background(cfg=cfg)
         assert bucket.keys() == [f"tenants/user_{user_id}.db"]
         assert r2_sync.is_dirty(user_id) is False
+
+
+# ===========================================================================
+# single-key OpenRouter setup
+# ===========================================================================
+class TestSingleKeyDefaults:
+    """One key must be enough. Every `EMBEDDING_*` variable exists only for the
+    operator who deliberately wants a second host."""
+
+    def test_the_shipped_defaults_target_openrouter(self):
+        defaults = Settings()
+        assert defaults.llm_base_url == "https://openrouter.ai/api/v1"
+        assert defaults.llm_model == "z-ai/glm-5.3-flash"
+        assert defaults.embedding_model_name == "qwen/qwen3-embedding-8b"
+        assert defaults.embedding_dim == 256
+
+    def test_one_key_powers_chat_vision_and_embeddings(self, cfg, monkeypatch):
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("LLM_API_KEY", "sk-single-key")
+        prod = load_settings()
+
+        assert prod.live_llm and prod.live_vision and prod.live_embeddings
+        assert prod.resolved_embedding_api_key == "sk-single-key"
+        assert prod.resolved_embedding_base_url == "https://openrouter.ai/api/v1"
+        # And the identity recorded on every claim follows from the models, so
+        # a later re-embedding knows what produced a vector.
+        assert prod.extractor_version == "llm:z-ai/glm-5.3-flash"
+        assert prod.embedding_provider == "qwen/qwen3-embedding-8b"
+
+    def test_a_second_host_is_still_one_variable_away(self, cfg, monkeypatch):
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("LLM_API_KEY", "sk-chat")
+        monkeypatch.setenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-embeddings")
+        monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        prod = load_settings()
+
+        assert prod.resolved_embedding_base_url == "https://api.openai.com/v1"
+        assert prod.resolved_embedding_api_key == "sk-embeddings"
+        assert prod.llm_base_url == "https://openrouter.ai/api/v1"  # chat unaffected
+
+    def test_the_alternate_models_are_a_pure_env_override(self, cfg, monkeypatch):
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("LLM_API_KEY", "sk-key")
+        for model in ("deepseek/deepseek-v4.1-flash", "qwen/qwen3.8-flash"):
+            monkeypatch.setenv("LLM_MODEL", model)
+            swapped = load_settings()
+            assert swapped.llm_model == model
+            assert swapped.extractor_version == f"llm:{model}"
+            assert swapped.chat_extras == {"reasoning": {"effort": "low"}}
+
+    def test_no_key_means_no_live_provider_at_all(self, cfg, monkeypatch):
+        """The defaults must not make an unconfigured deployment *look* live."""
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        prod = load_settings()
+        assert not (prod.live_llm or prod.live_vision or prod.live_embeddings)
+        assert prod.embedding_provider == "deterministic_v1"
+
+
+class TestReasoningEffort:
+    """`z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` reason before
+    answering. Extraction is structured transcription, not a puzzle, so the
+    lowest setting keeps latency and output tokens down."""
+
+    def test_openrouter_requests_carry_low_reasoning_effort(self, cfg, monkeypatch):
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("LLM_API_KEY", "sk-key")
+        assert load_settings().chat_extras == {"reasoning": {"effort": "low"}}
+
+    def test_a_non_openrouter_host_is_sent_no_reasoning_field(self, cfg, monkeypatch):
+        """An unknown field is not harmless everywhere — some OpenAI-compatible
+        hosts reject the whole request for one, so it is gated on the host."""
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("LLM_API_KEY", "sk-key")
+        monkeypatch.setenv("LLM_BASE_URL", "https://api.openai.com/v1")
+        prod = load_settings()
+        assert prod.targets_openrouter is False
+        assert prod.chat_extras == {}
+
+    def test_the_effort_can_be_raised_or_switched_off(self, cfg, monkeypatch):
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("LLM_API_KEY", "sk-key")
+        monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+        assert load_settings().chat_extras == {"reasoning": {"effort": "high"}}
+        monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+        assert load_settings().chat_extras == {}
+
+    @pytest.mark.parametrize("call", ["extract", "classify", "vision"])
+    def test_every_chat_call_carries_it(self, cfg, monkeypatch, capture, tmp_path, call):
+        prod = openrouter_settings(cfg, monkeypatch)
+        capture.install().reply(
+            chat_reply({"claims": [], "link_type": "none", "title": "t", "description": "d"}),
+            repeat=2,
+        )
+
+        if call == "extract":
+            P.LiveLLMExtractor(prod).extract("Some source text about batching.", {"title": "t"})
+        elif call == "classify":
+            P.LiveLinkClassifier(prod).classify({"claim": "a"}, {"claim": "b"})
+        else:
+            P.LiveVisionProvider(prod).describe(fake_image(tmp_path))
+
+        body = capture.bodies[0]
+        assert body["reasoning"] == {"effort": "low"}
+        assert body["model"] == "z-ai/glm-5.3-flash"
+        # The reasoning field must not displace what the parser depends on.
+        assert body["response_format"] == {"type": "json_object"}
+        assert body["temperature"] == 0
+
+
+class TestFencedJsonParsing:
+    """A reasoning model often narrates, or wraps its answer in a fence. The
+    parser has to survive both, or a good extraction is thrown away."""
+
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            '```json\n{"claims": [{"claim": "x"}]}\n```',
+            '```\n{"claims": [{"claim": "x"}]}\n```',
+            '```JSON\n{"claims": [{"claim": "x"}]}```',
+            'Here is the JSON you asked for:\n{"claims": [{"claim": "x"}]}',
+            '{"claims": [{"claim": "x"}]}\n\nLet me know if you need more.',
+            '  \n {"claims": [{"claim": "x"}]} \n ',
+        ],
+    )
+    def test_fences_and_prose_are_stripped(self, wrapper):
+        assert P._first_json_object(wrapper) == {"claims": [{"claim": "x"}]}
+
+    def test_a_bare_array_is_accepted_too(self):
+        assert P._first_json_object('```json\n[{"claim": "x"}]\n```') == [{"claim": "x"}]
+
+    def test_unusable_output_is_a_provider_error_not_a_crash(self):
+        for text in ("", "I cannot help with that.", "```json\n{not json\n```"):
+            with pytest.raises(P.ProviderError) as raised:
+                P._first_json_object(text)
+            assert raised.value.reason == "model_error"
+
+    def test_a_fenced_reply_still_reaches_the_grounder(self, cfg, monkeypatch, capture):
+        """End to end: the fence is stripped, and the quote is then held to the
+        same `rapidfuzz >= 88` standard as any other."""
+        prod = openrouter_settings(cfg, monkeypatch)
+        verbatim = "We batch every single cold email into one block before ten in the morning"
+        source = f"{verbatim}, and our reply rate went up 34% that quarter."
+        capture.install().reply(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "```json\n"
+                            + json.dumps(
+                                {
+                                    "claims": [
+                                        {
+                                            "claim": "Batching cold email lifts reply rate.",
+                                            "when_it_applies": "Small outbound teams.",
+                                            "anchor_quote": verbatim,
+                                            "evidence_basis": "data",
+                                        }
+                                    ]
+                                }
+                            )
+                            + "\n```"
+                        }
+                    }
+                ]
+            }
+        )
+
+        claims = P.LiveLLMExtractor(prod).extract(source, {"title": "t"})
+        assert len(claims) == 1
+        assert claims[0]["anchor_quote"] == verbatim
+
+
+class TestMatryoshkaGuard:
+    """`qwen/qwen3-embedding-8b` natively returns 4096 floats. `claims_vec` is
+    declared `float[256]`, so a wider reply must be narrowed, not rejected."""
+
+    def embedding_reply(self, *vectors: list[float]) -> dict:
+        return {
+            "data": [
+                {"index": index, "embedding": vector} for index, vector in enumerate(vectors)
+            ]
+        }
+
+    def test_the_request_asks_for_256_dimensions(self, cfg, monkeypatch, capture):
+        prod = openrouter_settings(cfg, monkeypatch)
+        capture.install().reply(self.embedding_reply([0.5] * 256))
+        P.LiveEmbedder(prod).embed(["one text"])
+
+        request = capture.requests[0]
+        assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
+        assert request.headers["authorization"] == "Bearer sk-single-key"
+        body = capture.bodies[0]
+        assert body["model"] == "qwen/qwen3-embedding-8b"
+        assert body["dimensions"] == 256
+        assert body["input"] == ["one text"]
+
+    def test_a_4096_float_reply_is_sliced_and_renormalised(self, cfg, monkeypatch, capture):
+        prod = openrouter_settings(cfg, monkeypatch)
+        native = [float(index + 1) for index in range(4096)]
+        capture.install().reply(self.embedding_reply(native))
+
+        vector = P.LiveEmbedder(prod).embed(["one text"])[0]
+
+        assert len(vector) == 256
+        assert pytest.approx(sum(value * value for value in vector), abs=1e-9) == 1.0
+        # The *prefix* is what is kept — not a resample, not the tail.
+        prefix_norm = math.sqrt(sum(value * value for value in native[:256]))
+        assert vector == pytest.approx([value / prefix_norm for value in native[:256]])
+
+    def test_a_native_256_reply_is_only_renormalised(self, cfg, monkeypatch, capture):
+        prod = openrouter_settings(cfg, monkeypatch)
+        raw = [0.2] * 256
+        capture.install().reply(self.embedding_reply(raw))
+        vector = P.LiveEmbedder(prod).embed(["one text"])[0]
+        assert len(vector) == 256
+        assert pytest.approx(sum(value * value for value in vector), abs=1e-9) == 1.0
+
+    def test_a_narrower_reply_is_refused_rather_than_padded(self, cfg, monkeypatch, capture):
+        """Zero-padding to 256 would make a vector that is comparable to
+        nothing, and cosine distance would not complain."""
+        prod = openrouter_settings(cfg, monkeypatch)
+        capture.install().reply(self.embedding_reply([0.1] * 128))
+        with pytest.raises(P.ProviderError) as raised:
+            P.LiveEmbedder(prod).embed(["one text"])
+        assert raised.value.reason == "embedding_error"
+        assert "128" in raised.value.message
+
+    def test_a_zero_vector_is_refused(self, cfg, monkeypatch, capture):
+        prod = openrouter_settings(cfg, monkeypatch)
+        capture.install().reply(self.embedding_reply([0.0] * 256))
+        with pytest.raises(P.ProviderError):
+            P.LiveEmbedder(prod).embed(["one text"])
+
+    def test_rows_are_reordered_by_index_not_trusted_in_arrival_order(
+        self, cfg, monkeypatch, capture
+    ):
+        prod = openrouter_settings(cfg, monkeypatch)
+        first = [1.0] + [0.0] * 4095
+        second = [0.0, 1.0] + [0.0] * 4094
+        capture.install().reply(
+            {"data": [{"index": 1, "embedding": second}, {"index": 0, "embedding": first}]}
+        )
+        vectors = P.LiveEmbedder(prod).embed(["a", "b"])
+        assert vectors[0][0] == pytest.approx(1.0)
+        assert vectors[1][1] == pytest.approx(1.0)
+
+    def test_a_sliced_vector_round_trips_through_sqlite_vec(
+        self, cfg, monkeypatch, capture, user
+    ):
+        """The point of the guard: what comes back must survive the column."""
+        prod = openrouter_settings(cfg, monkeypatch)
+        capture.install().reply(self.embedding_reply([float(i + 1) for i in range(4096)]))
+        vector = P.LiveEmbedder(prod).embed(["one text"])[0]
+
+        conn = tenant_db.tenant(user["user_id"], cfg=cfg)
+        record = tenant_db.insert_claim(
+            conn,
+            source_id=tenant_db.upsert_source(
+                conn, source_id="src-matryoshka", title="t", source_type="article"
+            )["id"],
+            claim="A sliced vector is still a vector.",
+            evidence_basis="theory",
+            domain_tags=["embeddings"],
+            when_it_applies="When the host ignores the dimensions parameter.",
+            anchor_quote="a sliced vector is still a vector for retrieval purposes here",
+            cfg=cfg,
+        )
+        tenant_db.set_claim_embedding(conn, record["id"], vector, cfg=cfg)
+
+        stored = conn.execute(
+            "SELECT embedding FROM claims_vec WHERE claim_rowid = ?", (record["rowid"],)
+        ).fetchone()[0]
+        assert tenant_db.unpack_embedding(stored, dim=256) == pytest.approx(vector, abs=1e-6)
+
+    def test_an_embedding_outage_fails_the_job_rather_than_mixing_spaces(
+        self, cfg, monkeypatch, capture
+    ):
+        """A hashed fallback here would put two incompatible vector spaces in
+        one index, where every later search would silently be wrong."""
+        prod = openrouter_settings(cfg, monkeypatch)
+        capture.install().reply({"error": "upstream"}, status=500, repeat=4)
+        with pytest.raises(P.ProviderError):
+            P.LiveEmbedder(prod).embed(["one text"])

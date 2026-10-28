@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -21,6 +22,8 @@ from typing import Any, Callable, Protocol, Sequence
 
 from app.config import Settings, settings
 from app.security.sanitizer import clean_text
+
+LOGGER = logging.getLogger("brain.providers")
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
 TOKEN_RE = re.compile(r"[a-z0-9']+")
@@ -893,6 +896,7 @@ class LiveLLMExtractor:
             "temperature": 0,
             "max_tokens": self.cfg.llm_max_output_tokens,
             "response_format": {"type": "json_object"},
+            **self.cfg.chat_extras,
             "messages": [
                 {
                     "role": "system",
@@ -952,6 +956,7 @@ class LiveLinkClassifier:
             "temperature": 0,
             "max_tokens": 600,
             "response_format": {"type": "json_object"},
+            **self.cfg.chat_extras,
             "messages": [
                 {"role": "system", "content": CLASSIFIER_SYSTEM},
                 {
@@ -1005,6 +1010,7 @@ class LiveEmbedder:
         self.cfg = cfg or settings()
         self.dim = self.cfg.embedding_dim
         self.fallback = HashingEmbedder(self.dim)
+        self._logged_truncation = False
 
     @property
     def name(self) -> str:
@@ -1056,9 +1062,28 @@ class LiveEmbedder:
         return self.embed([text])[0]
 
     def _normalise(self, vector: Sequence[float]) -> list[float]:
+        """Coerce one upstream vector into a unit-length `float[256]`.
+
+        A host may ignore `dimensions` and hand back its native width —
+        `qwen/qwen3-embedding-8b` natively returns 4096. Both models we default
+        to are trained with Matryoshka representation learning, which puts the
+        coarse structure in the leading dimensions, so the first 256 floats are
+        themselves a valid embedding once re-normalised. Truncating a model
+        *without* MRL would quietly degrade retrieval, which is why
+        `embedding_provider` is stored on every claim: the vectors in an index
+        are only ever comparable to others from the same model.
+        """
         values = [float(x) for x in vector]
         if len(values) > self.dim:
-            values = values[: self.dim]  # Matryoshka prefix
+            if not self._logged_truncation:
+                LOGGER.info(
+                    "%s returned %s dimensions; using the leading %s (Matryoshka prefix)",
+                    self.cfg.embedding_model_name,
+                    len(values),
+                    self.dim,
+                )
+                self._logged_truncation = True
+            values = values[: self.dim]
         elif len(values) < self.dim:
             raise ProviderError(
                 "embedding_error",
@@ -1100,6 +1125,7 @@ class LiveVisionProvider:
             "temperature": 0,
             "max_tokens": self.cfg.llm_max_output_tokens,
             "response_format": {"type": "json_object"},
+            **self.cfg.chat_extras,
             "messages": [
                 {"role": "system", "content": VISION_SYSTEM},
                 {

@@ -306,7 +306,7 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **603 passed** |
+| `BRAIN_ENV=test pytest` | **632 passed** |
 | `python -m app.cli selftest` | **28/28 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
@@ -326,10 +326,11 @@ specification in `DESIGN_DECISIONS.md`.
 | `R2_*`, `LITESTREAM_REPLICA_URL` | prod | Replication to Cloudflare R2. |
 | `LLM_API_KEY` | prod (for live AI) | Turns on the live extractor, link classifier and vision. Unset = rule-based fallback. |
 | `LLM_BASE_URL` | — | OpenAI-compatible base. Default `https://openrouter.ai/api/v1`. |
-| `LLM_MODEL` | — | Default `google/gemini-2.5-flash`. Must be vision-capable for image ingestion. |
+| `LLM_MODEL` | — | Default `z-ai/glm-5.3-flash`. Must be vision-capable for image ingestion. `deepseek/deepseek-v4.1-flash` and `qwen/qwen3.8-flash` are drop-in. |
+| `LLM_REASONING_EFFORT` | — | Default `low`, sent as OpenRouter's `reasoning.effort`. Empty string omits the field. Ignored for non-OpenRouter hosts. |
 | `EMBEDDING_API_KEY` | — | Defaults to `LLM_API_KEY`. |
 | `EMBEDDING_BASE_URL` | — | Defaults to `LLM_BASE_URL`. |
-| `EMBEDDING_MODEL` | — | Default `text-embedding-3-small`, requested at 256 dimensions. |
+| `EMBEDDING_MODEL` | — | Default `qwen/qwen3-embedding-8b`, requested at 256 dimensions and prefix-sliced if the host returns its native 4096. |
 | `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` | — | Override the auto-calibrated retrieval floors. |
 | `R2_ENDPOINT_URL` (or `R2_ENDPOINT`) | for portability | S3 endpoint for tenant snapshots. All four R2 vars must be set, or snapshotting is off and tenants live only on the node's disk. |
 | `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | for portability | Credentials for the same. |
@@ -340,6 +341,7 @@ specification in `DESIGN_DECISIONS.md`.
 | `BRAIN_SHARD_INDEX` / `BRAIN_SHARD_TOTAL` | — | Default `0`/`1` (single node). Above `1`, each node serves the tenants where `crc32(user_id) % total == index`. |
 | `BRAIN_SHARD_URLS` | with sharding | Index-aligned base URLs; a request for another shard gets a `307`. |
 | `BRAIN_SHARD_INSTANCES` | with sharding | Index-aligned Fly machine ids; a request for another shard gets `fly-replay: instance=…` instead. Takes precedence over `BRAIN_SHARD_URLS`. |
+| `BRAIN_SHARD_INSTANCE_TEMPLATE` | — | Address for a shard with no explicit entry. Default `shard-{index}`, i.e. `fly-replay: instance=shard-2`. Empty string requires an explicit address instead. |
 
 ### Known limitations, stated plainly
 
@@ -604,3 +606,56 @@ documented shape, that the signature is deterministic and changes with every
 input it should (method, key, path, secret, region, date), and that the headers
 are well formed. The first live PUT against a real bucket is still the real
 verification — set the four `R2_*` vars and watch `doctor`, then one write.
+
+
+---
+
+## Phase 7b — Single-key OpenRouter setup
+
+`LLM_API_KEY` alone now turns on the entire live stack. OpenRouter serves chat,
+vision and `/embeddings` off one host, so `EMBEDDING_BASE_URL`,
+`EMBEDDING_API_KEY` and `EMBEDDING_MODEL` exist only for an operator who
+deliberately wants a second provider — none of them is needed for the default
+path. (This supersedes the Phase 6 note that a second embedding host was
+mandatory; the founder verified the OpenRouter `/embeddings` endpoint live on
+2026-10-28.)
+
+**Defaults**
+
+| slot | default | why |
+| --- | --- | --- |
+| chat + vision | `z-ai/glm-5.3-flash` | native vision, a very large context, and cheap enough to extract every chunk of a two-hour transcript. `deepseek/deepseek-v4.1-flash` and `qwen/qwen3.8-flash` swap in through `LLM_MODEL` alone. |
+| embeddings | `qwen/qwen3-embedding-8b` | Matryoshka-trained, so a 256-float prefix is itself a valid embedding. |
+
+**Reasoning effort.** This class of model deliberates before answering.
+Extraction is structured transcription, not a puzzle, so every chat payload
+carries `reasoning: {"effort": "low"}` — latency and output tokens down, no
+change in what the grounder will accept. It is gated on
+`cfg.targets_openrouter`, because `reasoning` is OpenRouter's own parameter and
+some OpenAI-compatible hosts reject a whole request for one unknown field.
+`LLM_REASONING_EFFORT` raises it, and an empty value omits it.
+
+**JSON parsing.** `_first_json_object` already stripped ```` ```json ```` fences
+and surrounding prose; there are now tests pinning that behaviour across six
+wrapper shapes, plus an end-to-end case proving a fenced reply still reaches the
+`rapidfuzz >= 88` grounder with its quote intact.
+
+**Matryoshka 256-dim guard.** `LiveEmbedder` asks for `dimensions: 256`, and if
+the host ignores that and returns its native width (4096 for
+`qwen3-embedding-8b`) it keeps the leading 256 floats and re-normalises to unit
+length. The prefix, not a resample — which is what MRL training makes valid.
+A *narrower* reply is refused rather than zero-padded: padding would produce a
+vector comparable to nothing, and cosine distance would not complain. One test
+pushes a sliced vector through `set_claim_embedding` and reads it back out of
+`claims_vec` to prove it survives the `float[256]` column.
+
+### The one thing to do with the live key before trusting retrieval
+
+**The neural floors (0.42 / 0.38) are now wrong until recalibrated.** They were
+reasoned for a model returning 256 dimensions natively. Slicing a 4096-float
+Qwen vector to a 256-float prefix moves the whole similarity distribution, so
+those numbers no longer describe the shipped default. `python -m app.cli
+calibrate` measures the real on-topic vs. off-topic spread in one command and
+prints the floors to set via `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR`. Until
+that runs, `search` may be either too strict or too permissive — the hashed
+floors (0.18 / 0.15) remain measured and correct for `BRAIN_ENV=test`.

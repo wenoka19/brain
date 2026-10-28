@@ -84,7 +84,11 @@ class Settings:
     # between two unrelated topics.
     #
     # Both pairs are overridable, because a different neural model may need
-    # recalibrating again.
+    # recalibrating again — and the shipped default now does. The neural pair
+    # was reasoned for a model that returns 256 dimensions natively; the
+    # default `qwen/qwen3-embedding-8b` returns 4096 and is cut to a 256-float
+    # Matryoshka prefix, which moves the whole similarity distribution. Run
+    # `python -m app.cli calibrate` once with a live key before trusting them.
     hash_search_floor: float = 0.18
     hash_link_floor: float = 0.15
     neural_search_floor: float = 0.42
@@ -93,15 +97,27 @@ class Settings:
     link_floor_override: float | None = None
 
     # ---- live AI providers ------------------------------------------------
+    # One key, one host, three jobs. OpenRouter serves chat, vision and
+    # `/embeddings`, so `LLM_API_KEY` alone turns the whole live stack on and
+    # `EMBEDDING_*` exists only for the operator who wants a second host.
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
-    llm_model: str = "google/gemini-2.5-flash"
+    #: Native vision, a very large context, and cheap enough to extract every
+    #: chunk of a two-hour transcript. `deepseek/deepseek-v4.1-flash` and
+    #: `qwen/qwen3.8-flash` are drop-in alternatives via `LLM_MODEL`.
+    llm_model: str = "z-ai/glm-5.3-flash"
+    #: This class of model reasons before answering. Extraction is a structured
+    #: transcription task, not a puzzle, so the lowest setting keeps latency and
+    #: output tokens down; `""` omits the field for hosts that reject it.
+    llm_reasoning_effort: str = "low"
     llm_timeout_sec: float = 60.0
     llm_max_retries: int = 2
     llm_max_output_tokens: int = 4096
     embedding_base_url: str = ""
     embedding_api_key: str = ""
-    embedding_model_name: str = "text-embedding-3-small"
+    #: Matryoshka-trained, so a 256-float prefix of its native vector is itself
+    #: a valid embedding — see `LiveEmbedder._normalise`.
+    embedding_model_name: str = "qwen/qwen3-embedding-8b"
     embedding_timeout_sec: float = 30.0
     vision_max_bytes: int = 8 * MB
 
@@ -126,6 +142,11 @@ class Settings:
     #: `shard_urls` routes with a 307, `shard_instances` with `fly-replay`.
     shard_urls: tuple[str, ...] = ()
     shard_instances: tuple[str, ...] = ()
+    #: Fallback when a shard has no explicit entry above: Fly's `fly-replay`
+    #: takes a machine name, so a deployment that names its machines by index
+    #: needs no table at all. Set `BRAIN_SHARD_INSTANCE_TEMPLATE=""` to turn the
+    #: convention off and require an explicit address.
+    shard_instance_template: str = "shard-{index}"
 
     # ---- per-user quotas --------------------------------------------------
     quota_media_minutes: int = 300
@@ -182,6 +203,22 @@ class Settings:
         return f"llm:{self.llm_model}" if self.live_llm else "heuristic-v1"
 
     @property
+    def targets_openrouter(self) -> bool:
+        return "openrouter.ai" in self.llm_base_url
+
+    @property
+    def chat_extras(self) -> dict[str, object]:
+        """Host-specific fields merged into every chat completions payload.
+
+        `reasoning` is OpenRouter's own parameter. Sending it to a plain
+        OpenAI-compatible host would be an unknown field, and some reject the
+        whole request for one, so it is gated on the host rather than assumed.
+        """
+        if self.targets_openrouter and self.llm_reasoning_effort:
+            return {"reasoning": {"effort": self.llm_reasoning_effort}}
+        return {}
+
+    @property
     def resolved_embedding_base_url(self) -> str:
         return (self.embedding_base_url or self.llm_base_url).rstrip("/")
 
@@ -223,11 +260,18 @@ class Settings:
 
     def shard_address(self, index: int) -> tuple[str, str]:
         """``(kind, value)`` for a shard: ``("instance", id)``,
-        ``("url", base)``, or ``("", "")`` when it has no address."""
+        ``("url", base)``, or ``("", "")`` when it has no address.
+
+        An explicit entry always wins, because a real Fly machine id is a hex
+        string rather than anything guessable; the template is the convenience
+        for a deployment that names its machines after their shard.
+        """
         if 0 <= index < len(self.shard_instances):
             return "instance", self.shard_instances[index]
         if 0 <= index < len(self.shard_urls):
             return "url", self.shard_urls[index].rstrip("/")
+        if self.shard_instance_template:
+            return "instance", self.shard_instance_template.format(index=index)
         return "", ""
 
     @property
@@ -308,6 +352,11 @@ def load_settings() -> Settings:
         shard_index=shard_index,
         shard_urls=_list_env("BRAIN_SHARD_URLS"),
         shard_instances=_list_env("BRAIN_SHARD_INSTANCES"),
+        shard_instance_template=(
+            os.environ["BRAIN_SHARD_INSTANCE_TEMPLATE"].strip()
+            if "BRAIN_SHARD_INSTANCE_TEMPLATE" in os.environ
+            else defaults.shard_instance_template
+        ),
         audience=os.environ.get("BRAIN_AUDIENCE", defaults.audience),
         llm_base_url=(os.environ.get("LLM_BASE_URL") or defaults.llm_base_url).rstrip("/"),
         llm_api_key=(os.environ.get("LLM_API_KEY") or "").strip(),
@@ -317,6 +366,11 @@ def load_settings() -> Settings:
         # fallback rather than a second thing to configure.
         embedding_api_key=(os.environ.get("EMBEDDING_API_KEY") or "").strip(),
         embedding_model_name=os.environ.get("EMBEDDING_MODEL") or defaults.embedding_model_name,
+        llm_reasoning_effort=(
+            os.environ["LLM_REASONING_EFFORT"].strip()
+            if "LLM_REASONING_EFFORT" in os.environ
+            else defaults.llm_reasoning_effort
+        ),
         search_floor_override=_float_env("BRAIN_SEARCH_FLOOR"),
         link_floor_override=_float_env("BRAIN_LINK_FLOOR"),
     )
