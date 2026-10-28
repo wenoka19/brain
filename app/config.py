@@ -39,6 +39,15 @@ class Settings:
     fts_candidates: int = 40
     vec_candidates: int = 40
     search_limit: int = 8
+    # Cosine KNN always returns its k nearest rows, however far away they are,
+    # so without a floor `search` answers a nonsense query with the library's
+    # least-unrelated claims. Returning nothing is better for the host LLM than
+    # returning junk it may go on to cite.
+    #
+    # Measured against the v1-hash embedder: on-topic queries score 0.29+, while
+    # off-topic ones top out around 0.14 on hash collisions alone. 0.18 sits in
+    # that gap. Swapping in a real embedding model means recalibrating this.
+    search_similarity_floor: float = 0.18
 
     # ---- grounding --------------------------------------------------------
     grounding_threshold: int = 88

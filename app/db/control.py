@@ -11,6 +11,7 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -86,6 +87,30 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_user ON ingestion_jobs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_pending ON ingestion_jobs(status, locked_until);
 
+-- Authorization codes are short-lived (60s), single-use and PKCE-bound. They
+-- live in the database rather than in process memory so the token exchange
+-- still works behind more than one uvicorn worker.
+CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+    code           TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    client_id      TEXT NOT NULL,
+    redirect_uri   TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    challenge_method TEXT NOT NULL DEFAULT 'S256',
+    scope          TEXT NOT NULL DEFAULT '',
+    resource       TEXT NOT NULL DEFAULT '',
+    expires_at     DATETIME NOT NULL,
+    consumed       INTEGER NOT NULL DEFAULT 0,
+    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id       TEXT PRIMARY KEY,
+    client_name     TEXT NOT NULL DEFAULT 'mcp_client',
+    redirect_uris   TEXT NOT NULL DEFAULT '[]',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     TEXT,
@@ -142,7 +167,23 @@ def new_token() -> str:
 # ---------------------------------------------------------------------------
 # connection
 # ---------------------------------------------------------------------------
-_connections: dict[str, sqlite3.Connection] = {}
+#: Connections are cached **per thread**. A single sqlite3 connection must not
+#: be shared across threads: ASGI servers run sync work in a threadpool, and two
+#: threads interleaving `BEGIN IMMEDIATE` on one connection would corrupt each
+#: other's transactions. WAL mode makes one connection per thread cheap.
+_local = threading.local()
+_registries: list[dict[str, sqlite3.Connection]] = []
+_registries_lock = threading.Lock()
+
+
+def _registry() -> dict[str, sqlite3.Connection]:
+    registry = getattr(_local, "connections", None)
+    if registry is None:
+        registry = {}
+        _local.connections = registry
+        with _registries_lock:
+            _registries.append(registry)
+    return registry
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -162,23 +203,28 @@ def open_control_db(path: Path | None = None, *, cfg: Settings | None = None) ->
 
 
 def control(path: Path | None = None) -> sqlite3.Connection:
-    """Cached control-db handle for the current process."""
+    """Cached control-db handle for the calling thread."""
     cfg = settings()
     key = str(Path(path) if path else cfg.control_db_path)
-    conn = _connections.get(key)
+    registry = _registry()
+    conn = registry.get(key)
     if conn is None:
         conn = open_control_db(Path(key), cfg=cfg)
-        _connections[key] = conn
+        registry[key] = conn
     return conn
 
 
 def close_all() -> None:
-    for conn in list(_connections.values()):
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-    _connections.clear()
+    """Close every cached handle this process holds, in any thread."""
+    with _registries_lock:
+        registries = list(_registries)
+    for registry in registries:
+        for conn in list(registry.values()):
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass  # a handle owned by another thread; it dies with the thread
+        registry.clear()
 
 
 @contextmanager
@@ -566,3 +612,93 @@ def recent_audit(conn: sqlite3.Connection, user_id: str, limit: int = 20) -> lis
         (user_id, max(1, min(limit, 200))),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# oauth clients + authorization codes (PKCE)
+# ---------------------------------------------------------------------------
+def register_client(
+    conn: sqlite3.Connection, *, client_name: str, redirect_uris: list[str]
+) -> dict[str, Any]:
+    """RFC 7591 dynamic registration — MCP clients self-register."""
+    client_id = new_id("client")
+    conn.execute(
+        "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?, ?, ?)",
+        (client_id, (client_name or "mcp_client")[:200], json.dumps(redirect_uris)),
+    )
+    return {
+        "client_id": client_id,
+        "client_name": client_name,
+        "redirect_uris": redirect_uris,
+    }
+
+
+def get_client(conn: sqlite3.Connection, client_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["redirect_uris"] = json.loads(record["redirect_uris"] or "[]")
+    return record
+
+
+def create_auth_code(
+    conn: sqlite3.Connection,
+    *,
+    user_id: str,
+    client_id: str,
+    redirect_uri: str,
+    code_challenge: str,
+    scope: str = "",
+    resource: str = "",
+    ttl_seconds: int = 60,
+) -> str:
+    code = new_token()
+    conn.execute(
+        """
+        INSERT INTO oauth_auth_codes (
+            code, user_id, client_id, redirect_uri, code_challenge, scope,
+            resource, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            hash_token(code),
+            user_id,
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+            iso(now_utc() + timedelta(seconds=ttl_seconds)),
+        ),
+    )
+    return code
+
+
+def consume_auth_code(conn: sqlite3.Connection, code: str) -> dict[str, Any] | None:
+    """Atomically claim an authorization code. A replay returns ``None``."""
+    digest = hash_token(code)
+    with transaction(conn):
+        row = conn.execute(
+            "SELECT * FROM oauth_auth_codes WHERE code = ?", (digest,)
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        conn.execute("UPDATE oauth_auth_codes SET consumed = 1 WHERE code = ?", (digest,))
+    if record["consumed"]:
+        return None
+    expires = parse_iso(record["expires_at"])
+    if expires and expires <= now_utc():
+        return None
+    return record
+
+
+def purge_expired_auth_codes(conn: sqlite3.Connection) -> int:
+    cur = conn.execute(
+        "DELETE FROM oauth_auth_codes WHERE expires_at < ? OR consumed = 1",
+        (iso(now_utc() - timedelta(minutes=10)),),
+    )
+    return cur.rowcount

@@ -91,7 +91,12 @@ def _claim_fts_lane(
 
 
 def _claim_vec_lane(
-    conn: sqlite3.Connection, embedding: Sequence[float], limit: int, cfg: Settings
+    conn: sqlite3.Connection,
+    embedding: Sequence[float],
+    limit: int,
+    cfg: Settings,
+    *,
+    min_similarity: float = 0.0,
 ) -> list[tuple[str, dict[str, Any], float]]:
     knn = conn.execute(
         """
@@ -123,8 +128,9 @@ def _claim_vec_lane(
     out: list[tuple[str, dict[str, Any], float]] = []
     for rowid, distance in sorted(by_rowid.items(), key=lambda kv: kv[1]):
         record = hydrated.get(rowid)
-        if record is not None:
-            out.append((record["id"], record, 1.0 - distance))
+        similarity = 1.0 - distance
+        if record is not None and similarity >= min_similarity:
+            out.append((record["id"], record, similarity))
     return out
 
 
@@ -146,7 +152,14 @@ def _skill_fts_lane(conn: sqlite3.Connection, expression: str, limit: int):
     return [(row["id"], hydrate_skill(row)) for row in rows]
 
 
-def _skill_vec_lane(conn: sqlite3.Connection, embedding: Sequence[float], limit: int, cfg: Settings):
+def _skill_vec_lane(
+    conn: sqlite3.Connection,
+    embedding: Sequence[float],
+    limit: int,
+    cfg: Settings,
+    *,
+    min_similarity: float = 0.0,
+):
     knn = conn.execute(
         """
         SELECT skill_rowid, distance
@@ -168,8 +181,9 @@ def _skill_vec_lane(conn: sqlite3.Connection, embedding: Sequence[float], limit:
     out = []
     for rowid, distance in sorted(by_rowid.items(), key=lambda kv: kv[1]):
         record = hydrated.get(rowid)
-        if record is not None:
-            out.append((record["id"], record, 1.0 - distance))
+        similarity = 1.0 - distance
+        if record is not None and similarity >= min_similarity:
+            out.append((record["id"], record, similarity))
     return out
 
 
@@ -238,7 +252,13 @@ def hybrid_search(
     if want_claims:
         fts_lane = _claim_fts_lane(conn, expression, cfg.fts_candidates) if expression else []
         vec_lane = (
-            _claim_vec_lane(conn, embedding, cfg.vec_candidates, cfg)
+            _claim_vec_lane(
+                conn,
+                embedding,
+                cfg.vec_candidates,
+                cfg,
+                min_similarity=cfg.search_similarity_floor,
+            )
             if embedding is not None
             else []
         )
@@ -247,7 +267,13 @@ def hybrid_search(
     if want_skills:
         fts_lane_s = _skill_fts_lane(conn, expression, cfg.fts_candidates) if expression else []
         vec_lane_s = (
-            _skill_vec_lane(conn, embedding, cfg.vec_candidates, cfg)
+            _skill_vec_lane(
+                conn,
+                embedding,
+                cfg.vec_candidates,
+                cfg,
+                min_similarity=cfg.search_similarity_floor,
+            )
             if embedding is not None
             else []
         )

@@ -303,15 +303,8 @@ class HeuristicClaimExtractor:
             following = sentences[index + 1] if index + 1 < len(sentences) else ""
             low = sentence.lower()
 
-            when_applies = context.get("when_it_applies") or ""
-            if not when_applies:
-                match = re.search(r"\b(when|if|for|once|while)\b([^.;]{8,120})", low)
-                when_applies = (
-                    f"{match.group(1).capitalize()}{match.group(2)}".strip()
-                    if match
-                    else f"Working on {', '.join(_domain_tags(sentence, hint_tags)) or 'this topic'}"
-                )
-
+            # Failure conditions are read first, so the same clause is never
+            # claimed as both "when it applies" and "when it fails".
             when_fails = ""
             fail_match = re.search(
                 r"\b(unless|except|breaks down|stops working|fails|does not work|doesn't work)\b([^.;]{0,120})",
@@ -319,6 +312,25 @@ class HeuristicClaimExtractor:
             )
             if fail_match:
                 when_fails = f"{fail_match.group(1).capitalize()}{fail_match.group(2)}".strip()
+
+            when_applies = context.get("when_it_applies") or ""
+            if not when_applies:
+                topic = ", ".join(_domain_tags(sentence, hint_tags))
+                # Only a conditional that is *not* the failure clause qualifies.
+                match = None
+                if not fail_match:
+                    match = re.search(r"\b(when|if|for|once|while)\b([^.;]{8,120})", low)
+                when_applies = (
+                    f"{match.group(1).capitalize()}{match.group(2)}".strip()
+                    if match
+                    # Honest fallback: the source stated no condition. Saying so
+                    # beats inventing one, since the envelope shows this verbatim.
+                    else (
+                        f"Not stated by the source (topic: {topic})"
+                        if topic
+                        else "Not stated by the source"
+                    )
+                )
 
             metrics = " ".join(re.findall(r"[^.;]*\b\d+(?:\.\d+)?\s*(?:%|x|percent|days?|hours?|minutes?)\b[^.;]*", sentence))
 
@@ -419,9 +431,9 @@ class HeuristicLinkClassifier:
 def _condition_clause(positive: dict[str, Any], negative: dict[str, Any]) -> str:
     """Name the differing conditions — but only when they actually differ.
 
-    The deterministic extractor falls back to boilerplate ("Working on sales")
-    when a source states no condition, and quoting two nearly identical
-    boilerplate strings back at the user is noise, not signal.
+    The deterministic extractor falls back to a boilerplate placeholder when a
+    source states no condition, and quoting two of those back at the user is
+    noise, not signal.
     """
     left = (positive.get("when_it_applies") or "").strip()
     right = (negative.get("when_it_applies") or "").strip()
@@ -429,7 +441,9 @@ def _condition_clause(positive: dict[str, Any], negative: dict[str, Any]) -> str
         return ""
     if _token_set(left) == _token_set(right):
         return ""
-    if left.lower().startswith("working on") and right.lower().startswith("working on"):
+    #: Phrasings the extractor emits when a source stated no condition at all.
+    boilerplate = ("working on", "not stated by the source")
+    if left.lower().startswith(boilerplate) and right.lower().startswith(boilerplate):
         return ""
     return f"Conditions differ: “{_short(left)}” vs “{_short(right)}”."
 

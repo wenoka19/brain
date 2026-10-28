@@ -157,6 +157,7 @@ def _claim_view(hit) -> dict[str, Any]:
         "score": hit.rrf_score,
         "tensions": [
             {
+                "link_id": tension["link_id"],
                 "link_type": tension["link_type"],
                 "divergence_summary": tension["divergence_summary"],
                 "other_id": tension["other_id"],
@@ -164,7 +165,13 @@ def _claim_view(hit) -> dict[str, Any]:
                 "other_speaker": tension["other_speaker"],
                 "other_evidence_basis": tension["other_evidence_basis"],
                 "other_anchor_quote": tension["other_anchor_quote"],
+                "other_when_it_applies": tension["other_when_it_applies"],
+                "other_when_it_fails": tension["other_when_it_fails"],
+                "other_metrics_and_quotes": tension["other_metrics_and_quotes"],
+                "other_salience": tension["other_salience"],
                 "other_source_title": tension["other_source_title"],
+                "other_locator_type": tension["other_locator_type"],
+                "other_locator_value": tension["other_locator_value"],
                 "other_deep_link": deep_link(
                     tension["other_source_url"],
                     tension["other_locator_type"],
@@ -347,6 +354,7 @@ def op_ingest_source(
             "source_id": source_id,
             "source_type": target.source_type,
             "canonical_url": target.canonical_url,
+            "user_note": job["user_note"],
             "status": job["status"],
         },
     )
@@ -405,6 +413,7 @@ def op_ingest_file(
             "source_id": source_id,
             "source_type": validated.source_type,
             "filename": validated.filename,
+            "user_note": job["user_note"],
             "status": job["status"],
         },
     )
@@ -439,6 +448,12 @@ def op_get_ingest_status(ctx: Context, job_id: str | None = None) -> OpResult:
                 "created_at": job["created_at"],
             }
         )
+    ctx.audit(
+        "get_ingest_status",
+        "ok",
+        target_id=job_id,
+        detail={"jobs": len(views)},
+    )
     return OpResult(
         ok=True,
         action="get_ingest_status",
@@ -589,11 +604,9 @@ def op_get_or_synthesize_skill(
         "slug": tenant_db.slugify(task)[:48],
         "name": task[:80].strip().rstrip(".").capitalize(),
         "description": f"Draft workflow synthesised from {len(supporting)} claims in your library.",
-        "trigger_when": supporting[0]["when_it_applies"],
+        "trigger_when": _draft_trigger(task, supporting),
         "execution_steps": _draft_steps(supporting),
-        "guardrails": " ".join(
-            f"{claim['when_it_fails']}" for claim in supporting if claim["when_it_fails"]
-        )[:600],
+        "guardrails": _draft_guardrails(supporting),
         "output_template": "",
         "linked_claim_ids": [claim["id"] for claim in supporting],
         "origin_type": "synthesized",
@@ -610,6 +623,33 @@ def op_get_or_synthesize_skill(
             "supporting_claims": supporting,
         },
     )
+
+
+#: Placeholders the extractor emits when a source stated no condition. They are
+#: honest in a claim envelope but useless as a skill trigger.
+_CONDITION_PLACEHOLDERS = ("not stated by the source", "working on")
+
+
+def _draft_trigger(task: str, supporting: list[dict[str, Any]]) -> str:
+    """Prefer a real condition from a backing claim; fall back to the task."""
+    for claim in supporting:
+        condition = (claim.get("when_it_applies") or "").strip()
+        if condition and not condition.lower().startswith(_CONDITION_PLACEHOLDERS):
+            return condition[:500]
+    return task[:500]
+
+
+def _draft_guardrails(supporting: list[dict[str, Any]]) -> str:
+    """Collect distinct failure conditions — several claims often share one."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for claim in supporting:
+        guardrail = (claim.get("when_it_fails") or "").strip()
+        key = guardrail.lower().rstrip(".")
+        if guardrail and key not in seen:
+            seen.add(key)
+            out.append(guardrail.rstrip(".") + ".")
+    return " ".join(out)[:600]
 
 
 def _draft_steps(supporting: list[dict[str, Any]]) -> list[str]:

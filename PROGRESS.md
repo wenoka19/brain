@@ -7,10 +7,10 @@ checkpoint, per `CLAUDE.md` §0 Rule 2.
 |---|---|---|
 | 1 | Security primitives, dual SQLite DBs, hybrid search | ✅ complete |
 | 2 | Gatekeeper, grounded extraction, contradiction linker | ✅ complete |
-| **Checkpoint A** | In-chat Agentic UX (AX), tone & tool surface | 🛑 **options presented — awaiting founder** |
-| 3 | MCP server + OAuth 2.1 / 30-day refresh | ⬜ blocked on Checkpoint A |
-| **Checkpoint B** | Web app, Omni-Bar, theme feel | ⬜ not started |
-| 4–5 | Web app, CLI, CI/CD, production packaging | ⬜ not started |
+| **Checkpoint A** | In-chat Agentic UX (AX), tone & tool surface | ✅ locked by founder |
+| 3 | MCP server + OAuth 2.1 / 30-day refresh | ✅ complete |
+| **Checkpoint B** | Web app, Omni-Bar, theme feel | 🛑 **options presented — awaiting founder** |
+| 4–5 | Web app, CLI, CI/CD, production packaging | ⬜ blocked on Checkpoint B |
 
 ---
 
@@ -123,3 +123,89 @@ paraphrase vs hallucinated quotes, a lying extractor, a crashing extractor,
 quota release on failure, duration reconciliation, cross-tenant job invisibility,
 end-to-end prompt-injection containment, and byte-identical determinism across
 two tenants on the same input.
+
+
+---
+
+## Checkpoint A — locked
+
+The founder reviewed the three options per touchpoint against Agentic UX and
+LLM context-engineering practice, **rejected Markdown tables outright** (they
+force the renderer to drop the verbatim quote and `when_it_fails`, and collapse
+at three or more disagreeing sources), and specified: modified `1B` receipt with
+no time estimate, hoisted `2B` prose briefing, `3B` contract-vs-sketch with
+step-level claim ids. Full specification in `DESIGN_DECISIONS.md`.
+
+## Phase 3 — Co-designed MCP server + OAuth 2.1 (complete)
+
+**Built**
+
+- `app/core/formatting.py` — the locked envelopes. No Markdown table is
+  emitted anywhere (asserted by test). Conflicts hoist above `## MATCHED
+  CLAIMS`; every claim renders as the same three-line prose block carrying
+  speaker, evidence basis, salience, `Works when` / `Breaks when`, the verbatim
+  quote, a locator deep link (`23:40`, `p.14`, section) and the `claim_id`.
+  Library content is fenced and **the `[AGENT_HINT]` is emitted after the fence**,
+  so injected text can neither forge a hint nor be read as one. Every envelope
+  is trimmed to the 1,500-token budget, and the fence and hint are never the
+  thing that gets trimmed.
+- `app/auth.py` — OAuth 2.1: RFC 9728 + RFC 8414 metadata, RFC 7591 dynamic
+  registration, mandatory PKCE `S256` (`plain` refused), single-use 60-second
+  authorization codes, audience-bound 1h JWT access tokens, absolute 30-day
+  refresh with rotation, and RFC 7009 revocation that always answers 200 so a
+  caller cannot probe which tokens exist. Verification requires **both** a valid
+  signature *and* a live `control.db` row, so revocation takes a millisecond and
+  a token we did not mint is never accepted.
+- `app/mcp_server.py` — the 8 typed tools over Streamable HTTP at `/mcp`, each
+  passing the same gate: authenticate → rate-limit / loop-break → execute →
+  render → audit. Tool descriptions are written for the host LLM ("does not
+  block", "never in a loop", "not deletion", "never on your own judgement").
+- `app/main.py` — FastAPI host with strict CSP, `X-Frame-Options: DENY`, HSTS
+  and the `/mcp` transport's DNS-rebinding allow-list.
+
+**Design notes and bugs caught**
+
+- *The `[AGENT_HINT]` must live outside the untrusted fence.* Inside it, a
+  hostile transcript could forge one. Asserted positionally in the tests.
+- *A deciding variable is derived, never invented.* It comes from a quantified
+  boundary in either side's conditions ("above 500 emails per day" → "daily
+  email volume"); with nothing to go on, the header says so.
+- *SQLite connections are now cached per thread.* The caches were process-wide,
+  which breaks the moment an ASGI server runs sync work in a threadpool — two
+  threads interleaving `BEGIN IMMEDIATE` on one connection would corrupt each
+  other's transactions. Caught by the first HTTP test.
+- *The `/mcp` transport needs its hostname declared.* DNS-rebinding protection
+  answers `421` for any undeclared `Host`, so a deployed server rejects every
+  request unless `BRAIN_PUBLIC_URL` / `BRAIN_ALLOWED_HOSTS` are set. Caught by
+  the live-transport test and now covered by one.
+- *Cosine KNN has no notion of "too far".* Without a floor, `search` answered a
+  nonsense query with the library's least-unrelated claims — junk the host LLM
+  might then cite. Measured against the v1-hash embedder (on-topic 0.29+,
+  off-topic ≤0.14 on collisions alone) and floored at 0.18.
+- *Smaller fixes found by rendering real output:* each tension was rendering
+  twice (once per side, because `link_id` was not carried into the claim view);
+  the heuristic extractor was emitting the *failure* clause as `Works when`; and
+  `get_ingest_status` was the one tool whose calls were not being audited.
+
+**Verified** — `tests/test_phase3_mcp_and_auth.py`. Full suite: **309 passed**.
+Covers the locked envelope shape line by line, the no-tables rule across all
+three renderers, fence-breakout containment, the token budget under a loaded
+library, the RFC 7636 appendix-B PKCE vector, open-redirect refusal, code
+replay, cross-audience token refusal, forged-signature refusal, signature-only
+(no session row) refusal, rotation that never extends the 30-day ceiling,
+instant revocation, every tool's schema and description, the loop breaker and
+rate limiter through the real tool gate, and a full OAuth 2.1 → `/mcp` →
+`tools/call` round trip over HTTP.
+
+### Environment variables Phase 3 introduces
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `BRAIN_JWT_SECRET` | **yes in prod** | HS256 signing key. Signing refuses to start without it in prod, since an ephemeral key would silently invalidate every live session on restart. |
+| `BRAIN_PUBLIC_URL` | recommended | Public origin; sets the OAuth issuer and the transport Host allow-list. |
+| `BRAIN_ALLOWED_HOSTS` | optional | Extra comma-separated hostnames for the allow-list. |
+| `BRAIN_OWNER_EMAIL` | optional | Single-user shortcut: skips the consent form at `/authorize`. |
+
+> The consent page at `/authorize` is deliberately unstyled. It is the minimum
+> functional surface for Phase 3; how it should *look* is a Checkpoint B
+> question and nothing about it is decided yet.

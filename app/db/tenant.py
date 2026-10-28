@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+import threading
 import uuid
 from collections import OrderedDict
 from pathlib import Path
@@ -325,7 +326,21 @@ class _LRUConnections:
         self._cache.clear()
 
 
-_pool = _LRUConnections()
+#: One pool per thread, for the same reason as `control.py`: a sqlite3
+#: connection belongs to the thread that opened it.
+_pool_local = threading.local()
+_pools: list[_LRUConnections] = []
+_pools_lock = threading.Lock()
+
+
+def _pool_for_thread() -> _LRUConnections:
+    pool = getattr(_pool_local, "pool", None)
+    if pool is None:
+        pool = _LRUConnections()
+        _pool_local.pool = pool
+        with _pools_lock:
+            _pools.append(pool)
+    return pool
 
 
 def _open(path: Path, cfg: Settings) -> sqlite3.Connection:
@@ -362,11 +377,14 @@ def init_schema(conn: sqlite3.Connection, *, cfg: Settings | None = None) -> Non
 def tenant(user_id: str, *, cfg: Settings | None = None) -> sqlite3.Connection:
     """Open (or reuse) the tenant DB for a *verified* ``user_id``."""
     cfg = cfg or settings()
-    return _pool.get(cfg.tenant_db_path(user_id), cfg)
+    return _pool_for_thread().get(cfg.tenant_db_path(user_id), cfg)
 
 
 def close_all() -> None:
-    _pool.close_all()
+    with _pools_lock:
+        pools = list(_pools)
+    for pool in pools:
+        pool.close_all()
 
 
 # ---------------------------------------------------------------------------
@@ -612,11 +630,19 @@ def tensions_for_claims(conn: sqlite3.Connection, claim_ids: Sequence[str]) -> d
                ca.claim AS a_claim, ca.speaker AS a_speaker,
                ca.evidence_basis AS a_evidence_basis, ca.anchor_quote AS a_anchor_quote,
                ca.locator_type AS a_locator_type, ca.locator_value AS a_locator_value,
+               ca.when_it_applies AS a_when_it_applies,
+               ca.when_it_fails AS a_when_it_fails,
+               ca.metrics_and_quotes AS a_metrics_and_quotes,
+               ca.salience AS a_salience, ca.domain_tags AS a_domain_tags,
                ca.status AS a_status, sa.title AS a_source_title,
                sa.canonical_url AS a_source_url, sa.source_type AS a_source_type,
                cb.claim AS b_claim, cb.speaker AS b_speaker,
                cb.evidence_basis AS b_evidence_basis, cb.anchor_quote AS b_anchor_quote,
                cb.locator_type AS b_locator_type, cb.locator_value AS b_locator_value,
+               cb.when_it_applies AS b_when_it_applies,
+               cb.when_it_fails AS b_when_it_fails,
+               cb.metrics_and_quotes AS b_metrics_and_quotes,
+               cb.salience AS b_salience, cb.domain_tags AS b_domain_tags,
                cb.status AS b_status, sb.title AS b_source_title,
                sb.canonical_url AS b_source_url, sb.source_type AS b_source_type
         FROM tension_links t
@@ -651,6 +677,11 @@ def tensions_for_claims(conn: sqlite3.Connection, claim_ids: Sequence[str]) -> d
                     "other_anchor_quote": record[f"{far}_anchor_quote"],
                     "other_locator_type": record[f"{far}_locator_type"],
                     "other_locator_value": record[f"{far}_locator_value"],
+                    "other_when_it_applies": record[f"{far}_when_it_applies"],
+                    "other_when_it_fails": record[f"{far}_when_it_fails"],
+                    "other_metrics_and_quotes": record[f"{far}_metrics_and_quotes"],
+                    "other_salience": record[f"{far}_salience"],
+                    "other_domain_tags": json.loads(record[f"{far}_domain_tags"] or "[]"),
                     "other_source_title": record[f"{far}_source_title"],
                     "other_source_url": record[f"{far}_source_url"],
                     "other_source_type": record[f"{far}_source_type"],
