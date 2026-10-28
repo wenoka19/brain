@@ -680,15 +680,17 @@ class TestStaticContract:
     def test_reduced_motion_is_respected(self, css):
         assert "prefers-reduced-motion" in css
 
-    def test_the_profile_modal_has_exactly_five_numbered_blocks(self, html):
+    def test_the_profile_modal_blocks_are_numbered_and_in_order(self, html):
+        """Five locked at Checkpoint B, plus the audit log the founder added."""
         headings = re.findall(r"<h3>(\d) · ([^<]+)</h3>", html)
-        assert [number for number, _ in headings] == ["1", "2", "3", "4", "5"]
+        assert [number for number, _ in headings] == ["1", "2", "3", "4", "5", "6"]
         labels = " ".join(label.lower() for _, label in headings)
         assert "about you" in labels
         assert "mcp connection" in labels and "sessions" in labels
         assert "appearance" in labels
         assert "quotas" in labels
         assert "recovery" in labels
+        assert "audit log" in labels
 
     def test_the_tuner_exposes_the_contrast_readout_and_token_copy(self, html, js):
         assert 'id="contrast"' in html and 'id="copy-tokens"' in html

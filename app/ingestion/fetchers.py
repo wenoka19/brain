@@ -13,6 +13,7 @@ Hard rules enforced here:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -41,6 +42,9 @@ def build_ytdlp_metadata_cmd(url: str, *, cfg: Settings | None = None) -> list[s
     return [
         "yt-dlp",
         "--no-config",
+        # `--no-exec` cancels any --exec that a config or a crafted URL
+        # could otherwise smuggle in, so yt-dlp can never spawn a shell.
+        "--no-exec",
         "--no-playlist",
         "--skip-download",
         "--dump-single-json",
@@ -57,6 +61,9 @@ def build_ytdlp_subtitle_cmd(url: str, outdir: str | Path, *, cfg: Settings | No
     return [
         "yt-dlp",
         "--no-config",
+        # `--no-exec` cancels any --exec that a config or a crafted URL
+        # could otherwise smuggle in, so yt-dlp can never spawn a shell.
+        "--no-exec",
         "--no-playlist",
         "--skip-download",
         "--write-subs",
@@ -72,6 +79,25 @@ def build_ytdlp_subtitle_cmd(url: str, outdir: str | Path, *, cfg: Settings | No
     ]
 
 
+def scrubbed_env() -> dict[str, str]:
+    """The only variables a fetcher subprocess is allowed to see.
+
+    `subprocess.run` inherits the parent environment by default, which on this
+    server means handing `yt-dlp` — a large third-party program parsing
+    attacker-supplied pages — `LLM_API_KEY`, `BRAIN_JWT_SECRET` and every R2
+    credential. It needs none of them. `HOME` is redirected to a scratch
+    directory so nothing reads or writes a real dotfile, and `PATH` is kept only
+    so the binary itself can be found.
+    """
+    return {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": tempfile.gettempdir(),
+        "TMPDIR": tempfile.gettempdir(),
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8",
+    }
+
+
 def _run(cmd: list[str], *, cfg: Settings) -> subprocess.CompletedProcess:
     if not isinstance(cmd, list) or not all(isinstance(part, str) for part in cmd):
         raise ValueError("subprocess commands must be argument arrays")
@@ -83,6 +109,8 @@ def _run(cmd: list[str], *, cfg: Settings) -> subprocess.CompletedProcess:
             text=True,
             timeout=cfg.subprocess_timeout_sec,
             check=False,
+            env=scrubbed_env(),
+            cwd=tempfile.gettempdir(),
         )
     except FileNotFoundError as exc:
         raise ProviderError("tool_missing", f"`{cmd[0]}` is not installed on this host.") from exc
@@ -436,8 +464,17 @@ def parse_docx_file(validated, *, cfg: Settings | None = None) -> FetchedContent
 
 
 def describe_image_file(validated, *, cfg: Settings | None = None) -> FetchedContent:
-    """Images need a vision model, which is a prod-only dependency."""
-    raise ProviderError(
-        "vision_unavailable",
-        "Image ingestion needs a vision model, which is not configured on this host.",
-    )
+    """Transcribe and describe an image with the configured vision provider.
+
+    Raises `vision_unavailable` when no vision key is configured, rather than
+    inventing a description — an image nobody can read is not a source.
+    """
+    from app.ingestion.providers import LiveVisionProvider
+
+    cfg = cfg or settings()
+    if not cfg.live_vision:
+        raise ProviderError(
+            "vision_unavailable",
+            "Image ingestion needs a vision model; set LLM_API_KEY to enable it.",
+        )
+    return LiveVisionProvider(cfg).describe(validated)

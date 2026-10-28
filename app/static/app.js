@@ -110,7 +110,11 @@ async function runPlan() {
   if (!state.plan) return;
   const out = await api("/api/omnibar/run", { method: "POST", body: { plan: state.plan } });
   state.plan = null;
+  // Clearing the box without clearing the filter would leave the grid showing
+  // nothing, filtered by a command the user can no longer see.
   $("#omni-input").value = "";
+  state.filter = "";
+  setMode("filter");
   if (out.receipt) showReceipt(out.receipt);
   else showError(out.message || "That command could not be run.");
   await refresh();
@@ -573,6 +577,22 @@ async function openProfile() {
         <button class="btn btn-sm btn-danger" data-delete="${esc(item.id)}">${icon("trash")} Delete</button>
       </div>`).join("")
     : '<p class="row-sub">Trash is empty.</p>';
+
+  const audit = await api("/api/audit-logs?limit=25");
+  $("#audit-log").innerHTML = (audit.entries || []).length
+    ? (audit.blocked_count
+        ? `<p class="row-sub">${icon("conflict")} ${audit.blocked_count} blocked attempt${
+            audit.blocked_count === 1 ? "" : "s"}</p>`
+        : "") +
+      audit.entries.map((entry) => `<div class="row">
+        <div class="row-main">
+          <div${entry.blocked ? ' class="audit-blocked"' : ""}>${esc(entry.reasoning_trace)}</div>
+          <div class="row-sub">${esc(entry.created_at)} · ${esc(entry.surface)}${
+            entry.client_name ? " · " + esc(entry.client_name) : ""}${
+            entry.target_id ? " · " + esc(entry.target_id) : ""}</div>
+        </div>
+      </div>`).join("")
+    : '<p class="row-sub">Nothing yet. Actions appear here as they happen.</p>';
 
   $$("#theme-choice [data-theme-pick]").forEach((button) => {
     button.classList.toggle("btn-primary", button.dataset.themePick === (data.theme_mode || "light"));

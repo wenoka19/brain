@@ -40,6 +40,14 @@ jobs:
       - name: Tests
         run: python -m pytest -v
 
+      - name: No real key is ever required to run the suite
+        # The live LLM / embedding / vision adapters are tested against a mock
+        # transport, so a missing key must never be the reason CI passes.
+        env:
+          LLM_API_KEY: ""
+          EMBEDDING_API_KEY: ""
+        run: python -m pytest tests/test_phase6_security_and_live_providers.py -q
+
       - name: Selftest
         run: python -m app.cli selftest
 
@@ -70,6 +78,9 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Smoke the control plane
         run: python -m pytest tests/test_phase4_omnibar_and_ui.py -v
+
+      - name: The Profile modal opens and renders the audit log
+        run: python -m pytest tests/test_phase6_security_and_live_providers.py -v -k browser
 
   docker:
     runs-on: ubuntu-latest

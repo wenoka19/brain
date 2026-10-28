@@ -26,7 +26,7 @@ from rapidfuzz import fuzz
 from app.config import Settings, settings
 from app.core import engine as E
 from app.db import tenant as tenant_db
-from app.security.sanitizer import clean_text, truncate_words
+from app.security.sanitizer import clean_text, lint_skill_safety, truncate_words
 
 MODE_FILTER = "filter"
 MODE_INGEST = "ingest"
@@ -506,6 +506,27 @@ def execute(ctx: E.Context, plan: OmnibarPlan) -> tuple[OmnibarReceipt, E.OpResu
         previous_version = skill["version"]
         steps = list(skill["execution_steps"])
         name = skill["name"]
+
+        # The bar can rewrite a step or a name, which lands in a skill that is
+        # later replayed as instructions — so it goes through the same linter
+        # `save_skill` uses, not a looser path.
+        proposed = plan.params.get("new_text") or plan.params.get("name") or ""
+        report = lint_skill_safety(proposed)
+        if not report.safe:
+            ctx.audit(
+                "omnibar_edit",
+                "blocked_unsafe_content",
+                target_id=plan.target_id,
+                detail=report.as_dict(),
+                reasoning_trace=(
+                    "Blocked an Omni-Bar skill edit: the new text "
+                    f"{report.findings[0].reason}."
+                ),
+            )
+            return (
+                OmnibarReceipt(False, report.message, error_reason="unsafe_skill_content"),
+                None,
+            )
 
         if plan.action == "edit_step":
             index = int(plan.params.get("step", 0)) - 1

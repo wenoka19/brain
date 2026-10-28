@@ -39,10 +39,10 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # The data volume is owned by a non-root user; nothing here needs root.
-RUN useradd --system --create-home --uid 10001 brain \
+RUN useradd --system --create-home --uid 10001 brainuser \
     && mkdir -p /data/users /data/uploads \
-    && chown -R brain:brain /data /app
-USER brain
+    && chown -R brainuser:brainuser /data /app
+USER brainuser
 VOLUME ["/data"]
 EXPOSE 8080
 

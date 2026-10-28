@@ -291,6 +291,8 @@ a{color:var(--accent)}
 .meter > span{display:block;height:100%;background:var(--accent);transition:width var(--duration-ui) var(--ease-ui)}
 .meter.warn > span{background:var(--accent-conflict)}
 .theme-choice{display:flex;gap:8px;flex-wrap:wrap}
+#audit-log{max-height:220px;overflow-y:auto}
+.audit-blocked{color:var(--accent-conflict)}
 
 /* ---------- /preview harness ---------- */
 .harness{

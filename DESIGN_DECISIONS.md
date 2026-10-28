@@ -161,3 +161,28 @@ harness with its Variation & Edge-State switcher and live Theme/WCAG tuner.
 `app/static/index.html` + `app/static/app.css` + `app/static/app.js` rather than
 one inlined file. Same page, same tokens; it simply keeps the header strict
 instead of weakening it to `'unsafe-inline'`.
+
+
+---
+
+## Phase 6 addendum — live providers and the audit log
+
+Two decisions here changed a user-facing surface, so they are recorded with the
+checkpoints rather than only in `PROGRESS.md`.
+
+### The Profile modal gains a sixth block
+
+`6 · Recent activity & audit log` sits below the five blocks locked at
+Checkpoint B. It is read-only and append-only by construction, and each row
+carries a plain-English `reasoning_trace` ("Blocked a skill before saving: the
+text tries to override the host model's instructions") rather than a machine
+detail blob — the point is that the owner can see what was done to their
+knowledge and why, including attempts that were refused.
+
+### A skill is screened, not spotlighted
+
+Everything else third-party is *fenced* on the way to a model
+(`[UNTRUSTED_LIBRARY_DATA_*]`). A saved skill cannot be: the agent executes its
+steps, unfenced, as instructions. So skills and imported `SKILL.md` files are
+**refused** at the door by `lint_skill_safety` instead. Transcripts, articles
+and PDFs keep the fencing treatment, because they are only ever quoted back.

@@ -23,7 +23,7 @@ from app.ingestion.extractor import extract_grounded_claims
 from app.ingestion.gatekeeper import GatekeeperError
 from app.ingestion.linker import link_claims
 from app.ingestion.providers import FetchedContent, ProviderError, Providers, providers
-from app.security.sanitizer import clean_text
+from app.security.sanitizer import clean_text, lint_skill_safety
 
 Scope = Literal["all", "claims", "skills"]
 ItemType = Literal["source", "claim", "skill"]
@@ -60,7 +60,14 @@ class Context:
     client_name: str = "mcp_client"
     surface: str = "mcp"
 
-    def audit(self, action: str, status: str, target_id: str | None = None, detail: Any = "") -> None:
+    def audit(
+        self,
+        action: str,
+        status: str,
+        target_id: str | None = None,
+        detail: Any = "",
+        reasoning_trace: str = "",
+    ) -> None:
         control_db.audit(
             self.control,
             user_id=self.user_id,
@@ -70,6 +77,7 @@ class Context:
             client_name=self.client_name,
             target_id=target_id,
             detail=detail,
+            reasoning_trace=reasoning_trace,
         )
 
 
@@ -709,6 +717,23 @@ def op_save_skill(
             "A skill needs a trigger — when should it be reached for?",
         )
 
+    # A saved skill is replayed to a model as *instructions*, unfenced. So it is
+    # screened before it is stored, not spotlighted on the way out.
+    report = lint_skill_safety(
+        name, description, trigger_when, guardrails, output_template, execution_steps
+    )
+    if not report.safe:
+        ctx.audit(
+            "save_skill",
+            "blocked_unsafe_content",
+            detail=report.as_dict(),
+            reasoning_trace=(
+                "Blocked a skill before saving: the text "
+                f"{report.findings[0].reason}."
+            ),
+        )
+        return _fail("save_skill", "unsafe_skill_content", report.message)
+
     skill = tenant_db.upsert_skill(
         ctx.tenant,
         slug=slug or name,
@@ -846,6 +871,28 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
 
     if not content.full_text:
         return finish("failed", message="Nothing readable was found at that source.")
+
+    # A GitHub markdown file is usually a `SKILL.md` — procedural text the user
+    # intends to *run*. Unlike a transcript, which is only ever quoted back
+    # inside a fence, that will reach a model as instructions, so it is screened
+    # at the door rather than spotlighted later.
+    if job["source_type"] == "github":
+        report = lint_skill_safety(content.title, content.full_text)
+        if not report.safe:
+            control_db.audit(
+                control,
+                user_id=user_id,
+                action="ingest_source",
+                status="blocked_unsafe_content",
+                surface="system",
+                target_id=job_id,
+                detail=report.as_dict(),
+                reasoning_trace=(
+                    f"Refused {job['input_target']}: the file "
+                    f"{report.findings[0].reason}."
+                ),
+            )
+            return finish("failed", message=report.message)
 
     return _ingest_content(job, content, cfg=cfg, finish=finish)
 
@@ -1228,6 +1275,82 @@ def op_profile(ctx: Context) -> OpResult:
             "sessions": sessions,
             "mcp_url": ctx.cfg.audience,
             "library_counts": tenant_db.counts(ctx.tenant),
+        },
+    )
+
+
+#: Actions whose audit rows are noise in a human-readable activity list.
+_AUDIT_NOISE = frozenset({"search", "fetch", "get_ingest_status", "list_cards", "web_login"})
+
+#: A fallback trace for rows written before `reasoning_trace` existed, or by a
+#: call site that had nothing useful to add.
+_AUDIT_FALLBACK = {
+    "ingest_source": "Queued a source for the library.",
+    "ingest_file": "Queued an uploaded file.",
+    "process_job": "Processed a queued source.",
+    "rescue_job": "Rescued a blocked source from pasted text.",
+    "remember_this": "Recorded one of your own rules.",
+    "save_skill": "Saved or versioned a skill.",
+    "archive_item": "Archived an item — reversible.",
+    "restore_item": "Restored an archived item.",
+    "trash_item": "Moved a source to Trash.",
+    "permanent_delete": "Permanently deleted a source from Trash.",
+    "revert_skill": "Reverted a skill to an earlier version.",
+    "update_claim": "Edited a claim's conditions.",
+    "update_profile": "Changed a profile setting.",
+    "export": "Exported the library.",
+    "revoke_session": "Revoked a connected client.",
+    "token_issue": "Issued an access token to a client.",
+    "token_refresh": "Rotated a client's refresh token.",
+    "revoke": "Revoked a token.",
+    "authorize": "Authorised a client to connect.",
+    "register_client": "A new client registered itself.",
+    "seed_demo": "Loaded the demo library.",
+    "clear_demo": "Cleared the demo library.",
+    "omnibar_edit": "Edited a skill from the Omni-Bar.",
+}
+
+
+def op_audit_log(ctx: Context, *, limit: int = 40, include_reads: bool = False) -> OpResult:
+    """The owner's own activity log — the anti-"SaaS blindness" surface.
+
+    Everything an agent or the web app did on this library, with a plain-English
+    reason, so nothing happens to the user's knowledge that they cannot see. It
+    is read-only by construction: `audit_logs` is append-only and no operation
+    updates or deletes a row.
+    """
+    rows = control_db.recent_audit(ctx.control, ctx.user_id, limit=max(1, min(limit, 200)) * 3)
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        action = row["action"] or ""
+        if not include_reads and action in _AUDIT_NOISE and row["status"] == "ok":
+            continue
+        blocked = str(row["status"] or "").startswith("blocked")
+        entries.append(
+            {
+                "id": row["id"],
+                "action": action,
+                "status": row["status"],
+                "surface": row["surface"],
+                "client_name": row["client_name"],
+                "target_id": row["target_id"],
+                "created_at": row["created_at"],
+                "blocked": blocked,
+                "reasoning_trace": (
+                    row["reasoning_trace"]
+                    or _AUDIT_FALLBACK.get(action, f"{action.replace('_', ' ')} ({row['status']})")
+                ),
+            }
+        )
+        if len(entries) >= limit:
+            break
+    return OpResult(
+        ok=True,
+        action="audit_log",
+        data={
+            "entries": entries,
+            "blocked_count": sum(1 for entry in entries if entry["blocked"]),
+            "append_only": True,
         },
     )
 

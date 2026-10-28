@@ -507,6 +507,18 @@ async def api_profile(request: Request) -> Response:
 
 
 @endpoint
+async def api_audit_logs(request: Request) -> Response:
+    """Read-only. The owner's own rows only — `_context` resolves the tenant."""
+    ctx = _context(request)
+    try:
+        limit = int(request.query_params.get("limit", 40))
+    except ValueError:
+        limit = 40
+    include_reads = request.query_params.get("include_reads") == "1"
+    return _result(E.op_audit_log(ctx, limit=limit, include_reads=include_reads))
+
+
+@endpoint
 async def api_revoke_session(request: Request) -> Response:
     ctx = _context(request)
     _require_csrf(request)
@@ -606,6 +618,7 @@ ROUTES = [
     Route("/api/skill/{skill_id}/revert", api_revert_skill, methods=["POST"]),
     Route("/api/synthesize", api_synthesize, methods=["POST"]),
     Route("/api/profile", api_profile, methods=["GET", "POST"]),
+    Route("/api/audit-logs", api_audit_logs, methods=["GET"]),
     Route("/api/sessions/{session_id}/revoke", api_revoke_session, methods=["POST"]),
     Route("/api/demo/{action}", api_demo, methods=["POST"]),
 ]

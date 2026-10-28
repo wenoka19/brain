@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     target_id   TEXT,
     status      TEXT,
     detail      TEXT NOT NULL DEFAULT '',
+    -- A short, human-readable "why this happened", written for the person
+    -- reading their own audit log rather than for a machine.
+    reasoning_trace TEXT NOT NULL DEFAULT '',
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id, created_at DESC);
@@ -199,7 +202,32 @@ def open_control_db(path: Path | None = None, *, cfg: Settings | None = None) ->
     conn.row_factory = sqlite3.Row
     _apply_pragmas(conn)
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
+
+
+#: Columns added after the first release. `CREATE TABLE IF NOT EXISTS` does
+#: nothing to a table that already exists, so an existing `control.db` needs
+#: these added explicitly or every write naming them fails.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("audit_logs", "reasoning_trace", "ALTER TABLE audit_logs ADD COLUMN reasoning_trace TEXT NOT NULL DEFAULT ''"),
+    ("ingestion_jobs", "reserved_files", "ALTER TABLE ingestion_jobs ADD COLUMN reserved_files INTEGER NOT NULL DEFAULT 0"),
+    ("ingestion_jobs", "claims_extracted", "ALTER TABLE ingestion_jobs ADD COLUMN claims_extracted INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Apply additive column migrations. Idempotent, and safe to run on boot."""
+    applied: list[str] = []
+    for table, column, statement in MIGRATIONS:
+        columns = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not columns or column in columns:
+            continue
+        conn.execute(statement)
+        applied.append(f"{table}.{column}")
+    return applied
 
 
 def control(path: Path | None = None) -> sqlite3.Connection:
@@ -605,15 +633,31 @@ def audit(
     client_name: str = "mcp_client",
     target_id: str | None = None,
     detail: Any = "",
+    reasoning_trace: str = "",
 ) -> None:
+    """Append one immutable audit row.
+
+    `reasoning_trace` is the plain-English "why" the owner reads in their
+    Profile — "blocked: the skill text tried to override the host model's
+    instructions" — rather than a machine-readable detail blob.
+    """
     if surface not in ("mcp", "web_omnibar", "web_ui", "system"):
         surface = "system"
     if not isinstance(detail, str):
         detail = json.dumps(detail, default=str, ensure_ascii=False)[:2000]
     conn.execute(
-        "INSERT INTO audit_logs (user_id, client_name, surface, action, target_id, status, detail) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, client_name, surface, action, target_id, status, detail[:2000]),
+        "INSERT INTO audit_logs (user_id, client_name, surface, action, target_id, status, "
+        "detail, reasoning_trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            client_name,
+            surface,
+            action,
+            target_id,
+            status,
+            detail[:2000],
+            (reasoning_trace or "")[:1000],
+        ),
     )
 
 

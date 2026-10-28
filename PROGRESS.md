@@ -11,6 +11,7 @@ checkpoint, per `CLAUDE.md` §0 Rule 2.
 | 3 | MCP server + OAuth 2.1 / 30-day refresh | ✅ complete |
 | **Checkpoint B** | Web app, Omni-Bar, theme feel | ✅ locked by founder |
 | 4–5 | Web app, CLI, CI/CD, production packaging | ✅ complete |
+| 6 | Live AI providers + security hardening | ✅ complete |
 
 ---
 
@@ -305,8 +306,8 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **433 passed** |
-| `python -m app.cli selftest` | **22/22 checks, green** |
+| `BRAIN_ENV=test pytest` | **554 passed** |
+| `python -m app.cli selftest` | **27/27 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
 
@@ -323,18 +324,112 @@ specification in `DESIGN_DECISIONS.md`.
 | `BRAIN_PREVIEW` | — | `1` enables `/preview` outside test mode. |
 | `BRAIN_ROLE` | — | `web` (default) or `worker`. |
 | `R2_*`, `LITESTREAM_REPLICA_URL` | prod | Replication to Cloudflare R2. |
+| `LLM_API_KEY` | prod (for live AI) | Turns on the live extractor, link classifier and vision. Unset = rule-based fallback. |
+| `LLM_BASE_URL` | — | OpenAI-compatible base. Default `https://openrouter.ai/api/v1`. |
+| `LLM_MODEL` | — | Default `google/gemini-2.5-flash`. Must be vision-capable for image ingestion. |
+| `EMBEDDING_API_KEY` | — | Defaults to `LLM_API_KEY`. |
+| `EMBEDDING_BASE_URL` | — | Defaults to `LLM_BASE_URL`. |
+| `EMBEDDING_MODEL` | — | Default `text-embedding-3-small`, requested at 256 dimensions. |
+| `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` | — | Override the auto-calibrated retrieval floors. |
 
 ### Known limitations, stated plainly
 
-- **The extraction LLM is not wired.** `BRAIN_ENV=prod` uses the same
-  rule-based extractor as the tests, which means claim *typing*
-  (`when_it_applies`, link type) is approximate. The grounding guarantee is
-  unaffected — it is `rapidfuzz` arithmetic, not judgement.
-- **Embeddings are the `v1-hash` bag of words**, not a trained model. The
-  semantic lane works and the thresholds are calibrated to it; swapping in a
-  real model means recalibrating `search_similarity_floor` and
-  `link_similarity_floor`.
-- **Image ingestion needs a vision model** and raises `vision_unavailable` in
-  prod until one is configured.
+Three of the four gaps listed here at the end of Phase 5 were closed in Phase 6.
+What remains:
+
 - **Web sign-in is email-only.** It establishes the tenant on a single-person
-  server; the real credentials live on the MCP side.
+  server; the real credentials live on the MCP side. A real IdP is the obvious
+  next step if this ever has more than one user.
+- **The neural retrieval floors (0.42 / 0.38) are reasoned, not measured.**
+  They are calibrated for `text-embedding-3-small` at 256 dimensions from its
+  published behaviour, where the hashed embedder's floors were measured against
+  this library directly. A different model, or a different dimension count,
+  needs `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` set after looking at real
+  scores.
+- **`yt-dlp` is a large third-party dependency** parsing attacker-supplied
+  pages. It now runs with a scrubbed environment, `--no-exec`, `shell=False`
+  and a flag terminator, but it is still the widest piece of attack surface in
+  the system.
+
+
+---
+
+## Phase 6 — Live AI providers + security hardening (complete)
+
+### Part A — the four honest gaps, closed
+
+- **Live extractor and contradiction classifier** (`LiveLLMExtractor`,
+  `LiveLinkClassifier`) over OpenAI-compatible `/chat/completions`, in JSON
+  mode at temperature 0. Configured by `LLM_BASE_URL` (default OpenRouter),
+  `LLM_API_KEY` and `LLM_MODEL` (default `google/gemini-2.5-flash`).
+- **Live 256-dimension embeddings** (`LiveEmbedder`) over `/embeddings`, asking
+  the host for `dimensions: 256` directly and L2-normalising what comes back.
+  `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` default to the LLM's, since most
+  hosts serve both off one key.
+- **Live vision** (`LiveVisionProvider`) — a validated image is base64-encoded
+  into a data URI and sent to the vision-capable `LLM_MODEL`, which returns a
+  title, description, verbatim transcription and standalone observations. Each
+  becomes its own cue, so a claim grounds against the exact sentence.
+- **Floors follow the embedder.** `config.py` picks `0.18 / 0.15` for the
+  hashed embedder and `0.42 / 0.38` for a dense neural one, overridable with
+  `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR`.
+
+**Design notes**
+
+- *The grounder still has the last word.* A live model's `anchor_quote` is a
+  hypothesis like any other: it goes through the same `rapidfuzz >= 88` gate,
+  and a test feeds the adapter a hallucinated quote to prove the claim is
+  dropped. That is what makes a live model safe to trust here.
+- *Source text is fenced inside the prompt too.* Both prompts carry the
+  material between `<<<SOURCE_TEXT>>>` markers with an explicit instruction not
+  to obey anything inside it — the same discipline applied on the way out.
+- *Each slot degrades independently.* No `LLM_API_KEY` means the heuristic
+  extractor and no vision; no embedding key means the hashed embedder. An LLM
+  outage falls back rather than losing the source — **except** for embeddings,
+  which raise instead, because silently mixing two vector spaces in one index
+  is worse than failing the job. `doctor` reports each slot separately so a
+  half-configured host is visible.
+
+### Part B — the five hardening upgrades
+
+1. **BOLA.** No route takes a `user_id` or a path; `webapi` and `mcp_server`
+   each contain exactly one `build_context` call, fed only by the signed cookie
+   or the verified JWT subject. Tests post `user_id`, `sub`, `email`, `tenant`
+   and `db_path` at a live endpoint and confirm the attacker's own library
+   filled while the victim's stayed empty, and that a real id from another
+   tenant 404s on read, archive and delete.
+2. **`lint_skill_safety`.** Blocks delimiter escapes, forged `[AGENT_HINT]` /
+   `[SECURITY:` headers, prompt overrides, tool-command injection, destructive
+   and exfiltration instructions, invisible Unicode tags and bidi overrides,
+   and `javascript:` / `data:` URIs. It runs before `save_skill`, during GitHub
+   `SKILL.md` ingestion, and on Omni-Bar skill edits; every refusal is audited
+   with its reason. 21 attack strings blocked, 11 benign skill steps allowed —
+   the first pattern set flagged "Act as a reviewer for the copy", so the
+   `act as` family was replaced with restriction-removal vocabulary.
+3. **Omni-Bar integrity.** `Enter` still returns a plan before anything
+   executes, and a skill edit routed through the bar now passes the same linter
+   `save_skill` uses, leaving the skill's version untouched when refused.
+4. **Scrubbed subprocess environment.** `yt-dlp` sees exactly
+   `PATH, HOME, TMPDIR, LC_ALL, LANG` — never `LLM_API_KEY`,
+   `BRAIN_JWT_SECRET` or the R2 credentials — plus `--no-exec`, `cwd` in a
+   scratch directory, and the existing `shell=False` and `--` terminator. The
+   container user is `brainuser`.
+5. **The audit log.** `audit_logs.reasoning_trace` (added by an idempotent
+   additive migration, so an existing `control.db` upgrades on boot),
+   `GET /api/audit-logs` serving only the caller's own rows, and
+   `6 · Recent activity & audit log` in the Profile modal with blocked attempts
+   highlighted.
+
+**Bugs Phase 6 caught**
+
+- *The browser test found another real one.* After running an Omni-Bar command
+  the input cleared but `state.filter` did not, so the grid stayed filtered by
+  a command the user could no longer see — an empty library, apparently.
+- An additive migration was needed at all: `CREATE TABLE IF NOT EXISTS` does
+  nothing to an existing table, so `reasoning_trace` would have been missing on
+  any database created before this phase, and every audit write would have
+  failed.
+
+**Verified** — `tests/test_phase6_security_and_live_providers.py`, 120 tests,
+every live adapter driven through `httpx.MockTransport` so the suite needs no
+key and no network. Full suite: **554 passed**. `selftest`: **27/27**.
