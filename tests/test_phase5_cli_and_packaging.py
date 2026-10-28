@@ -221,11 +221,20 @@ class TestPackaging:
         assert "BRAIN_ROLE" in text and "worker" in text
         assert text.count("exec ") >= 3  # the server replaces the shell, so signals arrive
 
-    def test_litestream_replicates_tenant_databases_by_pattern(self):
+    def test_litestream_replicates_control_db_only(self):
+        """Tenants are deliberately *not* here.
+
+        A wildcard over `user_*.db` gives Litestream one inotify watcher per
+        tenant, which runs out of file descriptors well before 10,000 users.
+        Tenant databases are snapshotted by `app/storage/r2_sync.py` instead,
+        so this config must stay on `control.db` alone.
+        """
         config = yaml.safe_load((ROOT / "litestream.yml").read_text())
         paths = [entry["path"] for entry in config["dbs"]]
         assert any(path.endswith("control.db") for path in paths)
-        assert any("user_*.db" in path for path in paths), "new tenants must replicate automatically"
+        assert not any("user_" in path for path in paths), (
+            "tenant databases must not be watched by Litestream — see r2_sync"
+        )
         for entry in config["dbs"]:
             replica = entry["replicas"][0]
             assert replica["sync-interval"] == "30s"

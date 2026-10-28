@@ -183,6 +183,59 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             line("warn", "yt-dlp", "not found — YouTube ingestion will fail")
             warnings += 1
 
+    # ---- portability -------------------------------------------------------
+    from app.storage import r2_sync
+
+    r2 = r2_sync.config()
+    if r2.enabled:
+        line(
+            "ok",
+            "tenant snapshots -> R2",
+            f"{r2.bucket}/{r2.prefix} via {r2.endpoint_url} "
+            f"(debounce {cfg.snapshot_debounce_sec}s)",
+        )
+    elif cfg.is_test:
+        line("ok", "tenant snapshots", "disabled (local disk only)")
+    else:
+        line(
+            "warn",
+            "tenant snapshots",
+            "R2_ENDPOINT_URL/R2_BUCKET/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY unset — "
+            "tenant databases live only on this node's disk",
+        )
+        warnings += 1
+
+    if cfg.max_local_tenants:
+        line("ok", "local tenant cap", f"{cfg.max_local_tenants} files, LRU eviction of synced tenants")
+
+    if cfg.sharded:
+        unaddressed = [
+            index
+            for index in range(cfg.shard_total)
+            if index != cfg.shard_index and not cfg.shard_address(index)[0]
+        ]
+        if unaddressed:
+            line(
+                "bad",
+                "shard routing",
+                f"shard {cfg.shard_index}/{cfg.shard_total} but shards {unaddressed} have no "
+                "BRAIN_SHARD_URLS/BRAIN_SHARD_INSTANCES entry — their tenants would be "
+                "served here, and two nodes writing one tenant is last-snapshot-wins",
+            )
+            failures += 1
+        else:
+            line("ok", "shard routing", f"shard {cfg.shard_index} of {cfg.shard_total} (crc32)")
+        if not r2.enabled:
+            line(
+                "bad",
+                "shard routing storage",
+                "sharding needs R2: without it a shard cannot hydrate a tenant it has "
+                "never seen",
+            )
+            failures += 1
+    else:
+        line("ok", "shard routing", "single node")
+
     print(
         f"\n{failures} failure(s), {warnings} warning(s). "
         + ("Ready.\n" if failures == 0 else "Not ready.\n")
@@ -521,6 +574,66 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
             row["surface"] for row in control_db.recent_audit(control, ctx.user_id, 400)
         }
         assert {"mcp", "web_ui", "web_omnibar", "system"} & surfaces
+
+    @check("portability: a tenant round-trips through object storage")
+    def _portability():
+        """Prove the migration path without a bucket: snapshot a tenant, wipe
+        it off this node, and serve the same claim from what came back."""
+        import httpx
+
+        from app.db import tenant as tenant_module
+        from app.storage import r2_sync
+
+        store: dict[str, bytes] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            key = request.url.path.rsplit("/selftest/", 1)[-1]
+            if request.method == "PUT":
+                store[key] = request.content
+                return httpx.Response(200)
+            if key not in store:
+                return httpx.Response(404)
+            return httpx.Response(200, content=store[key])
+
+        previous = r2_sync.config()
+        r2_sync.set_config(
+            r2_sync.R2Config(
+                endpoint_url="https://selftest.invalid",
+                bucket="selftest",
+                access_key_id="key",
+                secret_access_key="secret",
+            )
+        )
+        r2_sync.set_http_client_factory(
+            lambda: httpx.Client(transport=httpx.MockTransport(handler))
+        )
+        try:
+            result = E.op_remember_this(
+                ctx,
+                claim="A tenant database is one portable file in object storage.",
+                when_it_applies="When moving a node, or adding one.",
+            )
+            assert result.ok
+            assert r2_sync.is_dirty(ctx.user_id)
+            assert r2_sync.flush_all(cfg=cfg) == [ctx.user_id]
+            assert list(store) == [f"tenants/user_{ctx.user_id}.db"]
+
+            path = cfg.tenant_db_path(ctx.user_id)
+            tenant_module.close_tenant(ctx.user_id, cfg=cfg)
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
+            assert not path.exists()
+
+            restored = tenant_module.tenant(ctx.user_id, cfg=cfg)
+            assert path.exists()
+            found = restored.execute(
+                "SELECT count(*) FROM epistemic_claims WHERE claim LIKE '%portable file%'"
+            ).fetchone()[0]
+            assert found == 1, "the hydrated database must hold the write"
+        finally:
+            r2_sync.set_http_client_factory(None)
+            r2_sync.set_config(previous)
+            r2_sync.reset_state()
 
     for label, fn in checks:
         try:

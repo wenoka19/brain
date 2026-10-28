@@ -306,8 +306,8 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **562 passed** |
-| `python -m app.cli selftest` | **27/27 checks, green** |
+| `BRAIN_ENV=test pytest` | **603 passed** |
+| `python -m app.cli selftest` | **28/28 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
 
@@ -331,6 +331,15 @@ specification in `DESIGN_DECISIONS.md`.
 | `EMBEDDING_BASE_URL` | — | Defaults to `LLM_BASE_URL`. |
 | `EMBEDDING_MODEL` | — | Default `text-embedding-3-small`, requested at 256 dimensions. |
 | `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` | — | Override the auto-calibrated retrieval floors. |
+| `R2_ENDPOINT_URL` (or `R2_ENDPOINT`) | for portability | S3 endpoint for tenant snapshots. All four R2 vars must be set, or snapshotting is off and tenants live only on the node's disk. |
+| `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | for portability | Credentials for the same. |
+| `R2_TENANT_PREFIX` | — | Key prefix for tenant snapshots. Default `tenants/`. |
+| `R2_REGION` | — | Default `auto`, which is what R2 wants. |
+| `BRAIN_SNAPSHOT_DIR` | — | Where `VACUUM INTO` writes before upload. Default `$BRAIN_DATA_DIR/snapshots`. |
+| `MAX_LOCAL_TENANTS` | — | `0` (default) keeps every tenant file on local disk. Above `0`, the least recently used *already-synced* tenants are evicted past that many files. |
+| `BRAIN_SHARD_INDEX` / `BRAIN_SHARD_TOTAL` | — | Default `0`/`1` (single node). Above `1`, each node serves the tenants where `crc32(user_id) % total == index`. |
+| `BRAIN_SHARD_URLS` | with sharding | Index-aligned base URLs; a request for another shard gets a `307`. |
+| `BRAIN_SHARD_INSTANCES` | with sharding | Index-aligned Fly machine ids; a request for another shard gets `fly-replay: instance=…` instead. Takes precedence over `BRAIN_SHARD_URLS`. |
 
 ### Known limitations, stated plainly
 
@@ -501,3 +510,97 @@ them needs a live embedding model, which needs two environment changes this
 session does not have: an API key, and network access to the model host. Once
 both exist, `python -m app.cli calibrate` produces the same table for the live
 embedder in one command.
+
+
+---
+
+## Phase 7 — Scale-Ready Portability Layer
+
+Stage 1 is a single Railway box. This phase makes Stage 2 (Hetzner bare-metal
+NVMe) and Stage 3 (multi-shard Fly) a configuration change rather than a
+rewrite, by removing the only two things that tie a tenant to a machine: where
+its database file lives, and which process is allowed to write it.
+
+### 1. Litestream is now strictly `control.db`
+
+`litestream.yml` no longer carries the `users/user_*.db` wildcard. Litestream
+watches each database with `inotify`; one watcher per tenant exhausts file
+descriptors and inotify watches well before 10,000 tenants. The asymmetry is
+deliberate and documented in the file itself:
+
+* **`control.db`** — identity, OAuth sessions, the job queue, the audit log.
+  Must lose nothing, so it keeps continuous WAL shipping at a 30s interval.
+* **tenant databases** — reconstructible from their sources, so they trade a
+  few seconds of exposure for being one self-contained file per tenant in
+  object storage.
+
+`tests/test_phase5_cli_and_packaging.py` now asserts the *absence* of the
+tenant pattern, with the reason, so it cannot be re-added by accident.
+
+### 2. Event-driven snapshots + lazy hydration (`app/storage/r2_sync.py`)
+
+Writes mark, a thread flushes:
+
+* Every successful tenant write calls `r2_sync.mark_dirty(user_id)` — a dict
+  write behind a lock, so a `remember_this` never waits on a network. In the
+  engine this is a `@_syncs_tenant` decorator on the ten write operations plus
+  one call inside `process_job`'s `finish()`, so an ingestion that fails
+  *after* writing a source row still marks the tenant.
+* A background thread (`start_background`, started by both `app/main.py`'s
+  lifespan and the standalone worker) snapshots anything dirty for longer than
+  `snapshot_debounce_sec`. A burst of five claims costs **one** PUT, not five.
+* The snapshot is `VACUUM INTO` — a single consistent file with no WAL
+  sidecar, taken from a live database without blocking writers for a file
+  copy. The temp file is removed whether or not the upload worked.
+* **A failed upload keeps the tenant dirty.** The flag is cleared only by a
+  2xx, and only if nothing was written during the upload. Losing a write
+  silently is the one outcome the design refuses.
+* **Lazy hydration on open**: `tenant_db.tenant(user_id)` downloads the tenant
+  from R2 when the local file is absent, atomically (`.hydrating` staging file
+  then `os.replace`, so a half-written database is never openable). Absent
+  both locally and in R2 means a new user, and gets a fresh schema.
+* **LRU disk guard** (`MAX_LOCAL_TENANTS`, default `0` = unlimited) evicts the
+  least recently used tenants past the cap — and *never* one whose latest
+  write is unsynced, since `is_dirty` is cleared only by a successful upload.
+  The worst case of a wrong guess is a slower next request, never a lost
+  write. Eviction is also skipped entirely when R2 is unconfigured, because
+  there the file is the only copy.
+
+SigV4 is implemented directly over `httpx` (~70 lines) rather than through
+`boto3`, which would add ~50MB and a dependency tree to serve four verbs.
+
+### 3. Stateless shard routing (`app/main.py`)
+
+`ShardRoutingMiddleware` computes the owner of a request's tenant as
+`crc32(user_id) % BRAIN_SHARD_TOTAL` — chosen over `hash()` precisely because
+`hash()` is randomised per interpreter, so every node and process agrees
+without a router to keep in sync. At the default `1`/`0` it falls straight
+through.
+
+A request for another shard gets `fly-replay: instance=…` (204) when Fly
+machine ids are configured, or a `307` to that shard's base URL. Discovery,
+sign-in and health paths belong to no tenant and are served anywhere. The
+identity is read from a **verified** bearer token or a **signed** session
+cookie, so a client cannot steer its own routing.
+
+`doctor` now fails — not warns — if sharding is on while a shard has no
+address, or while R2 is unconfigured: the first means two nodes could write
+one tenant (last-snapshot-wins), the second means a shard cannot hydrate a
+tenant it has never seen.
+
+### What the tests prove, and what they don't
+
+`tests/test_scale_portability.py` (41 tests) runs every R2 call through an
+`httpx.MockTransport` holding objects in a dict, so it exercises the real
+signing, the real `VACUUM INTO`, and the real atomic rename. The end-to-end
+case snapshots a tenant, deletes the file off the node, and reads the same
+claim back out of what hydration returned. `selftest` runs that same
+round-trip as its 28th check.
+
+**Not proven: that the SigV4 signature is one Cloudflare accepts.** `botocore`
+is not installed in this environment, so there is no reference implementation
+to cross-check against. The tests prove the canonical request has the
+documented shape, that the signature is deterministic and changes with every
+input it should (method, key, path, secret, region, date), and that the headers
+are well formed. The first live PUT against a real bucket is still the real
+verification — set the four `R2_*` vars and watch `doctor`, then one write.

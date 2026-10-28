@@ -105,6 +105,28 @@ class Settings:
     embedding_timeout_sec: float = 30.0
     vision_max_bytes: int = 8 * MB
 
+    # ---- portability: tenant snapshots + object storage -------------------
+    # Tenant databases are replicated as whole-file snapshots rather than by
+    # Litestream (see app/storage/r2_sync.py for why), so these govern how
+    # often a dirty tenant is vacuumed out and pushed to R2.
+    r2_timeout_sec: float = 30.0
+    snapshot_dir: Path = Path(".brain_data/snapshots")
+    snapshot_debounce_sec: float = 2.0
+    snapshot_poll_sec: float = 1.0
+    #: 0 = keep every tenant file on local disk. Above 0, the least recently
+    #: used *already-synced* tenants are evicted past that many files.
+    max_local_tenants: int = 0
+
+    # ---- portability: horizontal sharding ---------------------------------
+    #: A node serves the tenants that hash to its index. 1/0 = single node,
+    #: which is Stage 1 and every local run.
+    shard_total: int = 1
+    shard_index: int = 0
+    #: Index-aligned addresses for the other shards. Either is enough:
+    #: `shard_urls` routes with a 307, `shard_instances` with `fly-replay`.
+    shard_urls: tuple[str, ...] = ()
+    shard_instances: tuple[str, ...] = ()
+
     # ---- per-user quotas --------------------------------------------------
     quota_media_minutes: int = 300
     quota_files: int = 50
@@ -180,6 +202,35 @@ class Settings:
         return self.neural_link_floor if self.live_embeddings else self.hash_link_floor
 
     @property
+    def sharded(self) -> bool:
+        return self.shard_total > 1
+
+    def shard_for(self, user_id: str) -> int:
+        """Which shard owns a tenant.
+
+        crc32 is stable across processes, machines and Python versions, which
+        is the whole point: every node must agree on the owner without asking
+        anyone. (`hash()` is randomised per process and would not.)
+        """
+        from zlib import crc32
+
+        if self.shard_total <= 1:
+            return 0
+        return crc32(user_id.encode("utf-8")) % self.shard_total
+
+    def owns_shard(self, user_id: str) -> bool:
+        return self.shard_for(user_id) == self.shard_index
+
+    def shard_address(self, index: int) -> tuple[str, str]:
+        """``(kind, value)`` for a shard: ``("instance", id)``,
+        ``("url", base)``, or ``("", "")`` when it has no address."""
+        if 0 <= index < len(self.shard_instances):
+            return "instance", self.shard_instances[index]
+        if 0 <= index < len(self.shard_urls):
+            return "url", self.shard_urls[index].rstrip("/")
+        return "", ""
+
+    @property
     def control_db_path(self) -> Path:
         return self.data_dir / "control.db"
 
@@ -200,6 +251,7 @@ class Settings:
 
     def ensure_dirs(self) -> None:
         self.users_dir.mkdir(parents=True, exist_ok=True)
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _env() -> BrainEnv:
@@ -224,12 +276,38 @@ def _float_env(name: str) -> float | None:
         return None
 
 
+def _list_env(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name) or ""
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def load_settings() -> Settings:
     env = _env()
     defaults = Settings()
+    data_dir = _data_dir(env)
+    shard_total = max(1, _int_env("BRAIN_SHARD_TOTAL", defaults.shard_total))
+    shard_index = _int_env("BRAIN_SHARD_INDEX", defaults.shard_index)
+    if not 0 <= shard_index < shard_total:
+        shard_index = 0
     return Settings(
         env=env,
-        data_dir=_data_dir(env),
+        data_dir=data_dir,
+        snapshot_dir=Path(
+            os.environ.get("BRAIN_SNAPSHOT_DIR") or (data_dir / "snapshots")
+        ).expanduser(),
+        max_local_tenants=max(0, _int_env("MAX_LOCAL_TENANTS", defaults.max_local_tenants)),
+        shard_total=shard_total,
+        shard_index=shard_index,
+        shard_urls=_list_env("BRAIN_SHARD_URLS"),
+        shard_instances=_list_env("BRAIN_SHARD_INSTANCES"),
         audience=os.environ.get("BRAIN_AUDIENCE", defaults.audience),
         llm_base_url=(os.environ.get("LLM_BASE_URL") or defaults.llm_base_url).rstrip("/"),
         llm_api_key=(os.environ.get("LLM_API_KEY") or "").strip(),

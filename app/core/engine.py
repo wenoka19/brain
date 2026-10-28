@@ -8,6 +8,7 @@ so nothing here hard-codes how `brain` speaks.
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -24,6 +25,7 @@ from app.ingestion.gatekeeper import GatekeeperError
 from app.ingestion.linker import link_claims
 from app.ingestion.providers import FetchedContent, ProviderError, Providers, providers
 from app.security.sanitizer import clean_text, lint_skill_safety
+from app.storage import r2_sync
 
 Scope = Literal["all", "claims", "skills"]
 ItemType = Literal["source", "claim", "skill"]
@@ -46,6 +48,25 @@ class OpResult:
 
 def _fail(action: str, reason: str, message: str) -> OpResult:
     return OpResult(ok=False, action=action, error_reason=reason, error_message=message)
+
+
+def _syncs_tenant(fn):
+    """Flag the tenant database for snapshot after a successful write.
+
+    Marking is a dict write behind a lock — it never blocks the request, and
+    the actual `VACUUM INTO` + upload happens on the debounced background
+    thread. With no object storage configured this is a no-op, so local runs
+    and tests pay nothing for it.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(ctx: "Context", *args: Any, **kwargs: Any) -> OpResult:
+        result = fn(ctx, *args, **kwargs)
+        if getattr(result, "ok", False):
+            r2_sync.mark_dirty(ctx.user_id)
+        return result
+
+    return wrapper
 
 
 @dataclass
@@ -478,6 +499,7 @@ def op_get_ingest_status(ctx: Context, job_id: str | None = None) -> OpResult:
 USER_AXIOM_SOURCE_ID = "src_user_axioms"
 
 
+@_syncs_tenant
 def op_remember_this(
     ctx: Context,
     claim: str,
@@ -693,6 +715,7 @@ def _linked(ctx: Context, skill: dict[str, Any]) -> list[dict[str, Any]]:
 # ===========================================================================
 # 7. save_skill
 # ===========================================================================
+@_syncs_tenant
 def op_save_skill(
     ctx: Context,
     slug: str,
@@ -765,6 +788,7 @@ def op_save_skill(
 # ===========================================================================
 # 8. archive_item   (soft only — there is no delete over MCP)
 # ===========================================================================
+@_syncs_tenant
 def op_archive_item(ctx: Context, item_type: ItemType, item_id: str, *, restore: bool = False) -> OpResult:
     if item_type not in ("source", "claim", "skill"):
         return _fail("archive_item", "bad_item_type", "item_type must be source, claim or skill.")
@@ -824,6 +848,10 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
     job_id = job["job_id"]
 
     def finish(status: str, *, message: str = "", claims: int = 0) -> dict[str, Any]:
+        # Even a failure can have written a source row before giving up, so
+        # the tenant is flagged on every exit from the pipeline, not just on
+        # `ready`.
+        r2_sync.mark_dirty(user_id)
         control_db.set_job_status(
             control, job_id, status, error_message=message, claims_extracted=claims
         )
@@ -1021,6 +1049,7 @@ def run_pending_jobs_sync(
 # These back the Web Control Plane only. Hard deletion, trash recovery and
 # export deliberately have no MCP tool: an agent can archive, a human deletes.
 # ---------------------------------------------------------------------------
+@_syncs_tenant
 def op_rescue_job(ctx: Context, job_id: str, pasted_text: str) -> OpResult:
     """Rescue a blocked or failed job with text the user pastes in themselves.
 
@@ -1086,6 +1115,7 @@ def op_rescue_job(ctx: Context, job_id: str, pasted_text: str) -> OpResult:
     )
 
 
+@_syncs_tenant
 def op_trash_item(ctx: Context, item_type: ItemType, item_id: str) -> OpResult:
     """Move a source to Trash — recoverable for 30 days, still not deleted."""
     if item_type != "source":
@@ -1121,6 +1151,7 @@ def op_list_trash(ctx: Context) -> OpResult:
     )
 
 
+@_syncs_tenant
 def op_permanent_delete(ctx: Context, item_id: str) -> OpResult:
     """Hard delete. Only reachable from the Web UI, only from Trash.
 
@@ -1151,6 +1182,7 @@ def op_permanent_delete(ctx: Context, item_id: str) -> OpResult:
     )
 
 
+@_syncs_tenant
 def op_revert_skill(ctx: Context, skill_id: str, version: int) -> OpResult:
     """Restore a snapshotted skill version — the Omni-Bar's `Revert to vN`."""
     skill = tenant_db.get_skill(ctx.tenant, skill_id) or tenant_db.get_skill_by_slug(
@@ -1188,6 +1220,7 @@ def op_revert_skill(ctx: Context, skill_id: str, version: int) -> OpResult:
     )
 
 
+@_syncs_tenant
 def op_update_claim(
     ctx: Context,
     claim_id: str,
@@ -1477,6 +1510,7 @@ DEMO_SOURCE_REPORT = "src_demo_report"
 DEMO_SKILL_SLUG = "demo-cold-email-sprint"
 
 
+@_syncs_tenant
 def op_seed_demo(ctx: Context) -> OpResult:
     """Seed one skill and two genuinely contradicting claims.
 
@@ -1596,6 +1630,7 @@ def op_seed_demo(ctx: Context) -> OpResult:
     )
 
 
+@_syncs_tenant
 def op_clear_demo(ctx: Context) -> OpResult:
     """Clear the demo rows the ordinary way — a source archive, nothing special."""
     cleared = 0

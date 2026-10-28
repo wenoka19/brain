@@ -23,6 +23,7 @@ from app.config import Settings, settings
 from app.core.engine import process_job
 from app.db import control as control_db
 from app.db import tenant as tenant_db
+from app.storage import r2_sync
 
 LOGGER = logging.getLogger("brain.worker")
 IDLE_SLEEP_SEC = 2.0
@@ -100,6 +101,10 @@ async def main_async(*, max_jobs: int | None = None) -> int:
     cfg = settings()
     cfg.ensure_dirs()
     control_db.control()  # create/migrate before the first claim
+    # The worker writes tenant databases too, so it carries its own snapshot
+    # thread — otherwise an ingestion's claims would sit dirty until the web
+    # process happened to touch that tenant.
+    r2_sync.start_background(cfg=cfg)
     worker = Worker(cfg=cfg)
 
     loop = asyncio.get_running_loop()
@@ -110,6 +115,7 @@ async def main_async(*, max_jobs: int | None = None) -> int:
     try:
         await worker.run(max_jobs=max_jobs)
     finally:
+        r2_sync.stop_background(cfg=cfg)
         tenant_db.close_all()
         control_db.close_all()
     return 0

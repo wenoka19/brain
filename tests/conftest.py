@@ -13,6 +13,7 @@ from app.db import control as control_db
 from app.db import tenant as tenant_db
 from app.ingestion import providers as providers_module
 from app.security import ratelimit
+from app.storage import r2_sync
 
 
 @pytest.fixture
@@ -26,11 +27,19 @@ def cfg(tmp_path, monkeypatch):
     # its fetcher/extractor to simulate failures — so it must be rebuilt per
     # test or one test's stub leaks into the next.
     providers_module.set_providers(None)
+    # Object storage is off unless a test installs a fake endpoint, and the
+    # dirty/accessed maps are process-global, so they are reset on both sides.
+    r2_sync.set_config(r2_sync.R2Config())
+    r2_sync.set_http_client_factory(None)
+    r2_sync.reset_state()
     yield settings
     tenant_db.close_all()
     control_db.close_all()
     ratelimit.reset_limiter()
     providers_module.set_providers(None)
+    r2_sync.set_config(None)
+    r2_sync.set_http_client_factory(None)
+    r2_sync.reset_state()
     config.reload_settings()
 
 

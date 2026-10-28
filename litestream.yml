@@ -1,8 +1,16 @@
-# Continuous replication of every SQLite database to Cloudflare R2.
+# Continuous replication of `control.db` to Cloudflare R2.
 #
-# `control.db` is replicated by path. Tenant databases are created at runtime,
-# so they are matched by an expansion pattern — a new `user_{id}.db` starts
-# replicating without a config change or a restart.
+# Only `control.db`. Litestream watches each database with `inotify`, so one
+# watcher per tenant stops scaling long before 10,000 tenants — it exhausts
+# file descriptors and inotify watches. Tenant databases are replicated
+# instead as debounced whole-file snapshots by `app/storage/r2_sync.py`, which
+# costs one PUT per write burst and no watchers at all.
+#
+# The asymmetry is deliberate: `control.db` holds identity, tokens and the job
+# queue and must lose nothing, so it gets continuous WAL shipping. A tenant's
+# content is reconstructible from its sources, so a few seconds of exposure
+# buys the portability of one self-contained file per tenant in object
+# storage — which is what lets any node serve any tenant.
 access-key-id: ${R2_ACCESS_KEY_ID}
 secret-access-key: ${R2_SECRET_ACCESS_KEY}
 
@@ -17,18 +25,5 @@ dbs:
         force-path-style: true
         sync-interval: 30s
         retention: 720h          # 30 days, matching the Trash window
-        retention-check-interval: 1h
-        snapshot-interval: 6h
-
-  - path: ${BRAIN_DATA_DIR:-/data}/users/user_*.db
-    replicas:
-      - type: s3
-        endpoint: ${R2_ENDPOINT}
-        bucket: ${R2_BUCKET}
-        path: brain/users
-        region: auto
-        force-path-style: true
-        sync-interval: 30s
-        retention: 720h
         retention-check-interval: 1h
         snapshot-interval: 6h

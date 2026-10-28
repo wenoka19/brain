@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Container entrypoint: restore from object storage, then serve.
 #
-# Litestream owns the database files. On a cold start it restores the most
-# recent replica before anything opens them, and then supervises the server so
-# every write is streamed out continuously.
+# Litestream owns `control.db` only. On a cold start it restores the most recent
+# replica before anything opens it, then supervises the server so every write
+# is streamed out continuously. Tenant databases are not Litestream's — they
+# hydrate from R2 on first open and snapshot after a write (app/storage/
+# r2_sync.py), so a cold node needs no restore step for them.
 set -euo pipefail
 
 DATA_DIR="${BRAIN_DATA_DIR:-/data}"
 CONTROL_DB="${DATA_DIR}/control.db"
 ROLE="${BRAIN_ROLE:-web}"
 
-mkdir -p "${DATA_DIR}/users" "${DATA_DIR}/uploads"
+# `snapshots` holds the `VACUUM INTO` staging file on its way to R2.
+mkdir -p "${DATA_DIR}/users" "${DATA_DIR}/uploads" "${DATA_DIR}/snapshots"
 
 if [[ "${ROLE}" == "web" && -n "${LITESTREAM_REPLICA_URL:-}" ]]; then
   if [[ ! -f "${CONTROL_DB}" ]]; then

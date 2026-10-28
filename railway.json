@@ -1,6 +1,9 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
-  "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
   "deploy": {
     "startCommand": "/usr/local/bin/entrypoint.sh",
     "healthcheckPath": "/healthz",
@@ -26,9 +29,12 @@
       "R2_ACCESS_KEY_ID",
       "R2_SECRET_ACCESS_KEY",
       "R2_ENDPOINT",
+      "R2_ENDPOINT_URL",
       "R2_BUCKET",
       "LITESTREAM_REPLICA_URL"
     ],
-    "replicas": "Keep numReplicas at 1. Two web replicas on one volume would each open the same SQLite files."
+    "replicas": "Keep numReplicas at 1. Two web replicas on one volume would each open the same SQLite files.",
+    "storage": "The same four R2 credentials serve two jobs: Litestream ships control.db continuously, and app/storage/r2_sync.py snapshots each tenant database after a write. R2_ENDPOINT_URL and R2_ENDPOINT are interchangeable — set either and both consumers read it.",
+    "scaling": "Stage 2+: MAX_LOCAL_TENANTS caps tenant files on local disk (0 = unlimited), and BRAIN_SHARD_INDEX/BRAIN_SHARD_TOTAL plus BRAIN_SHARD_URLS or BRAIN_SHARD_INSTANCES spread tenants across nodes. Both default to off, and both need R2 configured."
   }
 }

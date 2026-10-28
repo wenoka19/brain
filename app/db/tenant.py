@@ -28,6 +28,7 @@ import sqlite_vec
 
 from app.config import Settings, settings
 from app.db.control import PRAGMAS, new_id
+from app.storage import r2_sync
 
 EVIDENCE_BASES = ("data", "case_study", "anecdote", "theory", "opinion", "user_axiom")
 LOCATOR_TYPES = ("timestamp", "page", "section", "none")
@@ -325,6 +326,19 @@ class _LRUConnections:
                 pass
         self._cache.clear()
 
+    def discard(self, path: Path) -> None:
+        conn = self._cache.pop(str(path), None)
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            # The connection may belong to another thread, which sqlite3
+            # refuses to let us close. Dropping the reference is enough: the
+            # file is about to be unlinked, and POSIX keeps the inode alive
+            # for whoever still holds it.
+            pass
+
 
 #: One pool per thread, for the same reason as `control.py`: a sqlite3
 #: connection belongs to the thread that opened it.
@@ -375,9 +389,32 @@ def init_schema(conn: sqlite3.Connection, *, cfg: Settings | None = None) -> Non
 
 
 def tenant(user_id: str, *, cfg: Settings | None = None) -> sqlite3.Connection:
-    """Open (or reuse) the tenant DB for a *verified* ``user_id``."""
+    """Open (or reuse) the tenant DB for a *verified* ``user_id``.
+
+    When object storage is configured and this node has never seen the tenant,
+    its database is pulled down from R2 first. That is what lets a cold node —
+    a fresh Fly machine, a migrated Hetzner box — serve an existing user
+    instead of handing them an empty library.
+    """
     cfg = cfg or settings()
-    return _pool_for_thread().get(cfg.tenant_db_path(user_id), cfg)
+    path = cfg.tenant_db_path(user_id)
+    if not path.exists():
+        r2_sync.hydrate(user_id, path, cfg=cfg)
+    r2_sync.mark_accessed(user_id)
+    return _pool_for_thread().get(path, cfg)
+
+
+def close_tenant(user_id: str, *, cfg: Settings | None = None) -> None:
+    """Forget every cached connection to one tenant, on every thread.
+
+    Called before the LRU guard unlinks a synced tenant file.
+    """
+    cfg = cfg or settings()
+    path = cfg.tenant_db_path(user_id)
+    with _pools_lock:
+        pools = list(_pools)
+    for pool in pools:
+        pool.discard(path)
 
 
 def close_all() -> None:
