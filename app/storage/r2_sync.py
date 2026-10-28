@@ -299,6 +299,9 @@ def put_object(key: str, source: Path, *, cfg: R2Config | None = None) -> bool:
 # snapshot scheduling
 # ---------------------------------------------------------------------------
 _lock = threading.Lock()
+#: One lock per tenant, so the background loop and a shutdown flush racing on
+#: the same tenant serialise instead of both running `VACUUM INTO` on it.
+_snapshot_locks: dict[str, threading.Lock] = {}
 _dirty: dict[str, float] = {}
 _synced: dict[str, float] = {}
 _accessed: dict[str, float] = {}
@@ -334,6 +337,12 @@ def reset_state() -> None:
         _dirty.clear()
         _synced.clear()
         _accessed.clear()
+        _snapshot_locks.clear()
+
+
+def _snapshot_lock(user_id: str) -> threading.Lock:
+    with _lock:
+        return _snapshot_locks.setdefault(user_id, threading.Lock())
 
 
 def snapshot_and_upload(user_id: str, *, cfg: Settings | None = None) -> bool:
@@ -353,6 +362,11 @@ def snapshot_and_upload(user_id: str, *, cfg: Settings | None = None) -> bool:
             _dirty.pop(user_id, None)
         return False
 
+    with _snapshot_lock(user_id):
+        return _snapshot_and_upload_locked(user_id, cfg=cfg, r2=r2, source=source)
+
+
+def _snapshot_and_upload_locked(user_id: str, *, cfg: Settings, r2: R2Config, source: Path) -> bool:
     snapshot = Path(cfg.snapshot_dir) / f"user_{user_id}.snap.db"
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     snapshot.unlink(missing_ok=True)
@@ -395,9 +409,20 @@ def flush_due(*, cfg: Settings | None = None, now: float | None = None) -> list[
     return [user_id for user_id in sorted(due) if snapshot_and_upload(user_id, cfg=cfg)]
 
 
-def flush_all(*, cfg: Settings | None = None) -> list[str]:
-    """Snapshot everything dirty, ignoring the debounce. Used on shutdown."""
+def flush_all_dirty_tenants(*, cfg: Settings | None = None) -> list[str]:
+    """Snapshot everything dirty right now, ignoring the debounce.
+
+    This is the shutdown path. A redeploy sends `SIGTERM`, and anything marked
+    dirty inside the debounce window has not been uploaded yet — so it is
+    uploaded here, synchronously, before the process is allowed to exit. It is
+    safe to call when R2 is unconfigured (nothing is dirty that matters) and
+    safe to call twice (a successful upload clears the flag).
+    """
     return [user_id for user_id in dirty_user_ids() if snapshot_and_upload(user_id, cfg=cfg)]
+
+
+#: The older, shorter name. Kept because the snapshot tests read better with it.
+flush_all = flush_all_dirty_tenants
 
 
 def start_background(*, cfg: Settings | None = None) -> bool:
@@ -423,14 +448,33 @@ def start_background(*, cfg: Settings | None = None) -> bool:
     return True
 
 
-def stop_background(*, flush: bool = True, cfg: Settings | None = None) -> None:
+def stop_background(*, flush: bool = True, cfg: Settings | None = None) -> list[str]:
+    """Stop the loop and flush, in that order.
+
+    The loop is stopped first so it cannot mark progress we then miss, and
+    joined before flushing so the two are not snapshotting the same tenant at
+    once — though `_snapshot_lock` makes that safe even if the join times out.
+    Returns the tenants actually uploaded, so a caller can log it.
+    """
     global _thread
     _stop.set()
     if _thread is not None:
         _thread.join(timeout=10)
         _thread = None
-    if flush and enabled():
-        flush_all(cfg=cfg)
+    if not flush:
+        return []
+    flushed = flush_all_dirty_tenants(cfg=cfg)
+    if flushed:
+        LOGGER.info("flushed %s dirty tenant(s) on shutdown", len(flushed))
+    stranded = dirty_user_ids()
+    if stranded:
+        # Said out loud rather than swallowed: these are writes that exist on
+        # this disk and not in R2, and if the volume goes with the container
+        # they are gone.
+        LOGGER.error(
+            "shutdown left %s tenant(s) unsynced: %s", len(stranded), ", ".join(stranded)
+        )
+    return flushed
 
 
 # ---------------------------------------------------------------------------

@@ -300,14 +300,19 @@ a{color:var(--accent)}
   flex-wrap:wrap;padding:8px 14px;background:var(--bg-inset);
   border-bottom:1px solid var(--border-strong);font-size:.86em
 }
-.harness-group{display:flex;align-items:center;gap:6px}
+/* `flex-wrap` and `min-width:0` because at phone width a group of four layout
+   buttons, or a slider with its label, is wider than the screen — and a dev
+   harness whose own controls run off the right edge cannot be used to review
+   the design on a phone, which is the only reason it exists. */
+.harness-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .harness-label{color:var(--text-muted)}
 .tuner{
   position:fixed;left:0;right:0;bottom:0;z-index:50;display:flex;align-items:center;
   gap:14px;flex-wrap:wrap;padding:8px 14px;background:var(--bg-inset);
   border-top:1px solid var(--border-strong);font-size:.84em
 }
-.tuner input[type="range"]{width:84px}
+.tuner input[type="range"]{width:84px;max-width:40vw}
+.tuner label{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
 /* The tuner is fixed to the bottom, so the shell has to make room for it or it
    covers the sidebar's Profile button. */
 body[data-preview="true"] .sidebar{padding-bottom:72px}
@@ -339,13 +344,25 @@ body[data-preview="true"] .inspector{padding-bottom:56px}
   .mobile-bar button[aria-current="true"]{color:var(--accent)}
   /* the inspector becomes a full-screen slide-up sheet with a back arrow */
   .inspector{
-    width:100vw;top:auto;height:92vh;border-left:0;border-top-left-radius:14px;
-    border-top-right-radius:14px;transform:translateY(100%)
+    /* `bottom:0` is load bearing: `top:auto` alone leaves a fixed element at
+       its static position, which on a phone is below the fold — the sheet then
+       opens off the bottom of the screen and nothing in it can be reached. */
+    width:100vw;top:auto;bottom:0;height:92vh;border-left:0;
+    border-top-left-radius:14px;border-top-right-radius:14px;
+    transform:translateY(100%)
   }
   .inspector[data-open="true"]{transform:none}
   .field{grid-template-columns:minmax(0,1fr)}
   .field dt{margin-top:6px}
+  /* The tuner sits above the nav bar rather than on top of it. */
   .tuner{bottom:56px}
+  /* At this width the harness bar wraps to several rows and the tuner is tall,
+     and both sat on top of whatever was open — the sheet's back arrow and the
+     Profile modal's Close button included, which left no way out of either on
+     a phone. An open overlay wins over dev chrome; close it and the chrome is
+     right there again. */
+  body[data-preview="true"] .inspector[data-open="true"]{z-index:60}
+  body[data-preview="true"] .scrim:not(.hidden){z-index:60}
 }
 @media (min-width:861px){.mobile-bar{display:none}.sidebar-toggle{display:none}}
 @media (prefers-reduced-motion:reduce){

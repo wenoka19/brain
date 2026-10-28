@@ -65,6 +65,139 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+#: The surface an external MCP client talks to. CORS is scoped to exactly these
+#: prefixes, and deliberately not to `/api/*`: the control plane authenticates
+#: with a `SameSite=Strict` cookie plus a double-submit CSRF header, and
+#: advertising it as cross-origin-callable would undo that for no gain. An MCP
+#: client authenticates with a bearer token and needs no cookie.
+MCP_CORS_PREFIXES = (
+    "/mcp",
+    "/.well-known/",
+    "/authorize",
+    "/token",
+    "/register",
+    "/revoke",
+)
+
+#: Request headers a client may send. `Mcp-Session-Id` is the Streamable HTTP
+#: session handle; without it in this list a browser blocks the second request
+#: of every session.
+CORS_ALLOW_HEADERS = (
+    "Authorization",
+    "Content-Type",
+    "Accept",
+    "Mcp-Session-Id",
+    "Mcp-Protocol-Version",
+    "Last-Event-ID",
+)
+
+#: Response headers the browser must let the client *read*. Both are load
+#: bearing: without `WWW-Authenticate` the client cannot discover where to
+#: authenticate and the OAuth dance never starts, and without `Mcp-Session-Id`
+#: it cannot continue the session it just opened.
+CORS_EXPOSE_HEADERS = ("WWW-Authenticate", "Mcp-Session-Id")
+
+CORS_METHODS = ("GET", "POST", "DELETE", "OPTIONS")
+
+
+def allowed_origins(cfg: Settings | None = None) -> list[str]:
+    """The Origin policy for the MCP surface. `["*"]` means unrestricted.
+
+    Default unrestricted, deliberately. `allowed_origins` exists to stop a
+    drive-by page in someone's browser from driving a *local* MCP server, and
+    that attack works because the browser attaches credentials by itself.
+    Nothing on `/mcp` authenticates that way: it takes a bearer token the page
+    does not have and cannot read. Meanwhile a strict list has to name every
+    client shell that will ever connect — `https://claude.ai`, a Cursor
+    webview, a desktop app's custom scheme — and gets each new one wrong as a
+    403 nobody can diagnose.
+
+    The real DNS-rebinding defence is the **Host** allow-list, which stays
+    strict; see `transport_security`. Set `BRAIN_ALLOWED_ORIGINS` to a
+    comma-separated list to restrict anyway.
+    """
+    cfg = cfg or settings()
+    raw = (os.environ.get("BRAIN_ALLOWED_ORIGINS") or "*").strip()
+    if raw == "*":
+        return ["*"]
+    listed = [item.strip() for item in raw.split(",") if item.strip()]
+    public = urlsplit(os.environ.get("BRAIN_PUBLIC_URL") or auth.issuer(cfg))
+    if public.scheme and public.netloc:
+        listed.append(f"{public.scheme}://{public.netloc}")
+    return sorted(set(listed))
+
+
+class OriginPolicyMiddleware:
+    """Apply *our* Origin policy before the transport applies its own.
+
+    The SDK's check has no wildcard — an Origin it was not told about is a 403,
+    and it treats an absent Origin as same-origin and allows it. So when the
+    policy is unrestricted, the header is dropped here and the SDK's check
+    becomes a no-op; when it is a list, the header is left alone and the SDK
+    enforces it. Either way the Host check behind this is untouched, and the
+    browser still gets its `Access-Control-Allow-Origin` from
+    `McpCorsMiddleware`, which runs further out.
+
+    Plain ASGI rather than `BaseHTTPMiddleware` because it has to mutate the
+    request scope the transport will read.
+    """
+
+    def __init__(self, app, origins: list[str]) -> None:
+        self.app = app
+        self.unrestricted = origins == ["*"]
+
+    async def __call__(self, scope, receive, send):
+        if self.unrestricted and scope.get("type") == "http":
+            headers = [
+                (name, value)
+                for name, value in scope.get("headers", [])
+                if name.lower() != b"origin"
+            ]
+            scope = {**scope, "headers": headers}
+        await self.app(scope, receive, send)
+
+
+class McpCorsMiddleware(BaseHTTPMiddleware):
+    """CORS for the MCP and OAuth endpoints only.
+
+    `Access-Control-Allow-Origin` is echoed rather than `*` because a client
+    may legitimately send `Origin: null` (a file:// desktop shell) and because
+    `*` would be incompatible with ever allowing credentials. Credentials stay
+    off: nothing on this surface authenticates with a cookie.
+    """
+
+    def __init__(self, app, cfg: Settings) -> None:
+        super().__init__(app)
+        self.cfg = cfg
+        self.origins = allowed_origins(cfg)
+
+    def _permitted(self, origin: str) -> bool:
+        return self.origins == ["*"] or origin in self.origins
+
+    def _headers(self, origin: str) -> dict[str, str]:
+        return {
+            "Access-Control-Allow-Origin": origin or "*",
+            "Access-Control-Allow-Methods": ", ".join(CORS_METHODS),
+            "Access-Control-Allow-Headers": ", ".join(CORS_ALLOW_HEADERS),
+            "Access-Control-Expose-Headers": ", ".join(CORS_EXPOSE_HEADERS),
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin",
+        }
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        origin = request.headers.get("origin") or ""
+        in_scope = request.url.path.startswith(MCP_CORS_PREFIXES) and self._permitted(origin)
+        if request.method == "OPTIONS" and in_scope and origin:
+            # Answer the preflight here. Routing it onward would 405, because
+            # none of these endpoints declares OPTIONS.
+            return Response(status_code=204, headers=self._headers(origin))
+        response = await call_next(request)
+        if in_scope and origin:
+            for header, value in self._headers(origin).items():
+                response.headers[header] = value
+        return response
+
+
 #: Paths that belong to no tenant: discovery, sign-in, health, static assets.
 #: They are served by whichever node receives them.
 SHARD_EXEMPT_PREFIXES = ("/healthz", "/.well-known/", "/authorize", "/token", "/register", "/revoke")
@@ -161,6 +294,10 @@ def transport_security(cfg: Settings | None = None) -> TransportSecuritySettings
     if cfg.is_test:
         hosts.append("testserver")  # Starlette's TestClient Host header
 
+    policy = allowed_origins(cfg)
+    if policy != ["*"]:
+        origins.extend(policy)
+
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=sorted(set(hosts)),
@@ -175,18 +312,24 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         streamable_http_path="/mcp",
         transport_security=transport_security(cfg),
     )
+    mounted = OriginPolicyMiddleware(streamable, allowed_origins(cfg))
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         control_db.control()  # create/migrate control.db before serving
         r2_sync.start_background(cfg=cfg)  # no-op unless R2 is configured
-        async with streamable.router.lifespan_context(streamable):
-            yield
-        # Flush before the connections go, so a rolling restart does not drop
-        # the last debounce window of writes.
-        r2_sync.stop_background(cfg=cfg)
-        tenant_db.close_all()
-        control_db.close_all()
+        try:
+            async with streamable.router.lifespan_context(streamable):
+                yield
+        finally:
+            # `try/finally`, not statements after the `yield`: a redeploy's
+            # SIGTERM is delivered as a cancellation *at* the yield, and
+            # anything written after it would simply never run. Everything
+            # marked dirty inside the debounce window is uploaded here,
+            # synchronously, before the process is allowed to exit.
+            r2_sync.stop_background(cfg=cfg)
+            tenant_db.close_all()
+            control_db.close_all()
 
     app = FastAPI(
         title="brain",
@@ -198,6 +341,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         routes=list(auth.ROUTES) + list(webapi.ROUTES),
     )
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(McpCorsMiddleware, cfg=cfg)
     # Added last, so it runs first: a replayed request should not cost
     # this node a routing pass it is going to throw away.
     app.add_middleware(ShardRoutingMiddleware, cfg=cfg)
@@ -207,7 +351,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         return JSONResponse({"status": "ok", "env": cfg.env, "version": "0.1.0"})
 
     # The MCP transport owns everything under /mcp.
-    app.mount("/", streamable)
+    app.mount("/", mounted)
     return app
 
 

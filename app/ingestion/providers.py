@@ -17,6 +17,7 @@ import re
 import struct
 import time
 from dataclasses import dataclass, field
+from datetime import timezone as _timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
@@ -703,6 +704,62 @@ def _http_client(timeout: float):
     return httpx.Client(timeout=timeout, follow_redirects=False)
 
 
+#: Statuses worth trying again. A first-party endpoint enforces per-key
+#: concurrency and RPM limits, and a multi-claim ingestion burst walks straight
+#: into them — a 429 there says "slow down", not "this will never work".
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+#: Statuses where a retry is only a slower way to get the same answer: a
+#: malformed payload, a bad key, a forbidden model, a wrong model id.
+FATAL_STATUSES = (400, 401, 403, 404)
+#: Ceiling on how long a `Retry-After` can park an ingestion worker. A host
+#: asking for ten minutes is better served by the job failing and being retried
+#: from the queue, where the lease and the attempt counter apply.
+MAX_BACKOFF_SEC = 8.0
+
+#: Injectable so the retry tests take microseconds instead of seconds.
+_sleeper: Callable[[float], None] = time.sleep
+
+
+def set_sleeper(sleeper: Callable[[float], None] | None) -> None:
+    global _sleeper
+    _sleeper = sleeper or time.sleep
+
+
+def parse_retry_after(value: str | None, *, now: float | None = None) -> float | None:
+    """`Retry-After` as seconds, in either of its two legal spellings."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(int(raw)))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        moment = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_timezone.utc)
+    reference = now if now is not None else time.time()
+    return max(0.0, moment.timestamp() - reference)
+
+
+def backoff_delay(attempt: int, retry_after: float | None = None) -> float:
+    """How long to wait before attempt `attempt + 1` (0-indexed).
+
+    The host's own `Retry-After` wins when it sends one — it knows when the
+    window resets and we do not — capped so one unlucky request cannot hold a
+    worker for minutes. Otherwise exponential: 0.5s, 1s, 2s.
+    """
+    if retry_after is not None:
+        return min(retry_after, MAX_BACKOFF_SEC)
+    return min(0.5 * (2 ** max(0, attempt)), MAX_BACKOFF_SEC)
+
+
 def _post_json(
     url: str, *, api_key: str, payload: dict[str, Any], timeout: float, retries: int
 ) -> dict[str, Any]:
@@ -718,36 +775,77 @@ def _post_json(
         # first-party endpoint, and telling a vendor's gateway about a
         # marketplace we are not using is not information it is owed.
         headers.update({"X-Title": "brain", "HTTP-Referer": "https://github.com/brain"})
-    last_error: Exception | None = None
-    for attempt in range(max(1, retries) + 1):
+
+    attempts = max(1, retries + 1)
+    last_error: ProviderError | None = None
+    for attempt in range(attempts):
+        is_last = attempt == attempts - 1
         try:
             with _http_client(timeout) as client:
                 response = client.post(url, headers=headers, json=payload)
-            if response.status_code in (429, 500, 502, 503, 504):
-                last_error = ProviderError(
-                    "model_unavailable", f"The model host returned {response.status_code}."
-                )
-                if attempt < retries:
-                    time.sleep(min(2.0 * (attempt + 1), 5.0))
-                    continue
-                raise last_error
-            if response.status_code == 401:
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # A connection reset, a DNS blip or a read timeout: nothing about
+            # the request itself is wrong, so the same request can be sent again.
+            last_error = ProviderError(
+                "model_unreachable", f"Could not reach the model host: {exc}"
+            )
+            if is_last:
+                raise last_error from exc
+            LOGGER.info(
+                "%s attempt %s/%s failed (%s); retrying",
+                url, attempt + 1, attempts, type(exc).__name__,
+            )
+            _sleeper(backoff_delay(attempt))
+            continue
+        except httpx.HTTPError as exc:  # pragma: no cover - defensive
+            raise ProviderError(
+                "model_unreachable", f"Could not reach the model host: {exc}"
+            ) from exc
+
+        status = response.status_code
+        if status in FATAL_STATUSES:
+            # Fail now rather than three times as slowly. Each of these is about
+            # how the request was *built*, and another identical attempt gets an
+            # identical answer.
+            if status == 401:
                 raise ProviderError("bad_api_key", "The model host rejected the API key.")
-            if response.status_code >= 400:
+            if status == 403:
                 raise ProviderError(
-                    "model_error",
-                    f"The model host returned {response.status_code}: {response.text[:200]}",
+                    "model_forbidden",
+                    "The model host refused this key access to that model (403).",
                 )
+            if status == 404:
+                raise ProviderError(
+                    "model_not_found",
+                    f"The model host has no such endpoint or model (404). Check LLM_MODEL "
+                    f"and LLM_BASE_URL: {response.text[:160]}",
+                )
+            raise ProviderError(
+                "model_error", f"The model host rejected the request (400): {response.text[:200]}"
+            )
+        if status in RETRY_STATUSES:
+            retry_after = parse_retry_after(response.headers.get("retry-after"))
+            last_error = ProviderError(
+                "rate_limited" if status == 429 else "model_unavailable",
+                f"The model host returned {status}."
+                + (" It asked us to wait." if retry_after else ""),
+            )
+            if is_last:
+                raise last_error
+            delay = backoff_delay(attempt, retry_after)
+            LOGGER.info(
+                "%s attempt %s/%s got %s; waiting %.2fs",
+                url, attempt + 1, attempts, status, delay,
+            )
+            _sleeper(delay)
+            continue
+        if status >= 400:
+            raise ProviderError(
+                "model_error", f"The model host returned {status}: {response.text[:200]}"
+            )
+        try:
             return response.json()
-        except ProviderError:
-            raise
-        except httpx.HTTPError as exc:
-            last_error = ProviderError("model_unreachable", f"Could not reach the model host: {exc}")
-            if attempt < retries:
-                time.sleep(min(1.0 * (attempt + 1), 4.0))
-                continue
-            raise last_error from exc
-        except ValueError as exc:  # unparseable JSON
+        except ValueError as exc:
             raise ProviderError("model_error", "The model host returned unreadable JSON.") from exc
     raise last_error or ProviderError("model_error", "The model host could not be reached.")
 

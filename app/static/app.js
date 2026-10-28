@@ -52,12 +52,31 @@ async function api(path, options = {}) {
     init.body = JSON.stringify(init.body);
   }
   if ((init.method || "GET") !== "GET") init.headers["X-Brain-CSRF"] = state.csrf;
-  const response = await fetch(path, init);
+  if (state.forceOffline) return offlinePayload();
+  let response;
+  try {
+    response = await fetch(path, init);
+  } catch (_) {
+    // A dropped connection used to reject here, which meant every caller's
+    // `if (!data.ok)` branch was skipped and the page half-rendered in silence.
+    // It now comes back as an ordinary failed payload, so the error strip the
+    // rest of the app already uses does the talking.
+    return offlinePayload();
+  }
   let payload = {};
   try { payload = await response.json(); } catch (_) { /* empty body */ }
   if (!response.ok && !payload.reason) payload.reason = "http_" + response.status;
   payload.status = response.status;
   return payload;
+}
+
+function offlinePayload() {
+  return {
+    ok: false,
+    reason: "offline",
+    status: 0,
+    message: "brain could not be reached. Check your connection — nothing was lost.",
+  };
 }
 
 /* ===================== strips: confirm + receipt ===================== */
@@ -708,6 +727,16 @@ function mixBorder(strength) {
 
 function applyEdgeState(name) {
   state.edgeState = name;
+  // `offline` is shaped like every other harness state: nothing is faked, the
+  // real request path is made to fail so the real error strip renders.
+  state.forceOffline = name === "offline";
+  if (state.forceOffline) {
+    showError(offlinePayload().message);
+    renderJobs();
+    renderCards();
+    return;
+  }
+  clearStrips();
   // The harness never fakes data: it shapes the real thing instead.
   if (name === "zero-match") {
     $("#omni-input").value = "renewal negotiation tactics";

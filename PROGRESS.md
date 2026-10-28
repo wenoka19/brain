@@ -306,7 +306,7 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **657 passed** |
+| `BRAIN_ENV=test pytest` | **721 passed** |
 | `python -m app.cli selftest` | **28/28 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
@@ -319,7 +319,8 @@ specification in `DESIGN_DECISIONS.md`.
 | `BRAIN_DATA_DIR` | — | Database location. `/data` in prod. |
 | `BRAIN_JWT_SECRET` | **prod** | HS256 signing key. Signing refuses to start without it. |
 | `BRAIN_PUBLIC_URL` | prod | OAuth issuer and the `/mcp` transport Host allow-list. Without it, `/mcp` answers 421. |
-| `BRAIN_ALLOWED_HOSTS` | — | Extra comma-separated hostnames. |
+| `BRAIN_ALLOWED_HOSTS` | — | Extra comma-separated hostnames for the `/mcp` Host allow-list (the DNS-rebinding defence). |
+| `BRAIN_ALLOWED_ORIGINS` | — | Origin policy for `/mcp` and the OAuth endpoints. Default `*`, because that surface is bearer-authenticated and a strict list breaks every browser client it was not told about. A comma-separated list restricts both the CORS headers and the transport's own check. |
 | `BRAIN_OWNER_EMAIL` | — | Single-user shortcut past the consent form. |
 | `BRAIN_PREVIEW` | — | `1` enables `/preview` outside test mode. |
 | `BRAIN_ROLE` | — | `web` (default) or `worker`. |
@@ -724,3 +725,105 @@ has now changed again — `embedding-3` or `text-embedding-v4` rather than a
 256-native OpenAI model. Run `python -m app.cli calibrate` once with the live
 key and set `BRAIN_SEARCH_FLOOR` / `BRAIN_LINK_FLOOR` from what it measures.
 The hashed floors (0.18 / 0.15) stay measured and correct for `BRAIN_ENV=test`.
+
+
+---
+
+## Phase 7d — Production resilience and mobile / MCP hardening
+
+Four failure modes that only appear once something real is on the other end.
+Three of them turned up defects that were already there.
+
+### 1. Direct-vendor rate limits and transient retries
+
+`_post_json` now distinguishes three outcomes instead of two:
+
+* **retry** — 429, 500, 502, 503, 504, and `httpx.TimeoutException` /
+  `TransportError`. A first-party endpoint enforces per-key concurrency and
+  RPM, so a multi-claim ingestion burst walks straight into a 429; nothing
+  about the request is wrong.
+* **fail now** — 400, 401, 403, 404. Each is about how the request was *built*,
+  so another identical attempt gets an identical answer three times as slowly.
+  Each gets its own reason, and the 404 names `LLM_MODEL` and `LLM_BASE_URL`,
+  because a stale marketplace model id is the likeliest cause right now.
+* **backoff** — the host's own `Retry-After` wins when it sends one (both legal
+  spellings), capped at 8s: a worker parked for ten minutes is worse than a
+  failed job, since the queue has a lease and an attempt counter and this does
+  not. Otherwise 0.5s, 1s, 2s. Three attempts total.
+
+The sleep is injectable (`set_sleeper`), so the 20 retry tests assert the
+delays rather than waiting them out. A rate-limited *extraction* still falls
+back to the heuristic extractor rather than losing the source; a rate-limited
+*embedding* still raises, because a hashed vector in a neural index would
+corrupt every later search silently.
+
+### 2. Graceful shutdown — and a flush that would never have run
+
+`flush_all_dirty_tenants()` is the shutdown path, and `stop_background` now
+stops the loop, joins it, flushes, and logs an error naming any tenant still
+unsynced rather than exiting quietly.
+
+**The defect:** the lifespan's flush was written *after* its `yield`. A
+redeploy's `SIGTERM` arrives as a cancellation **at** the yield, so those lines
+would simply never have run — the snapshot, the connection close, all of it.
+Everything is in a `finally` block now, and a test asserts the source ordering,
+because `TestClient` closes a lifespan cleanly and cannot provoke the real
+case.
+
+Also added a per-tenant snapshot lock: the loop and a shutdown flush can reach
+the same tenant at once, and two concurrent `VACUUM INTO`s to the same path is
+a corrupt upload. A threaded test races two flushers and asserts what lands is
+a whole SQLite file.
+
+### 3. CORS and the external MCP client — two doors, one of them locked
+
+CORS is scoped to `/mcp`, `/.well-known/*` and the OAuth endpoints, and
+deliberately **not** `/api/*`: the control plane authenticates with a
+`SameSite=Strict` cookie plus a double-submit CSRF header, and advertising it
+as cross-origin-callable would undo that for no gain. `WWW-Authenticate` and
+`Mcp-Session-Id` are exposed because both are load bearing — without the first
+the client cannot discover where to authenticate, without the second it cannot
+continue the session it just opened.
+
+**The defect the wire test found:** with CORS in place, an authenticated
+request from `https://claude.ai` got a **403** — the MCP SDK's
+`TransportSecuritySettings.allowed_origins` was empty, so every Origin it had
+not been told about was rejected. Our CORS said come in and the transport
+slammed the door, and only *after* authentication, which is the worst place to
+discover it. `allowed_origins` exists to stop a drive-by page driving a *local*
+MCP server, and that attack works because the browser attaches credentials by
+itself — nothing on `/mcp` authenticates that way. So the Origin policy is now
+explicit and unrestricted by default (`BRAIN_ALLOWED_ORIGINS`), the **Host**
+allow-list stays strict as the real rebinding defence, and both middlewares
+read one policy function.
+
+The wire test walks the whole sequence on the real app, taking each step from
+the previous step's response rather than a hard-coded path: 401 + challenge →
+resource metadata at the URL the challenge named → RFC 8414 server metadata →
+RFC 7591 registration → S256 PKCE authorize + consent → code exchange →
+`initialize` → `tools/list` (all 8) → a real `remember_this` call. Plus: a
+revoked token produces the same challenge, so a client with a dead token has
+something to act on.
+
+### 4. The phone — 390x844, every layout, every state
+
+36 combinations (4 layouts x 9 states, `offline` added), all now at
+`scrollWidth == 390` with **zero** overflowing elements.
+
+**Three defects found.** The B3 inspector had `top:auto` with no `bottom` in
+the mobile media query — and a fixed element with `top:auto` falls to its
+static position, which measured **954px on an 844px screen**. The sheet opened
+entirely below the fold: invisible, and nothing in it reachable. Second, the
+harness bar and tuner sat on top of whatever was open, including the sheet's
+back arrow and the Profile modal's Close button, so on a phone there was no way
+out of either; an open overlay now wins over dev chrome. Third, the harness's
+own control groups ran off the right edge — a design harness whose controls you
+cannot reach on a phone fails at the one job it has.
+
+**And one in the app itself:** `api()` called `fetch` with no `try`, so losing
+the network *rejected* the promise, skipped every caller's `if (!data.ok)`
+branch, and left the page half-rendered in silence. It now returns an ordinary
+failed payload, so the error strip the app already had does the talking — no
+new affordance, just the approved one actually firing. `offline` joins the
+harness state list, shaped like every other one: nothing faked, the real
+request path made to fail.
