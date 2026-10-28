@@ -8,6 +8,7 @@ exactly what the founder approved at the two Co-Design Checkpoints.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import sqlite3
@@ -34,6 +35,27 @@ def mark(state: str) -> str:
 
 def line(state: str, label: str, detail: str = "") -> None:
     print(f"  {mark(state)} {label}" + (f" — {detail}" if detail else ""))
+
+
+@contextlib.contextmanager
+def scoped_env(**overrides: str):
+    """Apply environment overrides and put the old values back afterwards.
+
+    These commands relocate `BRAIN_DATA_DIR` and sometimes pin a floor to zero.
+    Leaving that behind would be a real bug: in a long-lived process — the test
+    suite, or a `doctor` run after a `calibrate` — the next caller would silently
+    inherit a scratch directory and a floor it never asked for.
+    """
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 # ===========================================================================
@@ -174,9 +196,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_selftest(args: argparse.Namespace) -> int:
     """Exercise the whole product deterministically, asserting as it goes."""
     workdir = Path(tempfile.mkdtemp(prefix="brain-selftest-"))
-    os.environ["BRAIN_ENV"] = "test"
-    os.environ["BRAIN_DATA_DIR"] = str(workdir)
-    os.environ.setdefault("BRAIN_JWT_SECRET", "selftest-secret-key-long-enough-ok")
+    from app import config as config_module
+
+    try:
+        with scoped_env(
+            BRAIN_ENV="test",
+            BRAIN_DATA_DIR=str(workdir),
+            BRAIN_JWT_SECRET=os.environ.get("BRAIN_JWT_SECRET")
+            or "selftest-secret-key-long-enough-ok",
+        ):
+            return _selftest_inner(args, workdir)
+    finally:
+        config_module.reload_settings()
+
+
+def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
 
     # The selftest's own output is the signal; library chatter is noise.
     import logging
@@ -519,8 +553,16 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 def cmd_preview_ax(args: argparse.Namespace) -> int:
     """Print every Checkpoint A envelope against a real seeded library."""
     workdir = Path(tempfile.mkdtemp(prefix="brain-ax-"))
-    os.environ["BRAIN_ENV"] = "test"
-    os.environ["BRAIN_DATA_DIR"] = str(workdir)
+    from app import config as config_module
+
+    try:
+        with scoped_env(BRAIN_ENV="test", BRAIN_DATA_DIR=str(workdir)):
+            return _preview_ax_inner(args, workdir)
+    finally:
+        config_module.reload_settings()
+
+
+def _preview_ax_inner(args: argparse.Namespace, workdir: Path) -> int:
 
     from app import config as config_module
 
@@ -647,6 +689,342 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
 
 # ===========================================================================
+# calibrate
+# ===========================================================================
+#: The default corpus: two sources that disagree on one topic, plus sources on
+#: unrelated topics, which is exactly the shape the floors have to separate.
+DEFAULT_CORPUS: tuple[tuple[str, str], ...] = (
+    ("outbound", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+    ("outbound", "https://example.com/report"),
+    ("renewals", "https://raw.githubusercontent.com/acme/playbooks/main/SKILL.md"),
+    ("warehousing", "https://example.com/warehouse-pick-paths"),
+    ("hiring", "https://example.com/interview-loop-design"),
+)
+
+DEFAULT_QUERIES: tuple[tuple[str, str], ...] = (
+    ("outbound", "should I batch my cold emails"),
+    ("outbound", "cold email send volume and reply rate"),
+    ("renewals", "when to send renewal paper"),
+    ("warehousing", "warehouse pick path optimisation"),
+    ("hiring", "how should we structure the interview loop"),
+)
+
+
+def _percentiles(values: list[float]) -> dict[str, float]:
+    import statistics
+
+    if not values:
+        return {}
+    ordered = sorted(values)
+
+    def at(fraction: float) -> float:
+        if len(ordered) == 1:
+            return ordered[0]
+        index = fraction * (len(ordered) - 1)
+        low = int(index)
+        high = min(low + 1, len(ordered) - 1)
+        return ordered[low] + (ordered[high] - ordered[low]) * (index - low)
+
+    return {
+        "n": float(len(ordered)),
+        "min": ordered[0],
+        "p05": at(0.05),
+        "p25": at(0.25),
+        "median": statistics.median(ordered),
+        "p75": at(0.75),
+        "p95": at(0.95),
+        "max": ordered[-1],
+    }
+
+
+def _row(label: str, stats: dict[str, float]) -> str:
+    if not stats:
+        return f"  {label:<22} (no pairs)"
+    return (
+        f"  {label:<22} n={int(stats['n']):<5} "
+        f"min={stats['min']:.3f}  p05={stats['p05']:.3f}  med={stats['median']:.3f}  "
+        f"p95={stats['p95']:.3f}  max={stats['max']:.3f}"
+    )
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Measure real cosine separation and derive the retrieval floors from it.
+
+    Runs the full pipeline over a multi-topic corpus, then measures two things
+    the floors exist to separate:
+
+      * query -> claim, on-topic vs off-topic   (sets `search_similarity_floor`)
+      * claim -> claim, same-topic vs cross-topic (sets `link_similarity_floor`)
+
+    Whatever embedder is live is what gets measured, so the same command
+    recalibrates for a neural model once one is configured.
+    """
+    import tempfile as tempfile_module
+
+    corpus = [tuple(item.split("=", 1)) for item in args.source] if args.source else list(DEFAULT_CORPUS)
+    queries = [tuple(item.split("=", 1)) for item in args.query] if args.query else list(DEFAULT_QUERIES)
+    for topic, _ in corpus + queries:
+        if not topic:
+            print("each --source/--query must look like topic=value")
+            return 1
+
+    workdir = Path(tempfile_module.mkdtemp(prefix="brain-calibrate-"))
+    from app import config as config_module
+
+    # Measure against a bare scale, so the floors are derived rather than
+    # assumed by the very setting being calibrated — and restored on the way out.
+    try:
+        with scoped_env(
+            BRAIN_DATA_DIR=str(workdir), BRAIN_SEARCH_FLOOR="0", BRAIN_LINK_FLOOR="0"
+        ):
+            return _calibrate_inner(args, workdir, config_module, corpus, queries)
+    finally:
+        # Outside the scope, so the singleton is rebuilt from the *restored*
+        # environment rather than from the overrides.
+        config_module.reload_settings()
+
+
+def _calibrate_inner(
+    args, workdir: Path, config_module, corpus: list, queries: list
+) -> int:
+    import shutil
+
+    cfg = config_module.reload_settings()
+    cfg.ensure_dirs()
+
+    from app.core import engine as E
+    from app.db import control as control_db
+    from app.db import tenant as tenant_db
+
+    print(f"\nbrain calibrate — embedder: {cfg.embedding_provider} @ {cfg.embedding_dim}d")
+    print(f"  extractor: {cfg.extractor_version}")
+    print(f"  corpus:    {len(corpus)} sources across "
+          f"{len({topic for topic, _ in corpus})} topics\n")
+
+    control = control_db.control()
+    user = control_db.ensure_user(control, "calibrate@example.com")
+    ctx = E.build_context(user["user_id"], surface="system")
+
+    topic_of_source: dict[str, str] = {}
+    for topic, url in corpus:
+        queued = E.op_ingest_source(ctx, url)
+        if not queued.ok:
+            line("bad", url, queued.error_message)
+            continue
+        if queued.data.get("duplicate"):
+            topic_of_source[queued.data["source_id"]] = topic
+            continue
+        topic_of_source[queued.data["source_id"]] = topic
+    processed = E.run_pending_jobs_sync(ctx.user_id, cfg=cfg, limit=len(corpus) + 2)
+    for outcome in processed:
+        state = "ok" if outcome["status"] == "ready" else "bad"
+        line(state, f"{outcome.get('title') or outcome['source_id']}",
+             f"{outcome['claims']} claims, {outcome.get('tensions', 0)} tensions")
+
+    claims = [
+        tenant_db.hydrate_claim(row)
+        for row in ctx.tenant.execute(
+            "SELECT * FROM epistemic_claims WHERE status = 'active'"
+        ).fetchall()
+    ]
+    if len(claims) < 4:
+        print("\nNot enough claims were extracted to measure anything. "
+              "Check the sources, then re-run.\n")
+        return 1
+
+    vectors: dict[str, list[float]] = {}
+    for claim in claims:
+        row = ctx.tenant.execute(
+            "SELECT v.embedding FROM claim_vectors v JOIN epistemic_claims c "
+            "ON c.rowid = v.claim_rowid WHERE c.id = ?",
+            (claim["id"],),
+        ).fetchone()
+        if row:
+            vectors[claim["id"]] = tenant_db.unpack_embedding(row["embedding"], dim=cfg.embedding_dim)
+
+    def cosine(a: list[float], b: list[float]) -> float:
+        return sum(x * y for x, y in zip(a, b))
+
+    # ---- claim <-> claim ------------------------------------------------
+    same_topic: list[float] = []
+    cross_topic: list[float] = []
+    for index, left in enumerate(claims):
+        for right in claims[index + 1 :]:
+            if left["id"] not in vectors or right["id"] not in vectors:
+                continue
+            score = cosine(vectors[left["id"]], vectors[right["id"]])
+            left_topic = topic_of_source.get(left["source_id"])
+            right_topic = topic_of_source.get(right["source_id"])
+            if left_topic is None or right_topic is None:
+                continue
+            # Two claims from the same source are trivially close; the pair that
+            # matters is two *different* sources on one topic.
+            if left["source_id"] == right["source_id"]:
+                continue
+            (same_topic if left_topic == right_topic else cross_topic).append(score)
+
+    # ---- query -> claim --------------------------------------------------
+    on_topic: list[float] = []
+    off_topic: list[float] = []
+    for topic, text in queries:
+        probe = ctx.prov.embedder.embed([text])[0]
+        for claim in claims:
+            if claim["id"] not in vectors:
+                continue
+            claim_topic = topic_of_source.get(claim["source_id"])
+            if claim_topic is None:
+                continue
+            score = cosine(probe, vectors[claim["id"]])
+            (on_topic if claim_topic == topic else off_topic).append(score)
+
+    # ---- the pairs the classifier actually linked ------------------------
+    # The link floor's job is not to separate topics — it is to avoid
+    # classifying pairs that are obviously unrelated, while never dropping a
+    # pair the classifier would have linked. So the criterion is measurable
+    # directly: it must sit below the weakest pair that became a real link.
+    linked_scores: list[float] = []
+    linked_pairs: list[tuple[float, str, str, str]] = []
+    by_id = {claim["id"]: claim for claim in claims}
+    for row in ctx.tenant.execute(
+        "SELECT claim_a_id, claim_b_id, link_type FROM tension_links"
+    ).fetchall():
+        left, right = vectors.get(row["claim_a_id"]), vectors.get(row["claim_b_id"])
+        if not (left and right):
+            continue
+        score = cosine(left, right)
+        linked_scores.append(score)
+        linked_pairs.append(
+            (
+                score,
+                row["link_type"],
+                by_id.get(row["claim_a_id"], {}).get("claim", row["claim_a_id"]),
+                by_id.get(row["claim_b_id"], {}).get("claim", row["claim_b_id"]),
+            )
+        )
+
+    shipped = config_module.Settings()
+    shipped_search = (
+        shipped.neural_search_floor if cfg.live_embeddings else shipped.hash_search_floor
+    )
+    shipped_link = shipped.neural_link_floor if cfg.live_embeddings else shipped.hash_link_floor
+
+    print(f"\n  {len(claims)} claims · {len(vectors)} embedded\n")
+    print("query -> claim")
+    print(_row("on-topic", _percentiles(on_topic)))
+    print(_row("off-topic", _percentiles(off_topic)))
+    print("\nclaim -> claim (different sources)")
+    print(_row("same topic", _percentiles(same_topic)))
+    print(_row("cross topic", _percentiles(cross_topic)))
+    print(_row("actually linked", _percentiles(linked_scores)))
+
+    # ---- derive ----------------------------------------------------------
+    on_stats, off_stats = _percentiles(on_topic), _percentiles(off_topic)
+    same_stats, cross_stats = _percentiles(same_topic), _percentiles(cross_topic)
+    print("\nderived floors")
+    failures = 0
+
+    def derive(
+        label: str,
+        signal: dict[str, float],
+        noise: dict[str, float],
+        signal_values: list[float],
+    ) -> float | None:
+        """Place the floor between the noise ceiling and the signal's middle.
+
+        The signal's *5th* percentile is the wrong target: a lexical embedder
+        legitimately scores some same-topic pairs at zero, because they share a
+        subject but no words. No floor can rescue those — they are not
+        retrievable by that probe at any threshold — and chasing them drags the
+        floor down into the noise. So the floor is placed against the signal's
+        median, and the cost is reported rather than hidden: the share of real
+        matches that fall below it.
+        """
+        nonlocal failures
+        if not signal or not noise:
+            line("warn", label, "not enough data on one side")
+            return None
+        ceiling, middle = noise["p95"], signal["median"]
+        if middle <= ceiling:
+            line(
+                "bad",
+                label,
+                f"no usable gap: signal median={middle:.3f} <= noise p95={ceiling:.3f}. "
+                "This embedder cannot separate these topics at all.",
+            )
+            failures += 1
+            return None
+        value = round((ceiling + middle) / 2, 3)
+        lost = sum(1 for score in signal_values if score < value)
+        share = lost / len(signal_values) if signal_values else 0.0
+        line(
+            "ok",
+            label,
+            f"{value}  (noise p95 {ceiling:.3f} → signal median {middle:.3f}; "
+            f"{share:.0%} of real matches fall below it)",
+        )
+        if share > 0.5:
+            line(
+                "warn",
+                f"{label} cost",
+                f"over half of same-topic matches score below {value} — this embedder is "
+                "lexically sparse, so expect recall to depend on shared wording",
+            )
+        return value
+
+    search_floor = derive("search_similarity_floor", on_stats, off_stats, on_topic)
+
+    # The link floor cannot be derived the same way, and pretending otherwise
+    # is worse than not trying. Not every link the classifier creates is
+    # genuine — the shape rules do produce false positives on claims that
+    # share only generic words — so "the weakest link that was created" is not
+    # a lower bound on real links; it is often a false positive the floor is
+    # there to block. Without labelled ground truth, the honest move is to show
+    # the operator every scored pair and let them set the line.
+    link_floor: float | None = None
+    print("\nevery link the classifier proposed, weakest first")
+    if linked_pairs:
+        for score, kind, left_text, right_text in sorted(linked_pairs):
+            marker = "  " if score >= shipped_link else "✂ "
+            print(f"  {marker}{score:>6.3f}  {kind:<12} {left_text[:44]}")
+            print(f"            {'':<12} vs {right_text[:44]}")
+        print(
+            f"\n  ✂ marks pairs the shipped floor of {shipped_link} excludes. "
+            "Set link_similarity_floor above the highest-scoring pair you judge\n"
+            "  spurious, and below the lowest you judge real — this is a judgement "
+            "call about your own sources, not a statistic."
+        )
+    else:
+        line(
+            "warn",
+            "links",
+            "none were proposed, so there is nothing to judge. Ingest two sources that "
+            "genuinely disagree on one topic.",
+        )
+
+    print(f"\n  shipped for this embedder: search {shipped_search} / link {shipped_link}")
+    if search_floor is not None:
+        drift = abs(search_floor - shipped_search)
+        if drift <= 0.02:
+            line("ok", "shipped search floor", f"measured {search_floor} — confirmed")
+        else:
+            line(
+                "warn",
+                "shipped search floor",
+                f"measured {search_floor}, shipped {shipped_search} (off by {drift:.3f}) — "
+                "update config.py or set BRAIN_SEARCH_FLOOR",
+            )
+
+    print()
+    tenant_db.close_all()
+    control_db.close_all()
+    if not args.keep:
+        shutil.rmtree(workdir, ignore_errors=True)
+    else:
+        print(f"  library kept at {workdir}\n")
+    return 1 if failures else 0
+
+
+# ===========================================================================
 # entry point
 # ===========================================================================
 def build_parser() -> argparse.ArgumentParser:
@@ -681,6 +1059,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = sub.add_parser("worker", help="run the ingestion worker")
     worker.set_defaults(func=cmd_worker)
+
+    calibrate = sub.add_parser(
+        "calibrate", help="measure real cosine separation and derive the retrieval floors"
+    )
+    calibrate.add_argument(
+        "--source", action="append", default=[], metavar="TOPIC=URL",
+        help="a source to ingest, labelled with its topic (repeatable)",
+    )
+    calibrate.add_argument(
+        "--query", action="append", default=[], metavar="TOPIC=TEXT",
+        help="a probe query, labelled with the topic it should match (repeatable)",
+    )
+    calibrate.add_argument("--keep", action="store_true", help="keep the measured library")
+    calibrate.set_defaults(func=cmd_calibrate)
     return parser
 
 

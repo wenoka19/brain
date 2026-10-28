@@ -306,7 +306,7 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **554 passed** |
+| `BRAIN_ENV=test pytest` | **562 passed** |
 | `python -m app.cli selftest` | **27/27 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
@@ -433,3 +433,71 @@ What remains:
 **Verified** — `tests/test_phase6_security_and_live_providers.py`, 120 tests,
 every live adapter driven through `httpx.MockTransport` so the suite needs no
 key and no network. Full suite: **554 passed**. `selftest`: **27/27**.
+
+
+---
+
+## Calibration run — the hashed embedder, measured
+
+`python -m app.cli calibrate` runs the pipeline over a multi-topic corpus and
+measures the two distributions the retrieval floors exist to separate. It pins
+both floors to zero for the run, so the setting being calibrated cannot bound
+its own measurement.
+
+Measured against the deterministic `v1-hash` embedder at 256d, 11 claims across
+4 topics:
+
+```
+query -> claim
+  on-topic      n=17  min=0.000  med=0.265  p95=0.569  max=0.692
+  off-topic     n=38  min=-0.208 med=0.000  p95=0.102  max=0.144
+
+claim -> claim (different sources)
+  same topic    n=9   min=0.080  med=0.163  p95=0.344  max=0.415
+  cross topic   n=38  min=-0.011 med=0.096  p95=0.303  max=0.484
+```
+
+**`search_similarity_floor` = 0.183 measured, 0.18 shipped — confirmed.** The
+floor sits in the gap between off-topic noise (p95 0.102, max 0.144) and the
+on-topic median (0.265). The command also reports the cost it had been hiding:
+**47% of same-topic matches score below it**, because a lexical embedder
+legitimately gives zero to two claims that share a subject but no words. No
+threshold rescues those; they are not retrievable by that probe at all.
+
+**`link_similarity_floor` cannot be derived statistically, and the command now
+says so instead of inventing a number.** Three findings, in order:
+
+1. Deriving it from topic separation fails outright — same-topic claim pairs
+   (median 0.163) score *below* cross-topic ones (p95 0.303).
+2. Deriving it from "the weakest pair that became a link" is worse than
+   useless, because it is backwards. The weakest link in the corpus scored
+   **0.060** and is **spurious**: *"We always review warehouse pick paths
+   before committing"* linked as `contradicts` to *"Never send renewal paper
+   before the executive review"* — two unrelated topics sharing only generic
+   words, caught by the asymmetric-negation rule.
+3. The shipped **0.15 is therefore doing real work**: it excludes that false
+   positive while admitting all three genuine outbound links (0.155, 0.239,
+   0.415). Dropping the floor to the "derived" 0.042 would have admitted it.
+
+So `calibrate` now prints every proposed link with its score and both claims,
+marks the ones the shipped floor excludes, and states plainly that where to
+draw the line is a judgement call about the operator's own sources rather than
+a statistic.
+
+**A code comment this disproved.** `HeuristicLinkClassifier` claimed
+"unrelated claims share no content words at all" and that the vector lane had
+already decided topicality. The warehouse/renewal pair refutes both: the
+classifier's shared-token guard passes it, and only the cosine floor stops it.
+The comment now says the floor and the guard share that job and neither is
+sufficient alone.
+
+**Floors unchanged** — 0.18 / 0.15 for the hashed embedder — now with measured
+evidence rather than a reasoned estimate.
+
+### Still not measured
+
+The **neural floors (0.42 / 0.38) remain reasoned, not measured.** Calibrating
+them needs a live embedding model, which needs two environment changes this
+session does not have: an API key, and network access to the model host. Once
+both exist, `python -m app.cli calibrate` produces the same table for the live
+embedder in one command.

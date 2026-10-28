@@ -664,7 +664,12 @@ def remember_envelope(result: OpResult) -> str:
         )
         for tension in tensions[:3]:
             lines.append(f"- {neutralize_fences(tension['divergence_summary'])}")
-    lines.append(f"\n*Library: {counts.get('claims', 0)} claims · {counts.get('skills', 0)} skills*")
+    claim_count = counts.get("claims", 0)
+    skill_count = counts.get("skills", 0)
+    lines.append(
+        f"\n*Library: {claim_count} claim{'s' if claim_count != 1 else ''} · "
+        f"{skill_count} skill{'s' if skill_count != 1 else ''}*"
+    )
     hint = (
         f"{HINT} Recorded. Confirm in one short clause"
         + (

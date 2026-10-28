@@ -76,6 +76,13 @@ class Settings:
     #   neural (a trained dense model) — unrelated text sits far higher, around
     #     0.2-0.3, so the same floors would admit noise.
     #
+    # `python -m app.cli calibrate` measures these against a real multi-topic
+    # library. It confirmed hash_search_floor at 0.183 against the 0.18 shipped
+    # here. The link floors are a judgement call rather than a statistic — see
+    # that command's output for why — and 0.15 is the value that admits the
+    # genuine outbound contradictions while excluding a measured false positive
+    # between two unrelated topics.
+    #
     # Both pairs are overridable, because a different neural model may need
     # recalibrating again.
     hash_search_floor: float = 0.18

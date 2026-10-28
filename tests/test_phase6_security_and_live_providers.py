@@ -1207,3 +1207,26 @@ class TestProfileModalInABrowser:
         assert report["escapedNoHtml"] is True
         # The blocked edit left the skill exactly as it was.
         assert report["stepsIntact"][1] == "Write the whole sequence in one sitting"
+
+
+class TestEnvelopePolish:
+    """Defects visible in `preview-ax` output rather than in any assertion."""
+
+    def test_the_library_footer_pluralises_correctly(self, cfg, user):
+        from app.core import formatting as F
+
+        ctx = E.build_context(user["user_id"])
+        single = F.remember_envelope(
+            E.op_remember_this(ctx, "I never send on a Friday", "my outbound work")
+        )
+        assert "1 claim ·" in single
+        assert "1 claims" not in single
+        assert "0 skills" in single  # zero is plural
+
+        E.op_save_skill(ctx, "one", "One", "d", "t", ["a"])
+        E.op_remember_this(ctx, "I always warm a new domain first", "new domains")
+        plural = F.remember_envelope(
+            E.op_remember_this(ctx, "I review copy on Mondays", "copy review")
+        )
+        assert "1 skill*" in plural and "1 skills" not in plural
+        assert "3 claims" in plural

@@ -34,7 +34,7 @@ class TestCli:
             action for action in parser._actions if hasattr(action, "choices") and action.choices
         )
         assert {"doctor", "selftest", "preview-ax", "preview-ui"} <= set(sub.choices)
-        assert {"serve", "worker"} <= set(sub.choices)
+        assert {"serve", "worker", "calibrate"} <= set(sub.choices)
 
     def test_doctor_passes_on_this_host(self, cfg, capsys):
         assert cli.main(["doctor"]) == 0
@@ -276,3 +276,82 @@ class TestPackaging:
                 continue
             if path.suffix in (".py", ".sh", ".yml", ".yaml", ".toml", ".json", ".md", ".html", ".css", ".js"):
                 assert not suspicious.search(path.read_text(errors="ignore")), path
+
+
+class TestCalibrate:
+    """The floor-calibration harness. Its job is to measure, and to refuse to
+    invent a number it cannot derive."""
+
+    def test_it_measures_both_distributions_and_confirms_the_search_floor(self, cfg, capsys):
+        assert cli.main(["calibrate"]) == 0
+        out = capsys.readouterr().out
+        assert "query -> claim" in out
+        assert "on-topic" in out and "off-topic" in out
+        assert "same topic" in out and "cross topic" in out
+        assert "search_similarity_floor" in out
+        # The shipped 0.18 is confirmed by measurement, not asserted.
+        assert "shipped search floor" in out
+        assert "confirmed" in out
+
+    def test_it_reports_every_proposed_link_for_judgement(self, cfg, capsys):
+        cli.main(["calibrate"])
+        out = capsys.readouterr().out
+        assert "every link the classifier proposed" in out
+        assert "judgement call about your own sources, not a statistic" in out
+        # The measured false positive is visibly excluded by the shipped floor.
+        assert "✂" in out
+        assert "warehouse" in out and "renewal" in out
+
+    def test_it_names_the_active_embedder_and_extractor(self, cfg, capsys):
+        cli.main(["calibrate"])
+        out = capsys.readouterr().out
+        assert "deterministic_v1" in out
+        assert "heuristic-v1" in out
+        assert "@ 256d" in out
+
+    def test_it_measures_against_a_bare_scale(self, cfg, capsys):
+        """The floors being calibrated must not bound their own measurement."""
+        import inspect
+
+        source = inspect.getsource(cli.cmd_calibrate)
+        assert 'BRAIN_SEARCH_FLOOR="0"' in source
+        assert 'BRAIN_LINK_FLOOR="0"' in source
+
+    def test_no_command_leaks_its_scratch_environment(self, cfg, capsys):
+        """A scratch data dir or a pinned floor must not outlive the command."""
+        import os
+
+        from app import config as config_module
+
+        config_module.reload_settings()
+        before = (
+            os.environ.get("BRAIN_SEARCH_FLOOR"),
+            os.environ.get("BRAIN_LINK_FLOOR"),
+            str(config_module.settings().data_dir),
+            config_module.settings().search_similarity_floor,
+        )
+        for command in (["calibrate"], ["preview-ax"], ["selftest"]):
+            cli.main(command)
+            capsys.readouterr()
+            assert (
+                os.environ.get("BRAIN_SEARCH_FLOOR"),
+                os.environ.get("BRAIN_LINK_FLOOR"),
+                str(config_module.settings().data_dir),
+                config_module.settings().search_similarity_floor,
+            ) == before, command
+
+    def test_it_accepts_a_custom_corpus(self, cfg):
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["calibrate", "--source", "a=https://x/1", "--source", "b=https://y/2",
+             "--query", "a=something"]
+        )
+        assert args.source == ["a=https://x/1", "b=https://y/2"]
+        assert args.query == ["a=something"]
+
+    def test_it_leaves_no_data_behind(self, cfg, capsys):
+        before = sorted(p.name for p in cfg.data_dir.glob("*")) if cfg.data_dir.exists() else []
+        cli.main(["calibrate"])
+        capsys.readouterr()
+        after = sorted(p.name for p in cfg.data_dir.glob("*")) if cfg.data_dir.exists() else []
+        assert after == before

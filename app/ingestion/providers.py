@@ -401,10 +401,13 @@ class HeuristicLinkClassifier:
         if not tokens_a or not tokens_b:
             return None
 
-        # Topical relevance was already decided by the vector lane, which only
-        # hands this classifier pairs above the cosine floor. The job here is
-        # narrower: reject pairs the hashed embedder put together by collision.
-        # Unrelated claims share no content words at all.
+        # This guard is weaker than it looks, and `app/cli.py calibrate` proved
+        # it: two claims from unrelated topics ("review warehouse pick paths
+        # before committing" / "never send renewal paper before the executive
+        # review") share enough generic words to pass it, and the asymmetric
+        # negation rule below then links them. The cosine floor is what
+        # actually stops that pair — so the floor and this guard share the job
+        # of screening topicality, and neither is sufficient alone.
         shared = tokens_a & tokens_b
         overlap = len(shared) / max(1, min(len(tokens_a), len(tokens_b)))
         if overlap < 0.2 and len(shared) < 3:
@@ -598,14 +601,21 @@ class DeterministicFetcher:
 
     def _synthesise(self, target, *, cfg: Settings) -> FetchedContent:
         seed = hashlib.blake2b(target.canonical_url.encode("utf-8"), digest_size=4).hexdigest()
-        topic = (target.identifier or target.canonical_url).strip("/").split("/")[-1] or "topic"
+        slug = (target.identifier or target.canonical_url).strip("/").split("/")[-1] or "topic"
+        topic = slug.replace("-", " ").replace("_", " ").strip() or "topic"
+        words = [word for word in topic.split() if len(word) > 2] or [topic]
         is_video = target.source_type == "youtube"
+        # The vocabulary is drawn from the URL's own slug rather than a shared
+        # template. Identical boilerplate across topics would make unrelated
+        # sources look similar, which silently corrupts any calibration run.
+        subject = " ".join(words)
+        head, *tail = words
         sentences = [
-            f"This source ({seed}) discusses {topic} in practical terms.",
-            f"We always start by measuring the baseline, because a 20% improvement on "
-            f"{topic} is meaningless without one.",
-            f"The approach fails when the team is smaller than five people, so do not "
-            f"apply it blindly to {topic}.",
+            f"This source ({seed}) is about {subject}, and treats it as a practical problem.",
+            f"We always review {subject} before committing, because {head} decisions are "
+            f"expensive to reverse once {tail[0] if tail else head} is in place.",
+            f"It breaks down when {subject} is handled by fewer than five people, so do not "
+            f"apply this {head} approach to a smaller team.",
         ]
         if is_video:
             cues = [
