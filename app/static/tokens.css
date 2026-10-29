@@ -1,0 +1,176 @@
+/* brain — the token layer.
+   MASTER_PLAN.md §2, implemented exactly as written. No value here was chosen
+   by the build: every literal is quoted from §2.1, and every semantic is the
+   reference §2.2 assigns to it.
+
+   Two layers, and the separation is the point:
+     · PRIMITIVES hold values. They are the only place a literal may appear.
+     · SEMANTICS hold references. A rule elsewhere in the app names a semantic,
+       never a primitive and never a literal.
+
+   A rule that reaches past this file for a colour, a space, a radius or a
+   duration is a bug (§0 rule 1, §14.1, §14.2).
+
+   The numeric primitives are written unitless in §2.1 (`--space-1 4`). They
+   carry their unit here so a rule can use them directly; the number is
+   untouched. Unitless ones — weights, line-heights — stay unitless because CSS
+   requires that of them.
+
+   NOT YET LOADED BY THE APP. `app.css` declares five of these names with other
+   values, so linking both into one document would silently recolour the running
+   control plane. This file is layer 1 of the redesign and is wired in when the
+   new surface replaces the old one. */
+
+:root {
+  /* ======================================================================
+     2.1 PRIMITIVES — the only literals in the system
+     ====================================================================== */
+
+  /* ---- colour ---- */
+  --grey-100: #f5f5f5;
+  --grey-150: #f0f0f0;
+  --grey-200: #d9d9d9;
+  --white: #ffffff;
+  --ink-900: #343a40;
+  --blue-600: #118ab2;
+  --blue-200: #a2d2ff;
+  --amber-100: #fbeec9;
+  --amber-700: #7a5500;
+  --green-100: #d9f2e4;
+  --green-700: #14663f;
+  --red-100: #fbe4e1;
+  --red-600: #b3372b;
+  /* §2.1 declares this; §2.2 assigns it to nothing. Held for the hover and
+     active states of the destructive variants in §3.3. */
+  --red-700: #8a2a22;
+
+  /* ---- space ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* ---- radius ---- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 24px;
+  --radius-full: 999px;
+
+  /* ---- border ---- */
+  --border-width: 1px;
+
+  /* ---- type ---- */
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 15px;
+  --text-code: 13px;
+  --text-read: 16px;
+  --text-lead: 19px;
+  --text-title: 20px;
+  --text-stat: 22px;
+  --text-display: 30px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+  --leading-read: 1.65;
+
+  /* ---- motion ---- */
+  --duration-fast: 120ms;
+  --duration-base: 160ms;
+  --duration-slow: 280ms;
+  --ease-standard: cubic-bezier(.2, 0, .2, 1);
+
+  /* ---- dimension ---- */
+  --sidebar-width: 240px;
+  --content-max: 880px;
+  --read-max: 680px;
+  --nav-item-height: 34px;
+  --card-height: 64px;
+  --icon-size: 16px;
+  --slot-size: 20px;
+  --switch-w: 36px;
+  --switch-h: 21px;
+  --meter-h: 4px;
+
+  /* ======================================================================
+     2.2 SEMANTICS — references only, never a literal
+
+     Opacities use `color-mix(in srgb, var(--ink-900) N%, transparent)`, as
+     §2.2 requires. That yields a translucent ink which composites against
+     whatever sits behind it, so one token reads correctly on the sidebar, the
+     canvas and a card without three variants.
+     ====================================================================== */
+
+  /* ---- surfaces ---- */
+  --bg-base: var(--grey-200);       /* sidebar only */
+  --bg-canvas: var(--grey-150);     /* everything right of the sidebar */
+  --bg-card: var(--white);          /* cards sitting on the canvas */
+  --bg-code: var(--grey-150);       /* code blocks and read-only fields */
+  --bg-hover: var(--grey-100);      /* hover on nav items */
+  --bg-selected: var(--white);      /* current page in the nav */
+  --bg-field: var(--white);         /* inputs */
+  --bg-overlay: color-mix(in srgb, var(--ink-900) 32%, transparent); /* modal scrim */
+
+  /* ---- text ---- */
+  --text-primary: var(--ink-900);   /* titles, values, menu paths */
+  --text-secondary: color-mix(in srgb, var(--ink-900) 62%, transparent); /* every explanatory sentence */
+  --text-muted: color-mix(in srgb, var(--ink-900) 45%, transparent);     /* labels, metadata, placeholders ONLY */
+
+  /* ---- borders ----
+     `--border-subtle` is decorative and §2.2 exempts it from 3:1.
+     `--border-control` is annotated "MUST pass 3:1" in §2.2 — see OPEN-6 in
+     MASTER_PLAN.md §13: at 16% it measures 1.32:1, so the plan's value and the
+     plan's rule disagree. The value is kept as specified until that is ruled
+     on; nothing here was adjusted by the build. */
+  --border-subtle: color-mix(in srgb, var(--ink-900) 9%, transparent);
+  --border-control: color-mix(in srgb, var(--ink-900) 16%, transparent);
+
+  /* ---- icons ---- */
+  --icon-default: var(--ink-900);
+  --icon-muted: color-mix(in srgb, var(--ink-900) 55%, transparent);
+
+  /* ---- accent ---- */
+  --accent: var(--blue-600);        /* primary actions, focus ring, meters */
+  --accent-soft: var(--blue-200);   /* avatars, secondary fills */
+  --focus-ring: var(--blue-600);
+
+  /* ---- status ----
+     Three pills and only three (§3.8). Red is never a pill. */
+  --status-active-bg: var(--green-100);
+  --status-active-text: var(--green-700);
+  --status-pending-bg: var(--amber-100);
+  --status-pending-text: var(--amber-700);
+
+  /* ---- destructive ---- */
+  --danger: var(--red-600);
+  --danger-soft: var(--red-100);
+
+  /* ---- controls ---- */
+  --switch-off: color-mix(in srgb, var(--ink-900) 22%, transparent);
+  --meter-track: color-mix(in srgb, var(--ink-900) 10%, transparent);
+}
+
+/* ========================================================================
+   2.3 THEMES
+
+   Light is the set above. Dark and sunset redefine the SEMANTIC layer only —
+   primitives never change — and §2.3 closes with: "dark and sunset palettes are
+   not yet specified. Do not invent them."
+
+   So they are not written here. `OPEN-1` in §13 is the gate, and this
+   repository already ships two dark palettes (`dark`, `warm_sunset`) built on a
+   different accent, which is the candidate answer put to the founder.
+
+   One consequence to keep in mind when they land: `users.theme_mode` in
+   control.db persists `'light' | 'dark' | 'warm_sunset'`, while this plan names
+   the third theme `sunset`. Renaming it is a data migration, not a rename.
+   ======================================================================== */

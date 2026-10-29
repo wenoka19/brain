@@ -635,6 +635,11 @@ async def preview(request: Request) -> Response:
 ROUTES = [
     Route("/", _static("index.html", "text/html; charset=utf-8"), methods=["GET"]),
     Route("/app.css", _static("app.css", "text/css; charset=utf-8"), methods=["GET"]),
+    # Layer 1 of the redesign (MASTER_PLAN.md §2). Served but not yet linked by
+    # `index.html`: it declares five token names that `app.css` also declares
+    # with other values, so loading both into one document would recolour the
+    # running control plane.
+    Route("/tokens.css", _static("tokens.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/app.js", _static("app.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/consent.js", _static("consent.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/preview", preview, methods=["GET"]),

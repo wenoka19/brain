@@ -1150,6 +1150,12 @@ A fixed bottom composer adds `env(safe-area-inset-bottom)` to its own padding.
 | OPEN-3 | Does Home keep a thread history in the sidebar, or does each thread resolve into its source? | §7.2 |
 | OPEN-4 | Plan limits — the numbers in §7.10 are placeholders | Activity, billing |
 | OPEN-5 | Audio retention is stated as 30 days on the transcript page; confirm | legal copy |
+| **OPEN-6** | **§2.2's values cannot satisfy §14.4's criterion.** Measured in Chromium against the plan's own palette: `--border-control` at ink 16% gives **1.33:1** on a card while §2.2 annotates it *"MUST pass 3:1"*; `--text-secondary` at 62% gives **3.54:1** and `--text-muted` at 45% gives **2.36:1** against §14.4's 4.5:1; `--icon-muted` at 55% gives **2.75:1** against 3:1; and `--accent` `#118ab2` gives **3.96:1** both as text on white and as white on a filled primary button. Minimum passing values: border-control 56%, the text greys 77%, icon-muted 59%, accent darkened 7% in lightness to `#1080a6`. The two cheap ones are visually imperceptible; raising the border and the greys visibly changes the captures | every frame — the palette is layer 1 |
+
+`OPEN-6` is **not** a licence to adjust the palette. `app/static/tokens.css`
+implements §2 exactly as written, contradiction included, and
+`tests/test_redesign_tokens.py` records the measurements so the shortfall
+cannot be forgotten or drift silently.
 
 ---
 
@@ -1185,13 +1191,13 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 
 | § | Route | Frame | Status | img | Note |
 |---|---|---|---|---|---|
-| 7.1 | `/` | Home — empty state | not-built | — | Shipped app opens on `Everything` (card list), no greeting/typewriter frame |
-| 7.2 | `/` | Home — thread state | not-built | — | Shipped ingestion is a job stepper in a pane, not a conversation thread |
-| 7.3 | `/sources/:id` | Source detail | partial | — | Inspector pane shows a source's claims; no 6-step work block, no route |
-| 7.4 | `/library/transcripts` | Transcripts list | not-built | — | `source_content.full_text` exists; never surfaced as a transcript |
-| 7.5 | `/transcripts/:id` | Transcript reader | not-built | — | No timestamp-gutter reader, no in-page search, no export |
-| 7.6 | `/library/summaries`, `/summaries/:id` | Summaries | not-built | — | No `summary` entity in the engine at all |
-| 7.7 | `/library/sources` | Sources list | partial | — | Sources appear inside `Everything`; no type-first meta, no yield column |
+| 7.1 | `/` | Home — empty state | not-built | **✓** | Shipped app opens on `Everything` (card list), no greeting/typewriter frame |
+| 7.2 | `/` | Home — thread state | not-built | **✓** | Shipped ingestion is a job stepper in a pane, not a conversation thread |
+| 7.3 | `/sources/:id` | Source detail | partial | **✓ ×3** | Inspector pane shows a source's claims; no 6-step work block, no route |
+| 7.4 | `/library/transcripts` | Transcripts list | not-built | **✓** | `source_content.full_text` exists; never surfaced as a transcript |
+| 7.5 | `/transcripts/:id` | Transcript reader | not-built | **✓** | No timestamp-gutter reader, no in-page search, no export |
+| 7.6 | `/library/summaries`, `/summaries/:id` | Summaries | not-built | **✓ ×2** | No `summary` entity in the engine at all |
+| 7.7 | `/library/sources` | Sources list | partial | **✓** | Sources appear inside `Everything`; no type-first meta, no yield column |
 | 7.8 | `/rules` | Rules | partial | — | `Library` shows epistemic claims — richer than a rule, different card |
 | 7.9 | `/skills` | My skills | partial | — | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
 | 7.10 | `/activity` | Activity | partial | — | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |
@@ -1199,6 +1205,186 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 | 7.12 | `/archive` | Archive | partial | — | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
 | 7.13 | `/profile` | Profile | shipped-divergent | — | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
 | 7.14 | `/signin` | Sign in | partial | — | Email-keyed login exists in `/api/login`; no dedicated frame |
+
+## 18. REFERENCE IMAGES — WHAT EACH CAPTURE ADDS
+
+The prose is law; a capture resolves what the prose leaves open. This section
+records what was actually seen, so an implementation months from now does not
+re-derive it. Batch 1 arrived 29 October 2026.
+
+### 18.0 The state switcher is not product
+
+Every capture carries a small control bottom-right — `Processing | Done`,
+`Empty | Thread | Replay`. It is the founder's capture harness for stepping
+through design states. **It is never built into the product.** (This repository
+already has the same idea on its `/preview` route, with layout and state
+pickers — that is where an equivalent belongs, not in the app shell.)
+
+### 18.1 The sidebar, seen in all five captures
+
+* Brand: a filled accent rounded-square followed by `Brain` in semibold. Both
+  inside the §3.1 20px slot, which is what puts the mark on the same vertical
+  axis as every nav icon and the avatar below.
+* Order confirmed: `Home` · **Library** → Transcripts, Summaries, Sources ·
+  **Knowledge** → Rules, Skills · **System** → Activity, Connections, Archive.
+  Then `margin-top:auto`, a divider, and the `E` avatar + `Profile`.
+* Section labels (`Library`, `Knowledge`, `System`) are muted, small, iconless,
+  and indented to the same left edge as the nav labels — not as the icons.
+* The current item is a **white rounded rectangle spanning the sidebar's inner
+  width**, label and icon both at full strength.
+* At rest the label reads close to `--text-primary`, *not* muted — only the
+  icon is `--icon-muted`. (The shipped `app.css` mutes the whole row; that is a
+  behaviour the redesign changes.)
+* Icons seen: house, document, stacked lines, link, framed list, star, pulse,
+  plug, archive box, avatar circle. Ten, against the 13 inline symbols the
+  current `index.html` carries — the symbol set is replaced, not extended.
+* **No counts appear in batch 1**, because the captured library is empty. §5's
+  rule that counts live in the nav is untested by these images.
+
+### 18.2 §7.1 Home, empty state
+
+* The pitch line is the §1 promise verbatim — *"Paste a link or drop a file.
+  Brain reads it, keeps what matters, and hands it to every AI you work with."*
+  — wrapping to two lines, not the shortened `Paste a link or drop a file…`.
+* The omnibar is a tall full-radius pill: `+` on the left, placeholder, mic on
+  the right. Both icons muted. No `Ctrl K` hint inside it, as §4.3 requires.
+* The three action links sit below it with their icons aligned to the omnibar's
+  `+`, confirming §7.1's `padding-left --space-5`.
+* The greeting rendered as `Good evening, Expedit.` — the hour branch works.
+
+### 18.3 §7.2 Home, thread state
+
+* The source chip is a white card carrying the thumbnail, the title and
+  `YouTube · 42:18`, right-aligned above the user's first bubble.
+* **The work block collapses here**, to a single row:
+  `✓ Processed in 2m 14s · 6 steps` with a chevron on the right, the duration
+  and the step count emphasised. This is §4.4's collapse-on-completion.
+* Brain's column is visibly narrower than the user's bubbles — §4.5's 68ch
+  against 84%.
+* The result table is a card of three rows: `Summary / Ready` green,
+  `3 rules / Added` green, `2 skills / Need review` amber. Each row carries the
+  type icon on the left.
+* `Open the source` is primary, `Review the skills` is secondary, side by side.
+* The two suggestion chips are full-radius outlined pills, not buttons.
+* The composer is the omnibar again, placeholder `Reply to Brain…`, pinned
+  below the thread.
+
+### 18.4 §7.3 Source detail — and the contradiction §4.4 hides
+
+The same page was captured in both states, which settles something the prose
+left ambiguous.
+
+* **Processing**: header pill amber `● Processing`; the work block titled
+  `Working on it`; three steps checked with their results, one step showing a
+  **ring spinner**, two still grey dots with muted labels and no result.
+* **Done**: header pill green `● In memory`; the block titled `Done in 2m 14s`
+  with a grey `● 6 steps` pill on its right; all six checked, each with its
+  result.
+* **So the block does NOT collapse on this page.** §4.4 says it collapses on
+  completion; §7.3's own layout shows it expanded with a `Done in 2m 14s`
+  header. The captures confirm the two surfaces differ: **collapse on Home,
+  stay expanded on Source detail.** Treat §4.4's collapse rule as scoped to the
+  thread.
+* A finished step's result sits **immediately to the right of its name**, muted,
+  not flushed to the card's right edge. The running step reveals nothing.
+* The hint line sits *below* the card, muted:
+  *"You can leave this page. Brain keeps working and Activity will show when it
+  lands."*
+* `What came out of it` is a section heading with `Open transcript` as a
+  secondary button on its right.
+* The Summary card shows prose with no visible controls at rest — §4.1's
+  hover-only actions.
+* The Rules card carries a green `● 3 added` pill and one row per rule, the
+  rule left and its **timestamp right-aligned** (`14:02`, `21:47`, `33:10`).
+* The Skills card carries an amber `● 2 need review` pill and one row per skill,
+  each with its own **primary `Approve` button** on the right.
+
+> **Q-1 — RESOLVED by batch 2, no founder decision needed.** The §7.3 meta
+> reads `YouTube · 42:18 · added just now` rather than the plan's
+> `Link · youtube.com · …`, which looked like it broke §7.7's *"never a platform
+> name as the type"*. The Sources capture settles it: on **`/library/sources`
+> only**, the meta begins with `Link` / `Image` / `Document`. Everywhere else —
+> the source detail, the transcript, the summary, the Transcripts list — it
+> begins with the platform or the format (`YouTube`, `Recording`, `PDF`). §7.7's
+> rule is scoped to its own page, and the two captures agree.
+
+### 18.5 Batch 2 — Transcripts, Summaries, Sources (29 October 2026)
+
+**The sidebar now carries counts**, which batch 1 could not show: `Transcripts
+24`, `Summaries 24`, `Sources 31`, `Rules 47`, `Skills 9`. `Home`, `Activity`,
+`Connections` and `Archive` carry none. The counts are right-aligned, muted and
+small, as §3.2 specifies. `Skills 9` renders as a **plain count**, so the amber
+alert variant is reserved for a queue that actually has something in it.
+
+#### §7.4 Transcripts list
+
+* Title at display size, then one toolbar row: a search field that **carries the
+  `Ctrl K` chip inside its right end**, then a `Newest` sort button.
+  This does not break §3.10's *"never shown inside the control the shortcut
+  focuses"* — `Ctrl K` focuses the omnibar, not this field.
+* Date groups `Today` / `Yesterday` / `October 26`, muted, above their cards.
+* Each card opens with a **36px rounded tile holding the type glyph** — a video
+  frame, a microphone, a document — which §4.1 calls the type icon.
+* Meta is platform-or-format first: `YouTube · 42:18 · 8,412 words`,
+  `Recording · 27:41 · 5,109 words`, `PDF · 18 pages · 6,870 words`.
+* One card carries an amber `● Processing` pill; the rest carry none.
+* No actions are visible at rest, confirming §4.1's hover-only rule.
+
+#### §7.5 Transcript reader
+
+* Meta: `YouTube · 42:18 · 8,412 words · 2 speakers · added today`.
+* The derived strip is **four outlined chips with icons**, not plain links:
+  `Summary`, `3 rules`, `2 skills`, `Original video`.
+* The action bar is search (`Search in this transcript`, flex-1) + `Copy` +
+  `Download ▾`, all on one row.
+* The body is the §7.5 grid: timestamps in the left gutter, the turn's text at
+  reading size on the right, and the speaker name above the text **only when the
+  speaker changes** — `Host` at 00:00, nothing at 00:42, `Guest` at 01:27,
+  `Host` at 01:34. The capture demonstrates the rule exactly.
+
+#### §7.6 Summary detail
+
+* Meta: `YouTube · 42:18 of video · 2 min read · today`.
+* The instruction sits in a bordered note box labelled **`Summarized with your
+  instruction`** — not §7.3's `Your instruction` — and the instruction itself is
+  rendered in `--text-secondary`.
+* One row carries the **`Brief | Full` segmented control on the left** (active
+  segment is an accent-filled pill with white text, inactive is transparent) and
+  **`Copy` + `Download ▾` on the right**.
+* The gist is a single paragraph at lead size with generous leading, visually
+  larger than the key points.
+* `Key points` is a muted label; each point is text on the left with its
+  **timestamp right-aligned**, rows divided by hairlines.
+* The same four derived chips close the page, below a divider.
+
+#### §7.7 Sources list
+
+* Toolbar: search + `Ctrl K` + `Newest` + the primary **`+ Teach Brain`**
+  button, as §7.7 requires.
+* **The type leads the meta, and the yield closes it in green**:
+  `Link · youtube.com · 42:18 · 3 rules · 2 skills`,
+  `Image · 1512 × 982 · 1 rule`,
+  `Document · PDF · 18 pages · 5 rules`.
+* A source that produced nothing shows nothing green — the two that carry
+  `● Processing` and `● Needs you` have no yield at all, which is precisely
+  §7.7's *"a source with nothing green produced nothing"*.
+* `Needs you` renders as an amber pill like `Processing`; the **`Fix this`**
+  button §7.7 describes is not visible at rest, so it belongs with the
+  hover actions.
+
+> **CONFLICT R-1 vs the capture — needs the founder.** The transcript capture
+> shows `2 speakers` in the meta line **and** `Host` / `Guest` labels marking
+> every speaker change in the body, while override `R-1` drops speakers at the
+> founder's instruction. The design does not merely *mention* speakers: it is
+> **structured by them** — the body is a sequence of attributed turns, and
+> removing attribution changes what that grid renders. Nothing in the ingestion
+> pipeline records a speaker per cue (`STACK_AUDIT.md` C5), so this is a real
+> fork, not a wording choice.
+
+### 18.6 Still to arrive
+
+Rules, Skills, Activity, Connections, Archive, Profile, Sign in. Frames the
+founder could not capture are built from §3 and §4 as written.
 
 ## 17. OVERRIDES TO THE PLAN BODY
 
