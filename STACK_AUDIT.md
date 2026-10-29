@@ -247,3 +247,41 @@ sign with deliberately short throwaway keys. Not a product finding.
 
 `.claude/setup.sh` does **not** install `mcp` or `yt-dlp` (§1.1) — both are
 needed before the suite can run in a fresh Cloud VM.
+
+
+---
+
+## 11. CORRECTIONS TO THIS AUDIT — 29 October 2026
+
+Twelve of the claims above were put to **two independent reviewers each**, told
+to refute rather than confirm, one reading the Python side and one the
+front-end and packaging. Eleven came back contested. Everything below was then
+**re-verified by hand**, because a reviewer is a claim too.
+
+### 11.1 Where this audit was wrong
+
+| Claim | Verdict | What is actually true |
+|---|---|---|
+| **C1** — "no server-side HTML templating anywhere; the UI is entirely client-rendered" | **WRONG** | `app/auth.py:438` holds a complete `CONSENT_PAGE` HTML document with format-string placeholders, rendered by `consent_page()` and returned as an **`HTMLResponse`** at `app/auth.py:624`. The OAuth consent screen is a server-rendered product page that `app.js` never touches — and it already personalises itself from the session cookie before the first byte. §7 of this audit used "templating is not server-side" to argue §11's i18n is unreachable; **that premise was false**, and the i18n row should be re-argued on its merits |
+| **C11** — "hex literals appear only inside `:root` in `app.css`" | **WRONG by one** | There is one: `#fff`. Small, but it means the plan's §14.1 token lint fails on the shipped stylesheet today, which this audit reported as already passing |
+| **C3** — "`mcp` and `yt-dlp` are declared only in the Dockerfile" | stale, not wrong | True when written; fixed in `4d33309` while the review was running. The reviewers read the corrected tree |
+
+### 11.2 Four defects this audit missed, each re-verified by hand
+
+| # | Finding | Evidence |
+|---|---|---|
+| 1 | **The MCP `fetch` tool returns archived items.** §9.2 says *"Never exposed: anything archived … enforced server-side, not by prompt"* and §7.12 promises *"nothing here is reachable by your AI"*. `tenant_db.get_claim` is `SELECT * FROM epistemic_claims WHERE id = ?` with no status filter, and `op_fetch` returns whatever it gets | Proven at runtime: archive a claim, fetch it by id, and it comes back with `status = 'archived'` |
+| 2 | **Editing a skill promotes it.** `upsert_skill` hard-sets `status = 'active'` on every update (`app/db/tenant.py:801`). The §9.2 row-5 review gate — which §10.10 calls a *security control*, not a nicety — stays bypassable after the enum is widened, unless that line changes with it | `app/db/tenant.py:801` |
+| 3 | **Nothing drains the ingestion queue in either shipped deployment.** The worker is a separate role (`entrypoint.sh:88`), and both `railway.json` and `fly.toml` set `BRAIN_ROLE=web`. Jobs advance only when a request calls `run_pending_jobs_sync` (`app/webapi.py:406`), i.e. while a browser is polling. So §7.2's *"leaving the page does not cancel anything"* and §7.3's *"Brain keeps working"* are **copy the deployment cannot honour** | `entrypoint.sh:13,88` · `railway.json:20` · `fly.toml:14` |
+| 4 | **No `archived_at` exists on anything.** §7.12 orders by archive date and attributes each row to `you` or `Brain` — it calls that attribution the point of the page — and neither column exists on `sources`, `epistemic_claims` or `skills` | `app/db/tenant.py` schema |
+
+### 11.3 What this changes
+
+Nothing in §9.1's rulings: they were design decisions, and none rested on a
+claim that moved. §9.2's list grows — rows 1 and 4 above are new work, and row
+3 is a deployment change rather than code.
+
+**Findings 1 and 2 are not redesign scope.** They are defects in the shipped
+product, they are both about the boundary between what the person archived or
+has not approved and what an agent can reach, and they are reported rather than
+fixed, pending the founder's word.

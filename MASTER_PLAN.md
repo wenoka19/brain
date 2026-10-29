@@ -1219,7 +1219,7 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 
 | § | Route | Frame | Status | img | Note |
 |---|---|---|---|---|---|
-| 7.1 | `/` | Home — empty state | not-built | **✓** | Shipped app opens on `Everything` (card list), no greeting/typewriter frame |
+| 7.1 | `/` | Home — empty state | **built** | ✓ | Shipped app opens on `Everything` (card list), no greeting/typewriter frame |
 | 7.2 | `/` | Home — thread state | not-built | **✓** | Shipped ingestion is a job stepper in a pane, not a conversation thread |
 | 7.3 | `/sources/:id` | Source detail | partial | **✓ ×3** | Inspector pane shows a source's claims; no 6-step work block, no route |
 | 7.4 | `/library/transcripts` | Transcripts list | not-built | **✓** | `source_content.full_text` exists; never surfaced as a transcript |
@@ -1647,6 +1647,26 @@ never disagrees with what is being built.
 | `R-12` | §2.2, §3.3, §3.7 | `--on-accent` and `--on-danger` added, closing `G-1`. Optional while only light existed, where both are white; the dark theme makes them load bearing, because its lifted accent cannot carry a white label | 29 Oct 2026 |
 
 Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
+
+## 19. WHERE THE BUILD IS
+
+| Layer | §  | State |
+|---|---|---|
+| 1 — tokens | §2 | **built**, two themes, `tokens.css`, 122 tests |
+| 2 — atoms | §3 | **built**, all thirteen, `atoms.css` |
+| 3 — molecules | §4 | **built**, ten plus three the frames need, `molecules.css` |
+| 4 — template and router | §5, §12 | **built**, fourteen routes, `shell.html` + `frames.js` + `frames.css` |
+| 4 — frames | §7 | §7.1 built; the other thirteen hold their route and say so |
+
+The surface is mounted at **`/next`** while the shipped control plane still
+owns `/`. It is gated exactly like `/preview`: on in tests, on with
+`BRAIN_NEXT_UI=1`, off otherwise. At cutover `shell.html`'s `data-base`
+becomes `""` and `/` changes hands.
+
+> **`R-13` — the Home stack is 720, not the ~900 the capture shows.** §7.1
+> writes *"inner stack `max-width 720`"* and §0 rule 3 gives it to the
+> document. The pitch wraps identically either way, because it is capped at
+> 56ch; only the omnibar is narrower. Say the word and it becomes 900.
 
 ## 16. WORKING PROTOCOL FOR THIS REPOSITORY
 

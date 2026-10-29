@@ -610,6 +610,41 @@ def _static(filename: str, media_type: str) -> Callable:
     return serve
 
 
+def next_ui_enabled(cfg: Settings | None = None) -> bool:
+    """The redesign is dev-gated until it replaces the shipped control plane.
+
+    Same shape as the preview gate: on in tests, on with an explicit
+    environment variable, off everywhere else.
+    """
+    cfg = cfg or settings()
+    return cfg.is_test or os.environ.get("BRAIN_NEXT_UI") == "1"
+
+
+async def next_ui(request: Request) -> Response:
+    """Serve the shell for every route beneath the prefix.
+
+    A pushState router owns the path, so `/next/rules` must return the shell
+    rather than a 404 — otherwise a deep link works until someone reloads it.
+    """
+    if not next_ui_enabled():
+        return _json(
+            {
+                "ok": False,
+                "reason": "next_ui_disabled",
+                "message": "Set BRAIN_NEXT_UI=1 to serve the redesigned surface.",
+            },
+            404,
+        )
+    path = STATIC_DIR / "shell.html"
+    if not path.is_file():
+        return _json({"ok": False, "reason": "missing_asset", "message": "shell.html"}, 404)
+    return FileResponse(
+        path,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def preview_enabled(cfg: Settings | None = None) -> bool:
     cfg = cfg or settings()
     return cfg.is_test or os.environ.get("BRAIN_PREVIEW") == "1"
@@ -642,6 +677,33 @@ ROUTES = [
     Route("/tokens.css", _static("tokens.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/atoms.css", _static("atoms.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/molecules.css", _static("molecules.css", "text/css; charset=utf-8"), methods=["GET"]),
+    Route("/frames.css", _static("frames.css", "text/css; charset=utf-8"), methods=["GET"]),
+    Route("/frames.js", _static("frames.js", "application/javascript; charset=utf-8"), methods=["GET"]),
+    # The redesigned surface, mounted under a prefix while the shipped control
+    # plane still owns `/`. Each of §5's fourteen routes returns the same
+    # shell, because a pushState router owns the path and a deep link has to
+    # survive a reload.
+    #
+    # They are declared one by one rather than as `{path:path}`. A catch-all
+    # would trip the BOLA guard in `tests/test_phase6_security_and_live_providers.py`
+    # — correctly, since a path parameter is the shape of a traversal bug — and
+    # it would also make every typo render a page instead of a 404. Server and
+    # router now agree on exactly which URLs exist.
+    Route("/next", next_ui, methods=["GET"]),
+    Route("/next/", next_ui, methods=["GET"]),
+    Route("/next/library/transcripts", next_ui, methods=["GET"]),
+    Route("/next/library/summaries", next_ui, methods=["GET"]),
+    Route("/next/library/sources", next_ui, methods=["GET"]),
+    Route("/next/transcripts/{id}", next_ui, methods=["GET"]),
+    Route("/next/summaries/{id}", next_ui, methods=["GET"]),
+    Route("/next/sources/{id}", next_ui, methods=["GET"]),
+    Route("/next/rules", next_ui, methods=["GET"]),
+    Route("/next/skills", next_ui, methods=["GET"]),
+    Route("/next/activity", next_ui, methods=["GET"]),
+    Route("/next/connections", next_ui, methods=["GET"]),
+    Route("/next/archive", next_ui, methods=["GET"]),
+    Route("/next/profile", next_ui, methods=["GET"]),
+    Route("/next/signin", next_ui, methods=["GET"]),
     Route("/app.js", _static("app.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/consent.js", _static("consent.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/preview", preview, methods=["GET"]),

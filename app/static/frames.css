@@ -1,0 +1,321 @@
+/* brain — the frames.
+   MASTER_PLAN.md §5 (the template), §12 (responsive), and one frame per §7.
+   Layer 4 of 4: it may compose tokens, atoms and molecules, and declare
+   nothing of its own that those three already name.
+
+   §6 rule 4 sets the vertical rhythm this file obeys throughout:
+     --space-8 between sections
+     --space-1 between a section title and its note
+     --space-4 between the note and its content
+*/
+
+/* The icon sprite. `width=0 height=0` is not enough: an inline <svg> still
+   generates a line box, and that line box pushed the whole page down 21px and
+   broke §14.12's "no scroll on Home at 1512x982". Taken out of flow rather
+   than `display:none`, which is the form every browser resolves `<use>`
+   against. §1.1 forbids an inline style, so it lives here. */
+.sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* ======================================================================
+   §5 THE TEMPLATE
+
+   A 240px sidebar on `--bg-base`, and everything right of it on
+   `--bg-canvas`, scrolling independently.
+   ====================================================================== */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: 100vh;
+  min-height: 100svh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  border-right: var(--border-width) solid var(--border-subtle);
+  background: var(--bg-base);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  overflow-y: auto;
+  padding-top: calc(var(--space-3) + env(safe-area-inset-top));
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+/* The 20px accent square of §5. It is drawn, not an icon, so it never
+   inherits a stroke. */
+.brand-mark {
+  width: var(--slot-size);
+  height: var(--slot-size);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+}
+
+.brand-rule { margin: var(--space-2) var(--space-2) var(--space-3); }
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: var(--slot-size);
+  height: var(--slot-size);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+.sidebar-foot { margin-top: auto; }
+.sidebar-foot .divider { margin: var(--space-3) var(--space-2); }
+
+.content {
+  padding: var(--space-8);
+  padding-bottom: calc(var(--space-8) + env(safe-area-inset-bottom));
+  outline: none;
+}
+
+/* "inner max-width --content-max (880) centred" (§5). */
+.wrap {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+}
+
+/* "Reading surfaces (Transcript, Summary) use --read-max (680) instead." */
+.wrap[data-read] { max-width: var(--read-max); }
+
+/* §7.13 sets Profile to 720. */
+.wrap[data-narrow] { max-width: 720px; }
+
+/* The top bar does not exist above 720px. */
+.topbar { display: none; }
+.nav-scrim { display: none; }
+
+/* ======================================================================
+   Page furniture shared by every frame
+   ====================================================================== */
+.page-title {
+  margin: 0 0 var(--space-6);
+  font-size: var(--text-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+}
+
+/* §6 rule 4. A section is a titled block; its note sits one step below the
+   title, and its content four steps below the note. */
+.section + .section { margin-top: var(--space-8); }
+
+.section-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.section-note {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--text-secondary);
+}
+
+/* A toolbar: the search field takes the room, the controls keep their size
+   (§3.3's `flex: 0 0 auto` is what stops their labels wrapping). */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+}
+
+.search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.search .slot {
+  position: absolute;
+  left: var(--space-3);
+  color: var(--icon-muted);
+  pointer-events: none;
+}
+
+.search .input { padding-left: calc(var(--space-3) + var(--slot-size) + var(--space-2)); }
+
+/* The `Ctrl K` chip rides inside a list's own search field, which is not the
+   control that shortcut focuses (§3.10). */
+.search .kbd {
+  position: absolute;
+  right: var(--space-2);
+  pointer-events: none;
+}
+
+.search:has(.kbd) .input { padding-right: calc(var(--space-10) + var(--space-4)); }
+
+/* §6 rule 14: dates group lists. */
+.date-group + .date-group { margin-top: var(--space-6); }
+
+.date-label {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* §6 rule 12: an empty state is an invitation. It says what will appear here
+   and gives the button that makes it happen; it never says "no items". */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-10) 0;
+  max-width: 56ch;
+  color: var(--text-secondary);
+}
+
+/* ======================================================================
+   §7.1 HOME — empty state
+
+   "Content flex-centred, inner stack max-width 720, margin-top:-6vh (true
+   centring sits too low once the sidebar anchors the eye)."
+   ====================================================================== */
+.home {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: calc(100vh - var(--space-8) * 2);
+  min-height: calc(100svh - var(--space-8) * 2);
+}
+
+.home-stack {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+  margin-top: -6vh;
+}
+
+.home-greeting {
+  margin: 0;
+  font-size: var(--text-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+}
+
+.home-pitch {
+  margin: var(--space-3) 0 var(--space-6);
+  max-width: 56ch;
+  font-size: var(--text-lg);
+  color: var(--text-secondary);
+}
+
+/* "action links, padding-left --space-5, so they align with the omnibar
+   text" (§7.1). */
+.home-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding-left: var(--space-5);
+}
+
+/* The whole content area is a drop target (§7.1). */
+.content[data-dropping] .home-stack {
+  outline: 2px dashed var(--accent);
+  outline-offset: var(--space-5);
+  border-radius: var(--radius-lg);
+}
+
+/* ======================================================================
+   §12 RESPONSIVE
+   ====================================================================== */
+
+/* 960–1199: the meter grid becomes one column. */
+@media (max-width: 1199px) {
+  .meter-grid { grid-template-columns: 1fr; }
+}
+
+/* 720–959: the sidebar persists; log rows drop their connection and latency. */
+@media (max-width: 959px) {
+  .log-row [data-col="connection"],
+  .log-row [data-col="latency"] { display: none; }
+}
+
+/* < 720: the sidebar becomes a top bar with a menu button, content padding
+   drops to --space-4, and card actions are permanently visible because there
+   is no hover (handled in molecules.css). */
+@media (max-width: 719px) {
+  .shell { grid-template-columns: 1fr; }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    padding: var(--space-2) var(--space-4);
+    padding-top: calc(var(--space-2) + env(safe-area-inset-top));
+    border-bottom: var(--border-width) solid var(--border-subtle);
+    background: var(--bg-base);
+  }
+
+  .topbar .brand { padding: 0; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    width: var(--sidebar-width);
+    height: auto;
+    transform: translateX(-100%);
+    transition: transform var(--duration-base) var(--ease-standard);
+  }
+
+  .sidebar[data-open="true"] { transform: none; }
+
+  .sidebar > .brand,
+  .brand-rule { display: none; }
+
+  .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: var(--bg-overlay);
+  }
+
+  .nav-scrim[hidden] { display: none; }
+
+  .content { padding: var(--space-4); }
+
+  .home { min-height: calc(100svh - 120px); }
+  .home-stack { margin-top: 0; }
+  .home-greeting { font-size: var(--text-stat); }
+}
