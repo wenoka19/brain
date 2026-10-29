@@ -26,11 +26,26 @@ Supersedes BRAIN_SPEC.md.
 > implement a visual frame from memory of the prose alone. `§15` records which
 > images have arrived.
 >
+> **What this file is for, ruled by the founder on 29 October 2026.** The
+> product was finished; the **web app design** was what did not satisfy. This
+> plan was written with a second agent **that never saw this codebase**.
+>
+> So **this file supplies the web app design, and only that.** Everything in it
+> that is not design — the data model (§8), the backend contract (§9), the MCP
+> tool surface (§9.2) and the stack choices in §1.1 — was written without
+> knowledge of what already exists, and is a **proposal, not a requirement**.
+> The shipped engine, schema, 8 MCP tools, OAuth layer and security headers
+> stay. `STACK_AUDIT.md` §9.1 records how each conflict resolves.
+>
+> **Where the design cannot work on the shipped backend, the change it needs is
+> presented to the founder and validated before anything is modified or
+> removed.** Nothing is silently replaced. The running list is
+> `STACK_AUDIT.md` §9.2.
+>
 > **Relationship to `CLAUDE.md`.** `CLAUDE.md` remains the specification of the
-> engine, the security architecture and the MCP tool surface that is already
-> shipped. This file governs the **product surface**: routes, frames, tokens,
-> atoms, molecules, copy, i18n and the pipeline the person sees. Where the two
-> describe the same thing by different names, `STACK_AUDIT.md` is the mapping.
+> engine, the security architecture and the MCP tool surface, and it still
+> governs them. This file governs what the person **sees and does**: screens,
+> tokens, atoms, molecules, copy and interaction.
 
 ---
 
@@ -1183,3 +1198,11 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 5. **`CLAUDE.md` Rule 1 still governs**: user- and agent-facing touchpoints are
    co-designed, never assumed. This plan supplies most of those answers in prose;
    where it does not, stop and present options.
+6. **Design wins on design; the codebase wins on everything else.** A sentence
+   in this plan about a table, a tool name, a dependency or a header is a
+   proposal from an agent that could not see the code. A sentence about what the
+   person sees, reads, clicks or expects is law.
+7. **Backend changes are proposed, never taken.** When a frame cannot be built
+   honestly on what exists, add the row to `STACK_AUDIT.md` §9.2, present it,
+   and wait. Deleting or rewriting shipped behaviour to fit a frame is never the
+   build's call — including when the plan's own text appears to authorise it.

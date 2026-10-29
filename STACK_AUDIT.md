@@ -74,9 +74,11 @@ Shipped `app/static/app.css` has a **semantic-only, single-layer** token set wit
 | — | `--accent-conflict`, `--accent-conflict-quiet` | **The plan has no token for expert disagreement.** See §5 |
 | — | `--shadow-pane`, `--density`, `--font-scale` | shipped-only, driven by the `/preview` tuner |
 
-**Verdict: `CONFLICT D-4`.** Five token names collide with different values. This
-is not a merge; it is a migration with a visual-regression risk across 478 lines
-of CSS and 1,315 lines of JS that reference class names bound to them.
+**Verdict: `CONFLICT D-4`.** Five token names collide; three of them —
+`--bg-canvas`, `--text-primary`, `--accent` — carry materially different
+values, and `--accent` changes hue (indigo → teal-blue). This is not a merge;
+it is a migration with a visual-regression risk across 478 lines of CSS and
+the 1,315 lines of JS that render against those class names.
 
 ### 3.1 `OPEN-1` is already answered by the code
 
@@ -180,29 +182,62 @@ decision.** **GAP, gated on `D-1`.**
 
 ---
 
-## 9. DECISIONS REQUIRED (`D-1` … `D-9`)
+## 9. FOUNDER'S RULING — 29 OCTOBER 2026
 
-None of these is a judgement the build may make alone (`CLAUDE.md` §0 Rule 1).
+Recorded verbatim in substance, because it governs every row above.
 
-| id | Decision | Default recommendation |
+> The project was finished. The **web app design** was what the founder did not
+> like, so the redesign was started with a second agent — **an agent that never
+> saw this codebase.**
+>
+> So: **what `MASTER_PLAN.md` supplies is the web app design, and only that.**
+> Everything in it that is not design — the data model (§8), the backend
+> contract (§9), the MCP tool surface (§9.2), the stack choices in §1.1 — was
+> written without knowledge of what already exists. Those parts are
+> **proposals, not requirements.** The shipped engine, schema, MCP tools,
+> OAuth layer and security headers stay.
+>
+> Where the new design genuinely cannot work on the shipped backend, the change
+> it needs is **presented to the founder and validated before anything is
+> modified or removed.** Nothing is silently replaced.
+
+### 9.1 How that resolves the conflicts
+
+| id | Resolution | Reason |
 |---|---|---|
-| `D-1` | Server-rendered Jinja2 pages (14 routes) **or** keep the static SPA and add client routing | Keep the SPA shell, add real routes + a `history.pushState` router. It preserves the CSP, the `/preview` harness and every shipped test; it costs the "no flash of English" i18n guarantee |
-| `D-2` | Tailwind CDN (needs the CSP relaxed to allow `cdn.tailwindcss.com` and inline styles) **or** keep hand-written tokenised CSS | Keep the hand-written CSS. The plan's own prohibitions (no `@apply`, no arbitrary values, every value from a custom property) leave Tailwind doing almost nothing, and the CDN costs a third-party script in a CSP built to forbid exactly that |
-| `D-3` | Sidebar: plan's 240px `--bg-base` grey **or** shipped 220px flush canvas | Follow the plan — it is a deliberate, specified look |
-| `D-4` | Token migration: **(a)** add the plan's two layers under new names and alias the five colliding names, **(b)** replace wholesale and re-audit every rule, **(c)** keep shipped names and add only the missing scales | **(b)** if the plan's palette is the real target — the five collisions make (a) a trap that leaves two sources of truth |
-| `D-5` | `source.status`: shipped `active/archived/trash` vs plan `processing/ready/blocked/archived` | Merge: keep `trash` (the 30-day buffer the UI depends on) and add `processing`/`blocked` |
-| `D-6` | Is a **Rule** a new simpler entity, or a projection of the shipped **Epistemic Claim**? | A projection. Keep the claim as storage, render it as a rule; the grounded quote is the product's whole trust mechanism |
-| `D-7` | **Expert disagreement (`tension_links`) has no frame in the plan.** Drop the feature, or design its frame? | Design its frame. It is in `CLAUDE.md` §1.2, in the schema, in the icon set and in a locked Checkpoint-A envelope |
-| `D-8` | Key-in-URL (`?key=…`): adopt it, with §10.2's mitigations? | Adopt it — the founder's reasoning in §7.11 is sound and verified behaviour. It is additive: one more credential path into the same validation function |
-| `D-9` | MCP tool surface: rename to the plan's 9 tools, keep the shipped 8, or run both | Keep the shipped 8 as the contract and **add** what the plan needs (`get_summary`, `get_transcript`). Renaming breaks live clients, voids Checkpoint A and rewrites ~1,500 test lines for no capability gain |
+| `D-1` | **Keep the static SPA.** Build the plan's 14 screens as real URLs behind a `history.pushState` router in `app.js` | Jinja2 is a stack proposal, not design. The *screens, their names and Back working* are design and are honoured; how bytes reach the browser is not. Keeps the CSP, the `/preview` harness and every shipped test |
+| `D-2` | **Keep the hand-written tokenised CSS.** No Tailwind, no CDN | Stack proposal, written without knowing the app serves `script-src 'self'` and blocks CDN scripts by its own header. The plan's own prohibitions leave Tailwind nearly nothing to do. Every design *value* is implemented either way |
+| `D-3` | **Follow the plan** — 240px sidebar on `--bg-base` | Design |
+| `D-4` | **Follow the plan** — two token layers, primitives then semantics, the plan's light palette | Design. The five colliding names are migrated, not aliased: `app.css` is being replaced by the redesign anyway |
+| `D-5` | **No schema change attempted first.** A source's `Processing` state is derivable from `ingestion_jobs`, and `blocked_by_platform` already *is* the plan's `Needs you` | Prefer zero backend change where the design can be served by what exists |
+| `D-6` | **A Rule is a rendering of the shipped Epistemic Claim**, never a new table | The claim is a superset. What of it shows on the card is a design question — co-designed against the reference image, not guessed |
+| `D-7` | **OPEN — raised to the founder.** `tension_links` (expert disagreement) has a table, an accent colour, an icon and a locked Checkpoint-A envelope in the product, and **no frame anywhere in the new design** | This is the reverse of every other row: the backend needs a design, not the opposite. Cannot be resolved by the build |
+| `D-8` | **OPEN — pending validation.** `?key=…` is backend work the design depends on: §7.11's entire copy rests on one pasteable link | The frame cannot be built honestly without it, so it is on the §9.2 list below rather than assumed |
+| `D-9` | **Keep the shipped 8 MCP tools.** `search`, `fetch`, `ingest_source`, `get_ingest_status`, `remember_this`, `get_or_synthesize_skill`, `save_skill`, `archive_item` | Not design. Renaming breaks live clients, voids Checkpoint A and rewrites ~1,500 test lines for no capability gain. Consequence: §7.10's call log shows the real tool names, not the plan's illustrative `search_rules` |
+
+### 9.2 What the new design asks of the backend — for validation, not yet built
+
+Ordered by cost. Nothing on this list is touched before the founder says so.
+
+| # | The design needs | What exists | Smallest change | Cost |
+|---|---|---|---|---|
+| 1 | A URL per screen, Back, deep links (§5) | one page, four `data-view` buttons | a router in `app.js` | small, front-end only |
+| 2 | `audit_logs` latency + which connection (§7.10) | neither column | two columns | small |
+| 3 | Word count on a transcript (§7.5) | `source_content.full_text` | computed on read | free |
+| 4 | Speaker names in the transcript body (§7.5) | `cues_json` has no speaker | extractor + provider change, or drop `speakers` from the meta line until it does | medium — **recommend dropping it from the meta for now** |
+| 5 | A skill review queue: `proposed` → `active`, and `inactive` (§7.9) | `skills.status` is `active\|archived` only | two enum values, and the MCP tools must refuse both | small schema — and it closes a real hole: §10.10 calls approval a security control, and the shipped flow writes skills straight to active |
+| 6 | Six visible pipeline steps, each with its own result (§4.4, §7.3) | one `status` per job | a `job_steps` table the engine writes | medium |
+| 7 | Connections: a pasteable link carrying a key, Roll the key (§7.11) | bearer-only, no standalone key | a `connections` table + accept `?key=` in the same validation function | medium — and it is what makes the product usable without a terminal |
+| 8 | Summaries: a list, a detail, Brief/Full, a sidebar count (§7.6) | **nothing** | a `summaries` table, a pipeline step, a formatter | large — a new product capability, not a design change |
+| 9 | French (§11) | no i18n at all | a dictionary + `data-i18n` on every string | large, and not needed for the design pass |
 
 ---
 
 ## 10. BASELINE
 
-`BRAIN_ENV=test pytest -q` — to be recorded below once the VM has its
-dependencies (`.claude/setup.sh` does **not** install `mcp`, see §1.1).
-
 | Run | Result |
 |---|---|
-| (pending) | |
+| `BRAIN_ENV=test python3 -m pytest -q` @ `c9a3cbb` | recorded in `PROGRESS.md` for the redesign phase |
+
+`.claude/setup.sh` does **not** install `mcp` or `yt-dlp` (§1.1) — both are
+needed before the suite can run in a fresh Cloud VM.
