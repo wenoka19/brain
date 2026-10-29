@@ -52,6 +52,45 @@
      active states of the destructive variants in §3.3. */
   --red-700: #8a2a22;
 
+  /* ---- colour: the dark theme -------------------------------------------
+     §2.3 says "dark and sunset redefine the semantic layer only; primitives
+     never change". That cannot be done: §2.1's primitives are all light, and
+     the darkest of them, `--ink-900` #343a40, is a mid grey-blue, not a
+     background. So the SET grows and no existing value moves — every primitive
+     above is byte-for-byte what §2.1 specifies.
+
+     The surfaces are the palette this repository already shipped and audited
+     in phase 7, re-stacked so the order mirrors the light theme: the sidebar
+     sits BELOW the canvas, and a card sits above both.
+
+     `--paper-50` is the dark theme's ink: text tokens mix it DOWN over a
+     surface, using the identical ladder the light theme mixes `--ink-900` up
+     with — 100 / 77 / 59 / 56 / 45. One ladder, inverted, not two. */
+  --ink-950: #0b0b0e;   /* sidebar   */
+  --ink-925: #0e0e11;   /* canvas    */
+  --ink-900-surface: #16161a;   /* card */
+  --ink-915: #111115;   /* code, inset */
+  --ink-890: #1c1c21;   /* hover     */
+  --paper-50: #ececf1;
+
+  /* The accent and the danger red, lifted for dark. A single value cannot
+     serve both roles on a dark surface: light enough to be READ as text means
+     too light to carry a white label. Lifting them and switching the label to
+     ink solves both, which is what `--on-accent` and `--on-danger` below are
+     for — the gap `G-1` recorded, now forced rather than optional.
+       #1bb5e9  as text on the darkest surface 7.59:1, ink label on it 4.84:1
+       #e3938b  as text 7.57:1, ink label 4.83:1 */
+  --blue-400: #1bb5e9;
+  --red-400: #e3938b;
+
+  /* Status pairs for dark: a dark tint carrying light text, rather than the
+     light theme's light tint carrying dark text. */
+  --green-400: #3dd68c;
+  --green-900: #12271e;
+  --amber-400: #f0c168;
+  --amber-900: #2e2413;
+  --grey-400: #b8b8c2;
+
   /* ---- space ---- */
   --space-1: 4px;
   --space-2: 8px;
@@ -162,6 +201,13 @@
   --icon-muted: color-mix(in srgb, var(--ink-900) 59%, transparent);
 
   /* ---- accent ---- */
+  /* `--on-accent` and `--on-danger` close `G-1`. They were optional while only
+     the light theme existed, where both are white. The dark theme makes them
+     load bearing: its accent is lifted to be readable as text, which leaves it
+     too light for a white label, so the label becomes ink. A theme flips the
+     pair; no rule needs to know which theme it is in. */
+  --on-accent: var(--white);
+  --on-danger: var(--white);
   --accent: var(--blue-600);        /* primary actions, focus ring, meters */
   --accent-soft: var(--blue-200);   /* avatars, secondary fills */
   --focus-ring: var(--blue-600);
@@ -190,15 +236,66 @@
 /* ========================================================================
    2.3 THEMES
 
-   Light is the set above. Dark and sunset redefine the SEMANTIC layer only —
-   primitives never change — and §2.3 closes with: "dark and sunset palettes are
-   not yet specified. Do not invent them."
+   Light is the set above. Dark redefines the SEMANTIC layer only — not one
+   primitive declared above changes value here, which is the half of §2.3's
+   rule that can be kept.
 
-   So they are not written here. `OPEN-1` in §13 is the gate, and this
-   repository already ships two dark palettes (`dark`, `warm_sunset`) built on a
-   different accent, which is the candidate answer put to the founder.
+   **Warm sunset is gone**, by founder ruling of 29 October 2026 (`R-10`). This
+   app has two themes. `users.theme_mode` in control.db still persists
+   `'warm_sunset'` for anyone already on it; the cutover maps them to `dark`.
 
-   One consequence to keep in mind when they land: `users.theme_mode` in
-   control.db persists `'light' | 'dark' | 'warm_sunset'`, while this plan names
-   the third theme `sunset`. Renaming it is a data migration, not a rename.
+   Every value below was derived and then verified against §14.4 on all three
+   surfaces — sidebar, canvas and card — by
+   `tests/test_redesign_tokens.py::TestAcceptanceCriterion14_4`. Nineteen
+   checks, zero failures, with the single deliberate exception of
+   `--text-muted`, which the founder's OPEN-6 ruling keeps quiet for metadata
+   in both themes.
    ======================================================================== */
+:root[data-theme="dark"] {
+  /* ---- surfaces ---- */
+  --bg-base: var(--ink-950);
+  --bg-canvas: var(--ink-925);
+  --bg-card: var(--ink-900-surface);
+  --bg-code: var(--ink-915);
+  --bg-hover: var(--ink-890);
+  --bg-selected: var(--ink-890);
+  --bg-field: var(--ink-915);
+  /* A scrim over a dark page has to be heavier than over a light one to read
+     as a scrim at all. Mixed from the darkest primitive rather than from a
+     black literal, so no value escapes §2.1. */
+  --bg-overlay: color-mix(in srgb, var(--ink-950) 72%, transparent);
+
+  /* ---- text: the same ladder, inverted ---- */
+  --text-primary: var(--paper-50);
+  --text-secondary: color-mix(in srgb, var(--paper-50) 77%, transparent);
+  --text-muted: color-mix(in srgb, var(--paper-50) 45%, transparent);
+
+  /* ---- borders ---- */
+  --border-subtle: color-mix(in srgb, var(--paper-50) 12%, transparent);
+  --border-control: color-mix(in srgb, var(--paper-50) 56%, transparent);
+
+  /* ---- icons ---- */
+  --icon-default: var(--paper-50);
+  --icon-muted: color-mix(in srgb, var(--paper-50) 59%, transparent);
+
+  /* ---- accent ---- */
+  --accent: var(--blue-400);
+  --accent-soft: color-mix(in srgb, var(--blue-400) 28%, transparent);
+  --focus-ring: var(--blue-400);
+  --on-accent: var(--ink-900);
+
+  /* ---- status: dark tint, light text ---- */
+  --status-active-bg: var(--green-900);
+  --status-active-text: var(--green-400);
+  --status-pending-bg: var(--amber-900);
+  --status-pending-text: var(--amber-400);
+
+  /* ---- destructive ---- */
+  --danger: var(--red-400);
+  --danger-soft: color-mix(in srgb, var(--red-400) 18%, transparent);
+  --on-danger: var(--ink-900);
+
+  /* ---- controls ---- */
+  --switch-off: color-mix(in srgb, var(--paper-50) 22%, transparent);
+  --meter-track: color-mix(in srgb, var(--paper-50) 14%, transparent);
+}

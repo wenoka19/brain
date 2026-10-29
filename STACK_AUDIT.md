@@ -232,6 +232,7 @@ struck below. Ordered by cost.
 | 7 | Connections: a pasteable link carrying a key, Roll the key (§7.11) | bearer-only, no standalone key | a `connections` table + accept `?key=` in the same validation function | medium — and it is what makes the product usable without a terminal |
 | 8 | Summaries: a list, a detail, Brief/Full, a sidebar count (§7.6) | **nothing** | a `summaries` table, a pipeline step, a formatter | large — a new product capability, not a design change |
 | 9 | French (§11) | no i18n at all | a dictionary + `data-i18n` on every string | large, and not needed for the design pass |
+| 10 | Two themes, not three (`R-10`) | `users.theme_mode` persists `'light'\|'dark'\|'warm_sunset'`, and `app/static/app.css` still defines all three | at cutover: map anyone on `warm_sunset` to `dark`, then narrow the column. **Not done now** — the shipped control plane still serves `app.css` and still needs its third theme until it is replaced | small, but it is a data migration and belongs with the cutover, not before it |
 
 ---
 

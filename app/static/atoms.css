@@ -14,13 +14,14 @@
 
      · `var(--ink-900)` inside a color-mix, because §3 names it that way
        itself: "ink @ 7%" (§3.4 hover), "ink @ 28%" (§3.5 hover).
-     · `var(--white)` as the label on a filled primary button and as the switch
-       knob. §2.2 has no "text on accent" semantic — a genuine gap in the plan,
-       recorded in §13 as `G-1` rather than papered over with a token nobody
-       asked for.
+     · `var(--white)` as the switch knob only. `G-1`'s "text on accent" gap is
+       now closed by `--on-accent` / `--on-danger`, which the dark theme forced
+       into existence. The knob stays white deliberately: §3.7 says "17px white
+       knob", and it is a puck whose position is the signal, not a label — an
+       ink knob would vanish against the dark theme's off-track.
      · `var(--red-700)` as the hover of `danger-solid`. §2.1 declares it and
        §2.2 assigns it to nothing, so this is the use it was plainly declared
-       for; the same gap, same note. */
+       for. */
 
 /* ======================================================================
    base — not an atom, but nothing renders without it
@@ -191,10 +192,12 @@ button { background: none; border: 0; cursor: pointer; }
   font-size: var(--text-xs);
 }
 
-/* primary — accent fill */
+/* primary — accent fill. The label is `--on-accent`, not white: the dark
+   theme lifts the accent to be readable as text, which leaves it too light to
+   carry white, so there the label is ink. One token, flipped by the theme. */
 .btn[data-variant="primary"] {
   background: var(--accent);
-  color: var(--white);
+  color: var(--on-accent);
 }
 .btn[data-variant="primary"]:hover,
 .btn[data-variant="primary"][data-force~="hover"] {
@@ -238,7 +241,7 @@ button { background: none; border: 0; cursor: pointer; }
    for destructive buttons and forbids it as a pill. */
 .btn[data-variant="danger-solid"] {
   background: var(--danger);
-  color: var(--white);
+  color: var(--on-danger);
 }
 .btn[data-variant="danger-solid"]:hover,
 .btn[data-variant="danger-solid"][data-force~="hover"] {

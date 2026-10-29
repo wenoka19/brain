@@ -1145,7 +1145,7 @@ A fixed bottom composer adds `env(safe-area-inset-bottom)` to its own padding.
 
 | # | Question | Blocking |
 |---|---|---|
-| OPEN-1 | Dark and Warm sunset palettes are unspecified | theme picker |
+| ~~OPEN-1~~ | **CLOSED 29 Oct 2026 by two rulings.** Dark is specified and built. **Warm sunset is dropped** — this app has two themes (`R-10`). The palette was derived, not picked: the light theme's opacity ladder inverted over the dark surfaces this repository already shipped and audited in phase 7, then measured against §14.4 before being written down — 19 checks, zero failures | closed |
 | OPEN-2 | Identity check for deletion: emailed code, password, or neither | §9.4 |
 | OPEN-3 | Does Home keep a thread history in the sidebar, or does each thread resolve into its source? | §7.2 |
 | OPEN-4 | Plan limits — the numbers in §7.10 are placeholders | Activity, billing |
@@ -1177,9 +1177,13 @@ crossed by accident.
 | A **"text on accent"** semantic | The white label on a filled primary button (§3.3) and the switch knob (§3.7). §2.2 names no token for either | The rule reaches for the `--white` primitive, documented in `atoms.css` and pinned by a test that forbids a fourth such exception |
 | **`--red-700`** is declared by §2.1 and assigned by §2.2 to nothing | The hover of `danger-solid` is the only plausible use for a darker red | Used for exactly that, and recorded here rather than left as a mystery token |
 
-Neither is urgent and neither was papered over with an invented token. Say the
-word and §2.2 gains two names; until then the exceptions number three, they are
-listed, and a test fails if a fourth appears.
+**`G-1` is closed.** The dark theme settled it rather than an opinion: its
+accent has to be light enough to be read as text on a dark card, which leaves
+it too light to carry a white label, so the label there is ink. One token
+cannot be both, so `--on-accent` and `--on-danger` now exist and a theme flips
+them. `--red-700` keeps its single use as the `danger-solid` hover, and
+`--white` keeps one: the switch knob, which §3.7 names white and which is a
+puck whose position is the signal, not a label.
 
 ---
 
@@ -1638,6 +1642,9 @@ never disagrees with what is being built.
 | `R-7` | §7.9 | No pencil on an approved skill card. `⋯` alone; `Edit` stays at the top of that menu | 29 Oct 2026 |
 | `R-8` | §3.5 | Input hover border follows `R-5`: the plan's rest→hover step was ink 16%→28%, and rest is now 56%, so hover is **68%** — the same +12-point step. Derived, not invented; confirm when convenient | 29 Oct 2026 |
 | `R-9` | §7.12 | `Restore` lives in the Archive card header, not in the expanded body, so the page's one job is one click from the list. §6 rule 2, applied as `R-7` was | 29 Oct 2026 |
+| `R-10` | §2.3, §7.13 | **No warm sunset.** Two themes, Light and Dark. The Profile picker shows two swatches, and the "switch to warm sunset in the evening" row of §7.13 goes with it | 29 Oct 2026 |
+| `R-11` | §2.1, §2.3 | §2.3's *"primitives never change"* cannot be met — §2.1 holds no dark surface. The set **grows** by 13 and no existing value moves. The dark theme redefines semantics only, which is the half of the rule that can be kept | 29 Oct 2026 |
+| `R-12` | §2.2, §3.3, §3.7 | `--on-accent` and `--on-danger` added, closing `G-1`. Optional while only light existed, where both are white; the dark theme makes them load bearing, because its lifted accent cannot carry a white label | 29 Oct 2026 |
 
 Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 

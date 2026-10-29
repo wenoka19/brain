@@ -23,15 +23,31 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKENS = ROOT / "app/static/tokens.css"
 
 DECL = re.compile(r"^\s*(--[a-z0-9-]+)\s*:\s*(.+?);", re.MULTILINE)
+COMMENTS = re.compile(r"/\*.*?\*/", re.DOTALL)
 HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 
 
 def declarations() -> dict[str, str]:
-    return {m.group(1): m.group(2).strip() for m in DECL.finditer(TOKENS.read_text())}
+    """The LIGHT layer only.
+
+    The dark theme redeclares a dozen of the same names, and a flat dict would
+    let its values silently overwrite the ones under test — which is exactly
+    what happened the first time this ran.
+    """
+    text = TOKENS.read_text()
+    light = text[: text.index('[data-theme="dark"]')]
+    return {m.group(1): m.group(2).strip() for m in DECL.finditer(light)}
 
 
 # ---------------------------------------------------------------------------
 # §2.1 — the primitives, transcribed from the plan
+#
+# The dark theme forced the set to GROW. §2.3 says "primitives never change",
+# which is kept literally: every value below is byte-for-byte §2.1's. But §2.3
+# also says the dark theme redefines the semantic layer *only*, and that cannot
+# be done — §2.1 holds no dark surface at all, its darkest value being a mid
+# grey-blue. So `DARK_PRIMITIVES` is additive, pinned here, and asserted to be
+# exactly this set so it cannot grow quietly.
 # ---------------------------------------------------------------------------
 PRIMITIVES = {
     # colour
@@ -62,6 +78,21 @@ PRIMITIVES = {
     "--slot-size": "20px", "--switch-w": "36px", "--switch-h": "21px", "--meter-h": "4px",
 }
 
+DARK_PRIMITIVES = {
+    # surfaces, from the palette shipped and audited in phase 7, re-stacked so
+    # the order mirrors light: sidebar below canvas, card above both.
+    "--ink-950": "#0b0b0e", "--ink-925": "#0e0e11",
+    "--ink-900-surface": "#16161a", "--ink-915": "#111115", "--ink-890": "#1c1c21",
+    # the dark theme's ink
+    "--paper-50": "#ececf1",
+    # accent and danger, lifted so they read as text on a dark surface
+    "--blue-400": "#1bb5e9", "--red-400": "#e3938b",
+    # status pairs: a dark tint carrying light text
+    "--green-400": "#3dd68c", "--green-900": "#12271e",
+    "--amber-400": "#f0c168", "--amber-900": "#2e2413",
+    "--grey-400": "#b8b8c2",
+}
+
 # §2.2 — each semantic and the primitive it must reference, with its opacity.
 SEMANTICS = {
     "--bg-base": ("--grey-200", None), "--bg-canvas": ("--grey-150", None),
@@ -72,6 +103,7 @@ SEMANTICS = {
     "--text-secondary": ("--ink-900", 77), "--text-muted": ("--ink-900", 45),
     "--border-subtle": ("--ink-900", 9), "--border-control": ("--ink-900", 56),
     "--icon-default": ("--ink-900", None), "--icon-muted": ("--ink-900", 59),
+    "--on-accent": ("--white", None), "--on-danger": ("--white", None),
     "--accent": ("--blue-600", None), "--accent-soft": ("--blue-200", None),
     "--focus-ring": ("--blue-600", None),
     "--status-active-bg": ("--green-100", None), "--status-active-text": ("--green-700", None),
@@ -121,8 +153,18 @@ class TestTheTokenContract:
 
     def test_it_declares_nothing_the_plan_did_not_ask_for(self):
         declared = set(declarations())
-        extra = declared - set(PRIMITIVES) - set(SEMANTICS) - {"--font-sans", "--font-mono", "--ease-standard"}
+        allowed = (
+            set(PRIMITIVES) | set(SEMANTICS) | set(DARK_PRIMITIVES)
+            | {"--font-sans", "--font-mono", "--ease-standard"}
+        )
+        extra = declared - allowed
         assert not extra, f"tokens.css invents {sorted(extra)}; §0 rule 1 forbids it"
+
+    @pytest.mark.parametrize("name,value", sorted(DARK_PRIMITIVES.items()))
+    def test_every_added_dark_primitive_is_the_one_that_was_pinned(self, name, value):
+        """The dark set is additive and closed. A fourteenth value appearing
+        here is someone inventing a colour."""
+        assert declarations().get(name) == value, name
 
     def test_the_two_fonts_and_the_easing_are_the_plan_s(self):
         d = declarations()
@@ -131,13 +173,24 @@ class TestTheTokenContract:
         assert d["--font-mono"].startswith("ui-monospace")
         assert d["--ease-standard"] == "cubic-bezier(.2, 0, .2, 1)"
 
-    def test_dark_and_sunset_are_not_invented(self):
-        """§2.3: "dark and sunset palettes are not yet specified. Do not invent
-        them." `OPEN-1` is the gate, so the file must not guess at them."""
+    def test_there_are_two_themes_and_warm_sunset_is_gone(self):
+        """`OPEN-1`, closed 29 October 2026. The founder ruled: add dark, and
+        no warm sunset. So exactly two themes exist, and the third must not
+        reappear — it is still in the shipped `app.css` and still persisted in
+        `users.theme_mode`, which is what makes asserting its absence here
+        worth doing."""
         text = re.sub(r"/\*.*?\*/", "", TOKENS.read_text(), flags=re.DOTALL)
-        assert '[data-theme="dark"]' not in text
+        assert '[data-theme="dark"]' in text
         assert '[data-theme="sunset"]' not in text
         assert '[data-theme="warm_sunset"]' not in text
+
+    def test_the_dark_theme_redefines_semantics_and_never_a_primitive(self):
+        """The half of §2.3's rule that can be kept: a theme may repoint a
+        semantic, never restate a value."""
+        text = COMMENTS.sub("", TOKENS.read_text())
+        block = text[text.index('[data-theme="dark"]'):]
+        for name in DECL.findall(block):
+            assert name[0] in SEMANTICS, f"the dark theme redeclares {name[0]}"
 
     def test_tokens_and_the_old_stylesheet_are_never_loaded_together(self):
         """Five names collide across the two files with different values, so a
@@ -252,3 +305,71 @@ class TestAcceptanceCriterion14_4:
         assert _ratio(_over(self.INK, self.CARD, 0.10), self.CARD) < 3.0
         assert _ratio("#ffffff", self.ACCENT) >= 4.5     # the knob, when on
         assert _ratio(self.ACCENT, _over(self.INK, self.CARD, 0.10)) >= 3.0  # meter fill vs its track
+
+
+class TestAcceptanceCriterion14_4Dark:
+    """§14.4 says "in all three themes". There are two, and this is the second.
+
+    `OPEN-1` was closed on 29 October 2026 by two founder rulings: add dark,
+    and drop warm sunset. The palette below was derived rather than picked —
+    the light theme's opacity ladder, inverted over dark surfaces — and then
+    every pair was measured before it was written down.
+
+    The accent is the part that could not be inverted. A single teal cannot be
+    light enough to read as text on a dark card and dark enough to carry a
+    white label; so dark lifts the accent and flips the label to ink, which is
+    what `--on-accent` exists for.
+    """
+
+    BASE, CANVAS, CARD = "#0b0b0e", "#0e0e11", "#16161a"
+    PAPER, INK = "#ececf1", "#343a40"
+    ACCENT, DANGER = "#1bb5e9", "#e3938b"
+
+    @property
+    def surfaces(self):
+        return {"sidebar": self.BASE, "canvas": self.CANVAS, "card": self.CARD}
+
+    def test_primary_text_clears_4_5_everywhere(self):
+        for where, bg in self.surfaces.items():
+            assert _ratio(self.PAPER, bg) >= 4.5, where
+
+    def test_secondary_text_clears_4_5_everywhere(self):
+        for where, bg in self.surfaces.items():
+            assert _ratio(_over(self.PAPER, bg, 0.77), bg) >= 4.5, where
+
+    def test_icons_clear_3_1_everywhere(self):
+        for where, bg in self.surfaces.items():
+            assert _ratio(_over(self.PAPER, bg, 0.59), bg) >= 3.0, where
+
+    def test_control_borders_clear_3_1(self):
+        for where in ("canvas", "card"):
+            bg = self.surfaces[where]
+            assert _ratio(_over(self.PAPER, bg, 0.56), bg) >= 3.0, where
+
+    def test_the_accent_reads_as_text_and_carries_an_ink_label(self):
+        """Both at once, which the light accent cannot do on dark."""
+        for where, bg in self.surfaces.items():
+            assert _ratio(self.ACCENT, bg) >= 4.5, where
+        assert _ratio(self.INK, self.ACCENT) >= 4.5
+
+    def test_the_light_accent_would_have_failed_here(self):
+        """Pinned so nobody 'simplifies' the two accents back into one."""
+        assert _ratio("#1080a6", self.CARD) < 4.5
+
+    def test_danger_reads_as_text_and_carries_an_ink_label(self):
+        for where, bg in self.surfaces.items():
+            assert _ratio(self.DANGER, bg) >= 4.5, where
+        assert _ratio(self.INK, self.DANGER) >= 4.5
+
+    def test_the_three_pills_clear_4_5(self):
+        assert _ratio("#3dd68c", "#12271e") >= 4.5   # active
+        assert _ratio("#f0c168", "#2e2413") >= 4.5   # pending
+        assert _ratio("#b8b8c2", "#1c1c21") >= 4.5   # archived
+
+    def test_muted_text_keeps_the_same_role_as_in_light(self):
+        """Below the bar in both themes, by the OPEN-6 ruling, and confined to
+        metadata in both. It measures better here (3.99 against light's 2.36)
+        purely because the same 45% reads further on a dark ground."""
+        worst = min(_ratio(_over(self.PAPER, bg, 0.45), bg) for bg in self.surfaces.values())
+        assert worst < 4.5
+        assert worst > _ratio(_over(self.INK, "#f0f0f0", 0.45), "#f0f0f0")

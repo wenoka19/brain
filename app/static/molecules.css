@@ -541,7 +541,7 @@
 
 .step-dot[data-state="current"] {
   background: var(--danger);
-  color: var(--white);
+  color: var(--on-danger);
 }
 
 /* "Type DELETE to continue", with the word itself in danger. */
@@ -563,6 +563,10 @@
   gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
+  /* §4.9 names both: "`--ink-900` background, white text". The toast is the
+     one surface that does not follow the theme — a dark slab in light, a
+     lighter slab in dark, legible on either, which is what a transient
+     notification wants. */
   background: var(--ink-900);
   color: var(--white);
   font-size: var(--text-sm);
@@ -663,7 +667,7 @@
 
 .filter-pill[aria-pressed="true"] {
   background: var(--accent);
-  color: var(--white);
+  color: var(--on-accent);
   box-shadow: none;
 }
 
