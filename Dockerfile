@@ -38,12 +38,27 @@ COPY litestream.yml /etc/litestream.yml
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# The data volume is owned by a non-root user; nothing here needs root.
+# The app runs as uid 10001. There is deliberately no `USER` instruction: a
+# platform mount (Railway's volume, Fly's [mounts]) is attached at run time and
+# shadows this build-time `chown`, arriving owned by root — so the container has
+# to start as root, take ownership of the mount, and only then drop privileges.
+# `entrypoint.sh` does exactly that and re-execs itself under uid 10001, so no
+# long-running process here is root. `docker run --user 10001` also works: the
+# entrypoint detects that it is already unprivileged and skips the drop.
 RUN useradd --system --create-home --uid 10001 brainuser \
-    && mkdir -p /data/users /data/uploads \
+    && mkdir -p /data/users /data/uploads /data/snapshots \
     && chown -R brainuser:brainuser /data /app
-USER brainuser
-VOLUME ["/data"]
+
+# `VOLUME ["/data"]` is deliberately NOT declared. Railway rejects a build that
+# contains it: there, the volume is attached to the service in the dashboard and
+# mounted at /data at run time, so a Dockerfile-declared anonymous volume both
+# conflicts with that and would hide the mount. Fly and plain `docker run` get
+# the same path from their own mount flags (`fly.toml` [mounts], `-v`), so
+# nothing else needs this line either.
+#
+# What the line did *not* do is create the directory — that is the `mkdir` above
+# and in `entrypoint.sh`, both of which still run.
+
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

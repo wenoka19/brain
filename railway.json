@@ -22,7 +22,7 @@
     }
   },
   "_notes": {
-    "volume": "Mount a Railway volume at /data — SQLite needs a real filesystem, and a single replica owns it.",
+    "volume": "Attach a Railway volume to this service with mount path /data — SQLite needs a real filesystem, and a single replica owns it. The Dockerfile declares no VOLUME (Railway rejects builds that do) and no USER: the container starts as root only to chown the mount, which arrives root-owned, then entrypoint.sh re-execs itself as uid 10001.",
     "required_secrets": [
       "BRAIN_JWT_SECRET",
       "BRAIN_PUBLIC_URL",

@@ -1002,13 +1002,34 @@ class TestSubprocessHardening:
             assert cmd.index("--no-exec") < cmd.index("--")
 
     def test_the_container_runs_as_brainuser(self):
-        text = (ROOT / "Dockerfile").read_text()
-        assert "USER brainuser" in text
-        assert re.search(r"useradd[^\n]*brainuser", text)
-        assert "chown -R brainuser:brainuser" in text
-        # The USER directive must be the last word on identity.
-        assert text.rindex("USER brainuser") > text.rindex("useradd")
-        assert "USER root" not in text
+        """The property is unchanged; the mechanism moved.
+
+        It used to be a `USER brainuser` instruction. That cannot survive a
+        platform volume: Railway (and Fly) attach the mount at run time, which
+        shadows the image's `chown`, so the mount arrives owned by root and an
+        unprivileged process cannot create a database in it — and Railway
+        refuses a build containing `VOLUME` outright. So the container starts
+        as root, chowns the mount, and `exec`s itself as uid 10001.
+
+        What must still be true: the user exists, the drop is unconditional,
+        it happens through `exec` (or a root shell stays in the signal path),
+        and it happens before anything long-running begins.
+        """
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        assert re.search(r"useradd[^\n]*brainuser", dockerfile)
+        assert "chown -R brainuser:brainuser" in dockerfile
+        assert "USER root" not in dockerfile
+
+        entrypoint = (ROOT / "entrypoint.sh").read_text()
+        assert "APP_UID=10001" in entrypoint
+        assert 'if [[ "$(id -u)" == "0" ]]' in entrypoint
+        assert "exec setpriv --reuid=\"${APP_UID}\"" in entrypoint
+        # Every long-running process must be downstream of the drop.
+        drop = entrypoint.index("exec setpriv")
+        for launcher in ("litestream replicate", "app.cli serve", "app.cli worker"):
+            assert entrypoint.index(launcher) > drop, launcher
+        # And if it cannot drop, it says so rather than carrying on quietly.
+        assert "WARNING: no setpriv/su available" in entrypoint
 
 
 # ===========================================================================

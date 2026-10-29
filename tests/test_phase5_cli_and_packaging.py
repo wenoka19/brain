@@ -198,18 +198,63 @@ class TestPackaging:
         ):
             assert (ROOT / "app" / module).is_file(), module
 
-    def test_the_dockerfile_ships_the_web_assets_and_drops_root(self):
+    def test_the_dockerfile_ships_the_web_assets(self):
         text = (ROOT / "Dockerfile").read_text()
         assert "COPY app ./app" in text          # includes app/static
-        assert "USER brain" in text
         assert "HEALTHCHECK" in text and "/healthz" in text
         assert "BRAIN_ENV=prod" in text
         assert "litestream" in text
-        assert 'VOLUME ["/data"]' in text
         # Multi-stage: the compiler must not be in the runtime image.
         assert text.count("FROM ") >= 2
         assert "build-essential" in text.split("AS runtime")[0]
         assert "build-essential" not in text.split("AS runtime")[1]
+
+    def test_the_dockerfile_declares_no_volume(self):
+        """Railway refuses a build that contains `VOLUME`: there the volume is
+        attached to the service and mounted at run time, so a declared
+        anonymous volume both conflicts with that and hides the mount. Every
+        other target gets the path from its own mount flag.
+        """
+        lines = [
+            line.strip()
+            for line in (ROOT / "Dockerfile").read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert not any(line.upper().startswith("VOLUME") for line in lines), lines
+
+    def test_root_is_dropped_by_the_entrypoint_not_by_a_user_instruction(self):
+        """A run-time mount shadows the image's `chown`, so the container has to
+        start as root to take ownership of it — and then must not stay root,
+        because this process parses untrusted PDFs, ZIP archives and HTML.
+        """
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        active = [
+            line.strip()
+            for line in dockerfile.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert not any(line.startswith("USER ") for line in active), active
+        assert "useradd" in dockerfile and "10001" in dockerfile
+
+        entrypoint = (ROOT / "entrypoint.sh").read_text()
+        assert 'if [[ "$(id -u)" == "0" ]]' in entrypoint
+        assert "chown -R" in entrypoint
+        # It must hand over with `exec`, or the dropped process is a child of a
+        # root shell and signals stop at the wrong place.
+        assert "exec setpriv --reuid" in entrypoint
+        assert "exec su " in entrypoint  # fallback when setpriv is absent
+        # And the drop has to happen before anything long-running starts.
+        assert entrypoint.index("exec setpriv") < entrypoint.index("app.cli serve")
+
+    def test_the_entrypoint_refuses_an_unwritable_data_directory(self):
+        """`mkdir -p` on an existing directory succeeds whatever its
+        permissions, so a read-only mount would otherwise surface three layers
+        deeper as a SQLite error.
+        """
+        text = (ROOT / "entrypoint.sh").read_text()
+        assert '> "${DATA_DIR}/.writable"' in text
+        assert "FATAL" in text and "not writable" in text
+        assert "exit 1" in text
 
     def test_the_entrypoint_restores_before_it_serves(self):
         text = (ROOT / "entrypoint.sh").read_text()

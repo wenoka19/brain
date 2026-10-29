@@ -306,7 +306,7 @@ specification in `DESIGN_DECISIONS.md`.
 
 | | |
 |---|---|
-| `BRAIN_ENV=test pytest` | **805 passed** |
+| `BRAIN_ENV=test pytest` | **808 passed** |
 | `python -m app.cli selftest` | **28/28 checks, green** |
 | `python -m app.cli doctor` | 0 failures, 0 warnings |
 | `python -m app.cli preview-ax` | all three touchpoints render, 793/1500 tokens, no tables |
@@ -942,3 +942,54 @@ cards, the expanded accordion, the inspector and the Profile modal.
 `window.__xss` stays undefined, zero `img` elements appear, and the payload is
 present **as text** — which proves it round-tripped and was escaped by `esc()`
 rather than silently dropped.
+
+
+---
+
+## Phase 7f — Railway packaging: `VOLUME` out, and the mount problem behind it
+
+**`VOLUME ["/data"]` is gone.** Railway refuses a build that declares one: the
+volume is attached to the service in its dashboard and mounted at run time, so
+a Dockerfile-declared anonymous volume both conflicts with that and hides the
+mount. Fly (`[mounts]`) and plain `docker run -v` already supply the path
+themselves, so nothing else needed the line. A test now asserts its *absence*,
+with the reason, so it cannot come back.
+
+**The second blocker, found while checking for more.** A run-time mount shadows
+whatever the image did to that path at build time — so the Dockerfile's
+`chown -R brainuser /data` is simply not there any more, and the volume arrives
+owned by **root**. With `USER brainuser` set, the entrypoint's first `mkdir -p`
+would have failed under `set -euo pipefail` and the container would have
+crash-looped on boot, after a successful build.
+
+The usual fix is to run the whole container as root. That is not worth it here:
+this process parses untrusted PDFs, DOCX (ZIP) archives and remote HTML. So
+instead:
+
+* no `USER` instruction — the container starts as root;
+* `entrypoint.sh` creates and `chown`s the mount, then **`exec`s itself** under
+  uid 10001 via `setpriv` (falling back to `su`, and saying so loudly if
+  neither exists). Every long-running process — uvicorn, the worker, Litestream
+  — is downstream of that drop, and a test asserts the ordering;
+* `docker run --user 10001` still works: the entrypoint sees it is already
+  unprivileged and skips the drop.
+
+**A hole in that guard, caught by testing it.** The writability check was
+`mkdir -p`, which succeeds on a directory that already exists *whatever its
+permissions* — so a read-only mount would have passed the check and surfaced
+three layers deeper as a SQLite error. It is now a write canary, and the
+failure message names the owner, the uid, and what to do about it.
+
+All three boot paths were exercised for real in the sandbox: root-owned mount →
+drops to 10001 and writes; already-unprivileged with a writable mount → runs
+directly; already-unprivileged with a root-owned mount → fails with the
+diagnostic instead of a stack trace.
+
+### Not verified here
+
+The image itself was never built — there is no Docker daemon in this
+environment. What was tested is the entrypoint's shell logic, executed
+directly, and the static shape of the Dockerfile. Two things only a real build
+confirms: that `setpriv` is present in `python:3.12-slim` (it is part of
+`util-linux`, which Debian marks essential, and the `su` fallback covers it if
+not), and that Railway's builder is happy with the rest of the file.
