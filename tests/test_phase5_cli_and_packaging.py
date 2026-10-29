@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -318,10 +319,90 @@ class TestPackaging:
         assert "sqlite_vec" in text and "FTS5" in text
         assert "pip install" in text
 
+    def test_every_directly_imported_package_is_declared(self):
+        """The drift that shipped: four packages imported and declared nowhere.
+
+        `app/` imported `starlette` and `pydantic` directly while declaring
+        neither — both arrived transitively through FastAPI, which works only
+        for as long as someone else's dependency keeps supplying them. The test
+        suite imported `PyYAML` and `reportlab`, declared in no list at all, so
+        it collected only on hosts that happened to have them. And `mcp` and
+        `yt-dlp` lived in the `Dockerfile` alone, so `pip install .` produced an
+        app that could not import itself.
+
+        This walks the real import graph instead of trusting a list.
+        """
+        import ast
+        import sys
+        from importlib.metadata import packages_distributions
+
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+
+        def names(specs):
+            out = set()
+            for spec in specs:
+                head = re.split(r"[<>=!~\[;\s]", spec, maxsplit=1)[0]
+                out.add(head.lower().replace("_", "-"))
+            return out
+
+        runtime = names(project["dependencies"])
+        dev = runtime | names(project["optional-dependencies"]["dev"])
+        modules = packages_distributions()
+        stdlib = set(sys.stdlib_module_names)
+
+        def imported_tops(folder):
+            found = set()
+            for path in sorted((ROOT / folder).rglob("*.py")):
+                if "__pycache__" in path.parts:
+                    continue
+                for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+                    if isinstance(node, ast.Import):
+                        found.update(a.name.split(".")[0] for a in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                        found.add(node.module.split(".")[0])
+            return {m for m in found if m not in stdlib and m not in {"app", "tests"}}
+
+        for folder, declared in (("app", runtime), ("tests", dev)):
+            for module in sorted(imported_tops(folder)):
+                dists = modules.get(module)
+                assert dists, (
+                    f"{folder}/ imports {module!r}, which maps to no installed "
+                    f"distribution — cannot verify it is declared"
+                )
+                canonical = {d.lower().replace("_", "-") for d in dists}
+                assert canonical & declared, (
+                    f"{folder}/ imports {module!r} (from {sorted(canonical)}) but "
+                    f"pyproject.toml does not declare it"
+                )
+
+    def test_the_mcp_floor_matches_the_module_paths_the_code_imports(self):
+        """`mcp>=1.2` was a green build that failed at import.
+
+        `app/mcp_server.py` imports `mcp.server.mcpserver.MCPServer` and
+        `mcp.server.transport_security`, which exist only in 2.x.
+        """
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+        spec = next(s for s in project["dependencies"] if s.startswith("mcp"))
+        assert ">=2" in spec, spec
+
+        source = (ROOT / "app/mcp_server.py").read_text()
+        assert "from mcp.server.mcpserver import MCPServer" in source
+        assert "mcp.server.transport_security" in (ROOT / "app/main.py").read_text()
+
+    def test_no_second_dependency_list_exists(self):
+        """Three lists existed and two had drifted. Now there is one, and the
+        other two read it. A restated list is the bug, so assert its absence."""
+        pins = re.compile(r"[\"'][A-Za-z0-9_.-]+(\[[a-z,]+\])?>=[0-9]")
+        for name in ("Dockerfile", ".claude/setup.sh"):
+            text = (ROOT / name).read_text()
+            assert not pins.search(text), (
+                f"{name} restates a pinned dependency; it must read pyproject.toml instead"
+            )
+            assert "pyproject.toml" in text, f"{name} never reads pyproject.toml"
+            assert "tomllib" in text, f"{name} does not parse pyproject.toml"
+
     def test_nothing_committed_carries_a_real_secret(self):
         """A placeholder is fine; a key is not."""
-        import re
-
         suspicious = re.compile(
             r"(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|-----BEGIN [A-Z ]*PRIVATE KEY)"
         )

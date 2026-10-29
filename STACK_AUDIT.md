@@ -211,20 +211,22 @@ Recorded verbatim in substance, because it governs every row above.
 | `D-4` | **Follow the plan** — two token layers, primitives then semantics, the plan's light palette | Design. The five colliding names are migrated, not aliased: `app.css` is being replaced by the redesign anyway |
 | `D-5` | **No schema change attempted first.** A source's `Processing` state is derivable from `ingestion_jobs`, and `blocked_by_platform` already *is* the plan's `Needs you` | Prefer zero backend change where the design can be served by what exists |
 | `D-6` | **A Rule is a rendering of the shipped Epistemic Claim**, never a new table | The claim is a superset. What of it shows on the card is a design question — co-designed against the reference image, not guessed |
-| `D-7` | **OPEN — raised to the founder.** `tension_links` (expert disagreement) has a table, an accent colour, an icon and a locked Checkpoint-A envelope in the product, and **no frame anywhere in the new design** | This is the reverse of every other row: the backend needs a design, not the opposite. Cannot be resolved by the build |
-| `D-8` | **OPEN — pending validation.** `?key=…` is backend work the design depends on: §7.11's entire copy rests on one pasteable link | The frame cannot be built honestly without it, so it is on the §9.2 list below rather than assumed |
+| `D-7` | **RULED: out of the web app, kept on the MCP side.** Expert disagreement stays in the engine, in `tension_links`, in hybrid search and in the Checkpoint-A envelope — it surfaces where it is useful, through the host LLM or agent. The redesigned web surface shows **no** conflict card, no conflict pill, no conflict accent | The founder's reasoning: the person reading the web app does not need it; the agent working the knowledge does. **Nothing is deleted.** Removing the table or the MCP formatting would be a different and unauthorised change |
+| `D-8` | **RULED: approved.** `?key=…` is implemented as a second entry point into the one existing validation function, with §10.2's mitigations | Part of the blanket approval of §9.2: "on va implémenter ce que le design réclame, backend" |
 | `D-9` | **Keep the shipped 8 MCP tools.** `search`, `fetch`, `ingest_source`, `get_ingest_status`, `remember_this`, `get_or_synthesize_skill`, `save_skill`, `archive_item` | Not design. Renaming breaks live clients, voids Checkpoint A and rewrites ~1,500 test lines for no capability gain. Consequence: §7.10's call log shows the real tool names, not the plan's illustrative `search_rules` |
 
-### 9.2 What the new design asks of the backend — for validation, not yet built
+### 9.2 What the new design asks of the backend — **APPROVED 29 October 2026**
 
-Ordered by cost. Nothing on this list is touched before the founder says so.
+The founder approved this list in full: *"On va implémenter ce que le design
+réclame, backend."* Two rows were settled individually at the same time and are
+struck below. Ordered by cost.
 
 | # | The design needs | What exists | Smallest change | Cost |
 |---|---|---|---|---|
 | 1 | A URL per screen, Back, deep links (§5) | one page, four `data-view` buttons | a router in `app.js` | small, front-end only |
 | 2 | `audit_logs` latency + which connection (§7.10) | neither column | two columns | small |
 | 3 | Word count on a transcript (§7.5) | `source_content.full_text` | computed on read | free |
-| 4 | Speaker names in the transcript body (§7.5) | `cues_json` has no speaker | extractor + provider change, or drop `speakers` from the meta line until it does | medium — **recommend dropping it from the meta for now** |
+| 4 | ~~Speaker names in the transcript body (§7.5)~~ | `cues_json` has no speaker | **DROPPED by the founder.** Knowing which speaker is talking is not important. `speakers` leaves the §7.5 meta line; the transcript body renders turns without attribution | none — removed from scope |
 | 5 | A skill review queue: `proposed` → `active`, and `inactive` (§7.9) | `skills.status` is `active\|archived` only | two enum values, and the MCP tools must refuse both | small schema — and it closes a real hole: §10.10 calls approval a security control, and the shipped flow writes skills straight to active |
 | 6 | Six visible pipeline steps, each with its own result (§4.4, §7.3) | one `status` per job | a `job_steps` table the engine writes | medium |
 | 7 | Connections: a pasteable link carrying a key, Roll the key (§7.11) | bearer-only, no standalone key | a `connections` table + accept `?key=` in the same validation function | medium — and it is what makes the product usable without a terminal |

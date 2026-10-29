@@ -625,6 +625,11 @@ lands here, searchable and ready to copy." + `Teach Brain`.
 
 **Layout**: `--read-max` 680. Back link, title, meta
 (`Source · duration · word count · speakers · added`), a derived strip
+
+> **OVERRIDE R-1 (founder, 29 Oct 2026): `speakers` is struck from this meta
+> line, and the body renders turns without speaker attribution.** Knowing which
+> speaker is talking was judged not important, and nothing in the ingestion
+> pipeline records it. See `STACK_AUDIT.md` §9.2 row 4.
 (`Summary · 3 rules · 2 skills · Original source`), a **sticky action bar**, then
 the body.
 
@@ -914,6 +919,18 @@ mid-word.
 
 ---
 
+> **OVERRIDE R-2 (founder, 29 Oct 2026): expert disagreement is not surfaced in
+> the web app.** The shipped product detects contradictions between sources and
+> stores them in `tension_links`. This plan has no frame for them, and that is
+> now deliberate: they surface where they are useful — through the host LLM or
+> agent that reads the library over MCP — and not to the person browsing the web
+> app. No conflict card, no conflict pill, no conflict accent in any frame.
+>
+> The feature itself stays: the table, the hybrid-search join, the MCP envelope
+> and its Checkpoint-A wording are untouched.
+
+---
+
 ## 8. DATA MODEL
 
 ```
@@ -1182,6 +1199,21 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 | 7.12 | `/archive` | Archive | partial | — | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
 | 7.13 | `/profile` | Profile | shipped-divergent | — | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
 | 7.14 | `/signin` | Sign in | partial | — | Email-keyed login exists in `/api/login`; no dedicated frame |
+
+## 17. OVERRIDES TO THE PLAN BODY
+
+The plan is law, but the founder outranks it. Every deviation from the text
+above is listed here and annotated at the point it applies, so the law file
+never disagrees with what is being built.
+
+| id | Section | Override | Date |
+|---|---|---|---|
+| `R-1` | §7.5 | `speakers` struck from the transcript meta line; the body renders turns without speaker attribution | 29 Oct 2026 |
+| `R-2` | §7.8, §7.12, all cards | Expert disagreement (`tension_links`) is not surfaced in the web app at all. It stays on the MCP side, where a host LLM or agent reads it | 29 Oct 2026 |
+| `R-3` | §1.1 | Jinja2 and Tailwind-via-CDN are not adopted. The 14 screens are real URLs behind a `pushState` router on the existing static shell; CSS stays hand-written and tokenised | 29 Oct 2026 |
+| `R-4` | §9.2 | The MCP tool surface keeps the shipped 8 names. §7.10's call log shows those, not the plan's illustrative `search_rules` | 29 Oct 2026 |
+
+Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 
 ## 16. WORKING PROTOCOL FOR THIS REPOSITORY
 

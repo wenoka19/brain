@@ -7,11 +7,19 @@ name = "brain"
 version = "0.1.0"
 description = "Personal knowledge & procedural skills MCP server"
 requires-python = ">=3.11"
+# The single source of truth for dependencies. `.claude/setup.sh` and the
+# `Dockerfile` READ this list; neither restates it. Three lists used to exist and
+# two had drifted — `mcp` and `yt-dlp` were declared only in the image, so
+# `pip install .` produced an app that could not import itself.
 dependencies = [
   "rapidfuzz>=3.9",
   "sqlite-vec>=0.1.6",
   "fastapi>=0.110",
-  "uvicorn>=0.27",
+  # `[standard]` carries the httptools/uvloop/websockets extras the image was
+  # already installing. Declaring plain `uvicorn` here while the Dockerfile
+  # installed `uvicorn[standard]` meant a local run and a deployed run did not
+  # use the same HTTP stack.
+  "uvicorn[standard]>=0.27",
   "httpx>=0.27",
   "PyJWT>=2.8",
   "pypdf>=4.0",
@@ -19,10 +27,34 @@ dependencies = [
   "beautifulsoup4>=4.12",
   "lxml>=5.0",
   "python-multipart>=0.0.9",
+  # `app/mcp_server.py` imports `mcp.server.mcpserver.MCPServer` and
+  # `mcp.server.transport_security`, module paths that exist only in 2.x. The
+  # image asked for `mcp>=1.2`, so a fresh build was free to resolve 1.x and
+  # fail at import after a green build. Verified against 2.3.0.
+  "mcp>=2.3,<3",
+  # Invoked as a PATH executable by `app/ingestion/fetchers.py`, never imported,
+  # which is why its absence showed up as a `cli doctor` warning rather than an
+  # ImportError. The wheel installs the console script.
+  "yt-dlp>=2024.8.6",
+  # Both of these arrive transitively through FastAPI, and `app/` imports them
+  # DIRECTLY — `starlette.responses`/`requests`/`middleware.base`/`routing`/
+  # `exceptions`/`testclient` across the control plane, and `pydantic.AnyHttpUrl`
+  # in the MCP server. An undeclared direct import works only for as long as
+  # someone else's dependency keeps supplying it.
+  "starlette>=0.36",
+  "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# `PyYAML` and `reportlab` were imported by the test suite and declared nowhere:
+# the suite only ran on hosts that happened to have them, which is why a fresh
+# Cloud VM could run `.claude/setup.sh` successfully and still fail to collect.
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "PyYAML>=6.0",
+  "reportlab>=4.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
