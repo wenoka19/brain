@@ -640,6 +640,7 @@ ROUTES = [
     # with other values, so loading both into one document would recolour the
     # running control plane.
     Route("/tokens.css", _static("tokens.css", "text/css; charset=utf-8"), methods=["GET"]),
+    Route("/atoms.css", _static("atoms.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/app.js", _static("app.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/consent.js", _static("consent.js", "application/javascript; charset=utf-8"), methods=["GET"]),
     Route("/preview", preview, methods=["GET"]),

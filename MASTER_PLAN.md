@@ -1170,6 +1170,17 @@ not a problem today. A frame that wants accent-coloured text must put it on a
 card. `tests/test_redesign_tokens.py` asserts the limit so it cannot be
 crossed by accident.
 
+**`G-1` — two gaps in §2.2, found while building the atoms of §3.**
+
+| What is missing | Where it bites | How it is handled for now |
+|---|---|---|
+| A **"text on accent"** semantic | The white label on a filled primary button (§3.3) and the switch knob (§3.7). §2.2 names no token for either | The rule reaches for the `--white` primitive, documented in `atoms.css` and pinned by a test that forbids a fourth such exception |
+| **`--red-700`** is declared by §2.1 and assigned by §2.2 to nothing | The hover of `danger-solid` is the only plausible use for a darker red | Used for exactly that, and recorded here rather than left as a mystery token |
+
+Neither is urgent and neither was papered over with an invented token. Say the
+word and §2.2 gains two names; until then the exceptions number three, they are
+listed, and a test fails if a fourth appears.
+
 ---
 
 ## 14. ACCEPTANCE
@@ -1211,8 +1222,8 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 | 7.5 | `/transcripts/:id` | Transcript reader | not-built | **✓** | No timestamp-gutter reader, no in-page search, no export |
 | 7.6 | `/library/summaries`, `/summaries/:id` | Summaries | not-built | **✓ ×2** | No `summary` entity in the engine at all |
 | 7.7 | `/library/sources` | Sources list | partial | **✓** | Sources appear inside `Everything`; no type-first meta, no yield column |
-| 7.8 | `/rules` | Rules | partial | — | `Library` shows epistemic claims — richer than a rule, different card |
-| 7.9 | `/skills` | My skills | partial | — | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
+| 7.8 | `/rules` | Rules | partial | **✓ ×2** | `Library` shows epistemic claims — richer than a rule, different card |
+| 7.9 | `/skills` | My skills | partial | **✓ ×3** | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
 | 7.10 | `/activity` | Activity | partial | — | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |
 | 7.11 | `/connections` | Connections | partial | — | Profile block 2 carries the `/mcp` link + live sessions; no key-in-URL, no tiles |
 | 7.12 | `/archive` | Archive | partial | — | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
@@ -1393,10 +1404,84 @@ alert variant is reserved for a queue that actually has something in it.
 > the gutter, text at reading size — as a sequence of timestamped blocks without
 > attribution. This is the one place where a capture is knowingly not followed.
 
-### 18.6 Still to arrive
+### 18.6 Batch 3 — Rules and Skills (29 October 2026)
 
-Rules, Skills, Activity, Connections, Archive, Profile, Sign in. Frames the
-founder could not capture are built from §3 and §4 as written.
+#### The sidebar's amber pill, finally demonstrated
+
+Two states were captured and together they settle §5 and §7.9:
+
+* On the Skills page, with two drafts waiting: **`Skills 2` in an amber pill**.
+  The number is the **review queue**, not the library.
+* On the Rules page, with nothing waiting: **`Skills 9` as a plain count** —
+  the total.
+
+So the pill does not decorate the count, it **replaces** it: a queue count in
+amber while the queue has something in it, the plain total when it empties.
+That is §7.9's *"when the queue empties, the pill becomes a plain count"*, and
+it is the only nav item that behaves this way.
+
+#### §7.9 My skills
+
+* Toolbar: search + `Ctrl K` + the primary **`+ Add a skill`**.
+* Three sections, each a bold heading with a plain muted line beneath it and
+  **no count and no dash**, exactly as §7.9 demands: `From your sources` /
+  *Drafted by Brain. Not in use until you approve them.* · `Active` /
+  *Available to every connection.* · `Inactive` / *Kept, but your AI cannot
+  reach them.*
+* **A proposed card is outlined in amber.** Not stated anywhere in §7.9 — the
+  two cards under `From your sources` carry a warm border the Active cards do
+  not. It is how the queue reads as a queue without a pill on every row.
+* Proposed → a **`Review` button** on the right, outlined, not a pill.
+* Approved → the capture shows a **pencil** and a **`⋯`** icon button, both
+  **visible at rest**, on every card at once. Resting visibility does not break
+  §4.1, whose hover rule governs the item card; a skill is an expandable card
+  (§4.2). The pencil itself is dropped by `R-7` — `⋯` alone ships.
+* **Inactive cards are dimmed** — name, description and icon all lighter than
+  an Active card. Nothing in §7.9 says so; it is how "your AI cannot reach
+  them" reads at a glance.
+* No toggle switch on any card, as §7.9 requires.
+* Expanded, a proposed card shows: `When to use it` (muted label, trigger at
+  reading size), `What it does` (muted label, a **numbered list** — the only
+  one in the app outside guided setup), then **provenance chips** —
+  `🔗 How Linear builds software · 02:24` and `🕐 Drafted Oct 29`, grey,
+  full-radius, each with its icon — then **`Approve`** (primary), **`Edit`**
+  (secondary) and **`Dismiss`** (ghost).
+
+#### §7.8 Rules
+
+* Toolbar: search + `Ctrl K` + the primary **`+ Write a rule`**.
+* A rule card collapsed: the type icon, the **short form** of the rule in
+  near-primary text, the provenance beneath it in muted — `Claude Code · Oct 24`,
+  `ChatGPT · Oct 21`, `Written here · Oct 18` for written rules, and
+  `How Linear builds software · 14:02 · Oct 29` for extracted ones — with the
+  caret on the right, pointing right when closed and down when open (§4.2).
+* Expanded: the **full form** at reading size, then provenance chips
+  (`🔗 Claude Code`, `🕐 Added Oct 24`), then **`Edit`** (secondary) and
+  **`Archive`** (ghost).
+* The capture demonstrates §7.8's *"always store both the short form and the
+  full form"* precisely: collapsed reads *"Always answer in the language I wrote
+  in."*; expanded adds *"If I mix two languages in one message, follow the one I
+  used for the actual question, not the one used for quoted material."*
+* No hover actions on a rule card — everything lives inside the expansion.
+
+> **Q-2 — RULED 29 Oct 2026: the text wins, `R-6`.** The Rules captures print
+> `My rules  12  —` and `From your sources  35  —`, against §5, §6 rule 3 and
+> §7.9's *"no dash, no inline count"*. **Rules takes the Skills style**: a bold
+> group heading with a plain explanatory line beneath it, no count, no dash. So
+> `My rules` / *written by you, or pulled from your own AI chats* and
+> `From your sources` / *extracted by Brain, traceable to where they were said*.
+> Counts stay in the navigation, with no exception anywhere in the app.
+
+> **Q-3 — RULED 29 Oct 2026: the pencil goes, `R-7`.** The capture puts a
+> pencil on the card while §7.9 also lists `Edit` in the overflow menu, which
+> §6 rule 2 forbids. **An approved skill card carries `⋯` alone**, and `Edit`
+> stays where §7.9 put it, at the top of that menu. One action, one place, with
+> no exception — the rule survives intact.
+
+### 18.7 Still to arrive
+
+Activity, Connections, Archive, Profile, Sign in. Frames the founder could not
+capture are built from §3 and §4 as written.
 
 ## 17. OVERRIDES TO THE PLAN BODY
 
@@ -1411,6 +1496,9 @@ never disagrees with what is being built.
 | `R-3` | §1.1 | Jinja2 and Tailwind-via-CDN are not adopted. The 14 screens are real URLs behind a `pushState` router on the existing static shell; CSS stays hand-written and tokenised | 29 Oct 2026 |
 | `R-4` | §9.2 | The MCP tool surface keeps the shipped 8 names. §7.10's call log shows those, not the plan's illustrative `search_rules` | 29 Oct 2026 |
 | `R-5` | §2.1, §2.2 | Four token values raised so §14.4 can be met; two left below it deliberately. Table in §13 | 29 Oct 2026 |
+| `R-6` | §7.8 | Rules group headings take the Skills style — no inline count, no dash. Counts stay in the nav, app-wide, no exception | 29 Oct 2026 |
+| `R-7` | §7.9 | No pencil on an approved skill card. `⋯` alone; `Edit` stays at the top of that menu | 29 Oct 2026 |
+| `R-8` | §3.5 | Input hover border follows `R-5`: the plan's rest→hover step was ink 16%→28%, and rest is now 56%, so hover is **68%** — the same +12-point step. Derived, not invented; confirm when convenient | 29 Oct 2026 |
 
 Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 
