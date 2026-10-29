@@ -1224,10 +1224,10 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 | 7.7 | `/library/sources` | Sources list | partial | **✓** | Sources appear inside `Everything`; no type-first meta, no yield column |
 | 7.8 | `/rules` | Rules | partial | **✓ ×2** | `Library` shows epistemic claims — richer than a rule, different card |
 | 7.9 | `/skills` | My skills | partial | **✓ ×3** | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
-| 7.10 | `/activity` | Activity | partial | — | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |
-| 7.11 | `/connections` | Connections | partial | — | Profile block 2 carries the `/mcp` link + live sessions; no key-in-URL, no tiles |
-| 7.12 | `/archive` | Archive | partial | — | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
-| 7.13 | `/profile` | Profile | shipped-divergent | — | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
+| 7.10 | `/activity` | Activity | partial | **✓ ×2** | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |
+| 7.11 | `/connections` | Connections | partial | **✓ ×3** | Profile block 2 carries the `/mcp` link + live sessions; no key-in-URL, no tiles |
+| 7.12 | `/archive` | Archive | partial | **✓ ×2** | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
+| 7.13 | `/profile` | Profile | shipped-divergent | **✓ ×3** | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
 | 7.14 | `/signin` | Sign in | partial | — | Email-keyed login exists in `/api/login`; no dedicated frame |
 
 ## 18. REFERENCE IMAGES — WHAT EACH CAPTURE ADDS
@@ -1478,10 +1478,148 @@ it is the only nav item that behaves this way.
 > stays where §7.9 put it, at the top of that menu. One action, one place, with
 > no exception — the rule survives intact.
 
-### 18.7 Still to arrive
+### 18.7 Batch 4 — Connections and Activity (29 October 2026)
 
-Activity, Connections, Archive, Profile, Sign in. Frames the founder could not
-capture are built from §3 and §4 as written.
+#### §7.11 Connections
+
+* **The first-run card is accent-bordered and first on the page**, carrying an
+  amber `● Not connected` pill, the heading *"Brain is not reachable by anything
+  yet"*, the two-line explanation, a **monospace readonly field** reading
+  *"Your link appears here"* and a secondary `Generate my link` button.
+* **The `Connected` section does not render at all while the list is empty** —
+  §7.11 asked for exactly that, and the capture proves it: the first-run frame
+  goes straight from the accent card to `Add a connection`.
+* `Add a connection` / *Pick what you are connecting. Brain walks you through
+  it.* Then the **two tiles side by side**. A tile shows its icon, its title,
+  its one-line audience, and a **`Show me how` label in accent** — which is the
+  one place an accent-coloured text label appears, and it sits on a card, where
+  the accent clears 4.5:1. The chevron points right when closed and down when
+  open, and **the open tile gains an accent border**.
+* The agent panel is one numbered step: *Hand this to your coding agent* /
+  *Cursor, Claude Code, Codex — paste it as a message. It wires Brain in by
+  itself.* Then the §3.13 code block, `Copy` pinned top-right, and
+  `PASTE_YOUR_GENERATED_LINK_HERE` in the amber `<mark class="ph">`.
+* The AI-app panel is three numbered steps (§4.10). Step 1 is a **two-column
+  definition list** — `Claude` / `ChatGPT` / `Others` muted on the left, the
+  menu path in primary on the right with the final action in bold, joined by
+  `→`.
+* **The capture's copy is fuller than §7.11's and does not contradict it**, so
+  the capture is the source of truth for these strings. Step 2 adds *"If it asks
+  about authentication, keep whatever it picked."*; step 3 adds *"The connection
+  shows up at the top of this page from its first call."*
+* The connected list: a 36px type tile, the name, then
+  `Signed in` or `Key` · `last call …` · `added …`, a status pill, and `⋯`
+  visible at rest. `ChatGPT` carries an amber **`Key expired`** pill — a new
+  amber label, inside §3.8's three states, not a fourth state.
+* Its section line is *"Each one holds its own credential. Revoking one leaves
+  the others untouched."*
+
+#### §7.10 Activity
+
+* `Usage` / *What your plan covers this month.* Three meter cards: the label in
+  secondary, the figure at stat size in semibold with ` of N` muted beside it,
+  the 4px meter, and a muted context line — `Resets November 1`,
+  *Archived sources do not count*, *Transcripts, documents and images*.
+* `Calls` / *Every time one of your connections reached into Brain. Click a row
+  to see what it asked for.* Then search + an `All connections` filter button.
+* Rows are **one line and dense**, inside a single card divided by hairlines,
+  grouped under `Today`: time · an accent dot · the connection name · **the tool
+  name in a grey monospace chip** · the target · the latency · the status pill.
+* Expanded, a row reveals a definition list on the canvas, not in a card:
+  `Asked for` (monospace), `Returned`, `Payload`, `Connection`.
+
+> **The tool names in this capture are illustrative, and `R-4` already settles
+> it.** The rows read `search_rules`, `get_skill`, `search_sources`,
+> `get_transcript` — the plan's proposed surface. The shipped surface is the
+> eight tools of `CLAUDE.md` §5, so the log will read `search`, `fetch`,
+> `get_or_synthesize_skill` and the rest. The frame is unchanged; only the
+> strings inside the chips differ.
+
+### 18.8 Batch 5 — Archive, Profile, and the two-step dialog (29 October 2026)
+
+#### §7.12 Archive
+
+* Heading, then the purpose line — the capture's is fuller than §7.12's and
+  does not contradict it, so it is the string: *"Out of the way, still yours.
+  Nothing here is reachable by your AI until you restore it."*
+* A full-width `Search the archive` field with **no `Ctrl K` chip** — the other
+  lists carry one, this one does not.
+* **Type filter pills** on their own row: `All` accent-filled and active, then
+  `Source`, `Transcript`, `Summary`, `Rule`, `Skill` outlined. Full radius.
+  This filter exists here and nowhere else.
+* Date groups read **`Archived today`** and **`Archived yesterday`**, not
+  `Today` / `Yesterday`. §6 rule 14 gives the shape; the prefix says *which*
+  date is being grouped on, which matters because §7.12 orders by archive date
+  and not by creation date.
+* A card: the 36px type tile, the title, then
+  `Type · archived by you · added …` — with **`archived by Brain` in amber**,
+  which is the attribution §7.12 calls the point of the page.
+* Collapsed cards show the caret alone. The expanded one shows, in its header,
+  a secondary `↺ Restore` and `⋯`; in its body, the content by type
+  (`Original link` and the URL in a readonly field), then `Restore` (primary),
+  `Edit` and `Delete permanently`.
+
+> **`R-9` — `Restore` appeared twice on the expanded card, and now appears
+> once.** The capture puts a secondary `Restore` in the header *and* a primary
+> `Restore` in the body. §6 rule 2 forbids that, and `R-7` already settled the
+> identical shape on a skill card by deleting the duplicate.
+>
+> It is kept **in the header**, not in the body, which is the opposite of what
+> §7.12's prose lists. The reason is §7.12's own: *"people come here to undo
+> something they just did"* — so the page's whole job must be one click from
+> the list, never behind an expand. The body keeps `Edit` and
+> `Delete permanently`. One word flips it back.
+
+#### §7.13 Profile
+
+* Four sections, each a heading with a muted line: `Account` / *Who Brain thinks
+  you are.* · `Appearance` / *How Brain looks and which language it speaks to
+  you in.* · the ingestion defaults · `Your data` / *Everything Brain holds is
+  yours to take or to remove.*
+* Every row is §4.6: label and help text left, control right, **always**, with
+  the control column sharing one left edge — which is what §3.3's
+  `min-width: 148px` buys.
+* `Account`: an identity row (accent-soft avatar, name, email, `Change photo`),
+  then `Name` (editable input), `Email` (**readonly**, greyed), `Sign out`.
+* `Appearance`: **three theme swatches** showing themselves, labelled `Light`,
+  `Dark`, **`Warm sunset`**, the selected one ringed in accent.
+* The ingestion defaults are three switches — `Write a summary`, `Extract
+  rules`, `Draft skills` — and a `Write them in` select defaulting to
+  *The language of the source*.
+* `Your data`: `Export` (secondary), then `Delete library` and `Delete account`
+  as **outlined danger** buttons, red border and red text, never filled.
+
+> **`OPEN-1` is all but answered by this capture.** The theme is labelled
+> **`Warm sunset`**, which is the name this codebase already persists in
+> `users.theme_mode` as `warm_sunset` — the plan's `sunset` was the outlier, so
+> **there is no data migration**. The swatches show a near-black dark and a
+> dark-brown sunset, which is what the two shipped palettes already are. What
+> still needs a decision is narrower than it looked: the shipped palettes were
+> built on an indigo accent and this one is teal.
+
+#### §9.4 The two-step destructive dialog
+
+* Scrim over the page, centred white panel, modest padding.
+* **A step indicator across the top**: step 1 is a filled **danger** circle with
+  white `1`, a rule, then a grey `2`. The current step is red, not accent —
+  the dialog is coloured by what it does.
+* `Delete your account?` names the object, as §4.8 requires.
+* Body: *"Your library, your connections and your keys are destroyed. Export
+  first if you want to keep anything. This cannot be undone."*
+* `Type DELETE to continue`, with **`DELETE` in danger, semibold**, above the
+  field.
+* Footer right-aligned: `Cancel` (ghost) and `Continue` (**outlined danger**).
+  §4.8 says the confirm is `danger-solid`; at step 1 of 2 it is outlined,
+  because step 1 does not delete anything. The filled red belongs to the final
+  confirm at step 2, which no capture shows and which is built from that logic.
+
+### 18.9 Captures are complete
+
+All five batches are in. Frames and states that were never captured — the
+collapsed work block mid-flight, the overflow menus, the toast, step 2 of the
+dialog, the empty states, `/signin` — are built from §3, §4, §6 and the logic
+of the frames that were captured, and every such decision is recorded as an
+`R-n` here rather than made silently.
 
 ## 17. OVERRIDES TO THE PLAN BODY
 
@@ -1499,6 +1637,7 @@ never disagrees with what is being built.
 | `R-6` | §7.8 | Rules group headings take the Skills style — no inline count, no dash. Counts stay in the nav, app-wide, no exception | 29 Oct 2026 |
 | `R-7` | §7.9 | No pencil on an approved skill card. `⋯` alone; `Edit` stays at the top of that menu | 29 Oct 2026 |
 | `R-8` | §3.5 | Input hover border follows `R-5`: the plan's rest→hover step was ink 16%→28%, and rest is now 56%, so hover is **68%** — the same +12-point step. Derived, not invented; confirm when convenient | 29 Oct 2026 |
+| `R-9` | §7.12 | `Restore` lives in the Archive card header, not in the expanded body, so the page's one job is one click from the list. §6 rule 2, applied as `R-7` was | 29 Oct 2026 |
 
 Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 

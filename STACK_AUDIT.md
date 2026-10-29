@@ -224,7 +224,7 @@ struck below. Ordered by cost.
 | # | The design needs | What exists | Smallest change | Cost |
 |---|---|---|---|---|
 | 1 | A URL per screen, Back, deep links (§5) | one page, four `data-view` buttons | a router in `app.js` | small, front-end only |
-| 2 | `audit_logs` latency + which connection (§7.10) | neither column | two columns | small |
+| 2 | Everything a §7.10 row shows, collapsed **and** expanded | `audit_logs` has `client_name`, `surface`, `action`, `target_id`, `status`, `created_at` | four columns: `latency_ms` (the `180 ms`), `payload_bytes` (the `1.2 kB`), `result_summary` (the `3 rules returned`), `connection_id` (the `All connections` filter, and the link to §7.11) | small — and the capture is what made the list exact |
 | 3 | Word count on a transcript (§7.5) | `source_content.full_text` | computed on read | free |
 | 4 | ~~Speaker names in the transcript body (§7.5)~~ | `cues_json` has no speaker | **DROPPED by the founder.** Knowing which speaker is talking is not important. `speakers` leaves the §7.5 meta line; the transcript body renders turns without attribution | none — removed from scope |
 | 5 | A skill review queue: `proposed` → `active`, and `inactive` (§7.9) | `skills.status` is `active\|archived` only | two enum values, and the MCP tools must refuse both | small schema — and it closes a real hole: §10.10 calls approval a security control, and the shipped flow writes skills straight to active |
