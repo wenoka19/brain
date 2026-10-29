@@ -10,6 +10,7 @@ Route ownership, outermost first:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -55,6 +56,61 @@ SECURITY_HEADERS = {
     "Permissions-Policy": "geolocation=(), camera=(), microphone=(), payment=()",
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
 }
+
+
+def inline_worker_enabled(cfg: Settings) -> bool:
+    """Should this process drain the ingestion queue itself?
+
+    It must, or the product's own copy is false. §7.2 tells the person
+    "leaving the page does not cancel anything" and §7.3 says "you can leave
+    this page, Brain keeps working" — while the queue only advanced when a
+    browser called `/api/jobs/run`, so closing the tab stopped the work mid-way.
+    The worker exists (`app/worker.py`) but it is a separate role, and both
+    `railway.json` and `fly.toml` deploy `BRAIN_ROLE=web`.
+
+    Off in two cases. Under `BRAIN_ROLE=worker` a dedicated process already
+    drains it, and two drainers in one container would only contend for the
+    same leases. In tests, every surface calls `run_pending_jobs_sync()`
+    itself, and a background drainer would race those assertions.
+
+    `BRAIN_INLINE_WORKER` forces it either way.
+    """
+    override = os.environ.get("BRAIN_INLINE_WORKER")
+    if override is not None:
+        return override == "1"
+    if os.environ.get("BRAIN_ROLE", "web") == "worker":
+        return False
+    return not cfg.is_test
+
+
+def _start_inline_worker(cfg: Settings):
+    if not inline_worker_enabled(cfg):
+        return None
+    from app.worker import Worker
+
+    worker = Worker(cfg=cfg)
+    LOGGER.info("draining the ingestion queue in-process")
+    return worker, asyncio.create_task(worker.run(), name="brain-inline-worker")
+
+
+async def _stop_inline_worker(drainer) -> None:
+    """Ask it to stop, then wait — bounded.
+
+    A job in flight is mid-pipeline against SQLite, and killing it there is how
+    a lease is left behind and a source sits half-ingested. It gets a few
+    seconds to reach a checkpoint; past that the lease expires on its own and
+    another run picks the job up, which is what leases are for.
+    """
+    if drainer is None:
+        return
+    worker, task = drainer
+    worker.request_stop()
+    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)
+    if not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -338,10 +394,12 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         control_db.control()  # create/migrate control.db before serving
         r2_sync.start_background(cfg=cfg)  # no-op unless R2 is configured
+        drainer = _start_inline_worker(cfg)
         try:
             async with streamable.router.lifespan_context(streamable):
                 yield
         finally:
+            await _stop_inline_worker(drainer)
             # `try/finally`, not statements after the `yield`: a redeploy's
             # SIGTERM is delivered as a cancellation *at* the yield, and
             # anything written after it would simply never run. Everything

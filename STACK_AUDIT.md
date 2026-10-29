@@ -281,7 +281,24 @@ Nothing in §9.1's rulings: they were design decisions, and none rested on a
 claim that moved. §9.2's list grows — rows 1 and 4 above are new work, and row
 3 is a deployment change rather than code.
 
-**Findings 1 and 2 are not redesign scope.** They are defects in the shipped
-product, they are both about the boundary between what the person archived or
-has not approved and what an agent can reach, and they are reported rather than
-fixed, pending the founder's word.
+### 11.4 All four fixed — 29 October 2026
+
+The founder's ruling: archived must be *"comme inexistante"* over MCP, editing
+a skill must not promote it, *"leaving the page and Brain continues"* must be a
+promise the architecture can keep, and `archived_at` must exist.
+
+| # | Fix | Where |
+|---|---|---|
+| 1 | `_visible()` drops any non-active record on the **MCP surface only**, and an archived id now answers with the same `not_found`, the same wording and the same audit line as an id that was never issued. A distinguishable refusal would leak the one bit the promise is about. Closed on all four doors: by claim id, by skill id, by skill slug, and through a live skill's `linked_claim_ids` | `app/core/engine.py` |
+| 2 | `upsert_skill` no longer sets `status = 'active'` on update. Versioning and the `skill_versions` snapshot are untouched | `app/db/tenant.py` |
+| 3 | The web process drains the queue itself, as a task on the app's lifespan, with a bounded stop so a job in flight reaches a checkpoint rather than leaving a lease behind. Off under `BRAIN_ROLE=worker`, where a process already does it, and off in tests, where every surface calls `run_pending_jobs_sync()` itself | `app/main.py` |
+| 4 | `archived_at` and `archived_by` on `sources`, `epistemic_claims` and `skills`, through the additive migration mechanism `tenant.py` did not have. Stamped when the status changes, cleared on restore, attributed `brain` over MCP and `you` from the web — and **the cascade stamps every claim it archives**, because each of those rows appears in the Archive and needs its own date and author, not just the row that was clicked | `app/db/tenant.py` |
+
+The filter deliberately does **not** live in `tenant_db`: `op_archive_item`
+has to read an archived row in order to restore it, and §7.12 is a whole page
+of them for the person.
+
+`tests/test_redesign_backend.py` — 22 cases. Each fix was then confirmed by
+**reintroducing the defect**: un-filtering `fetch` fails four of them, putting
+the forced promotion back fails one, and turning the drainer off leaves the job
+queued.

@@ -21,6 +21,7 @@ import struct
 import threading
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -370,6 +371,43 @@ def _open(path: Path, cfg: Settings) -> sqlite3.Connection:
     return conn
 
 
+def _now() -> str:
+    """UTC, in the same shape SQLite's `CURRENT_TIMESTAMP` writes.
+
+    Matching the format matters: `archived_at` is compared and ordered against
+    `created_at`, and a column that mixes two formats sorts wrong without ever
+    raising.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+#: Columns added after the first release. `CREATE TABLE IF NOT EXISTS` does
+#: nothing to a table that already exists, so an existing tenant database needs
+#: these added explicitly or every write naming them fails. The same shape as
+#: `control.MIGRATIONS` — which tenant.py did not have until the Archive needed
+#: to say when something was set aside, and by whom.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("sources", "archived_at", "ALTER TABLE sources ADD COLUMN archived_at DATETIME"),
+    ("sources", "archived_by", "ALTER TABLE sources ADD COLUMN archived_by TEXT NOT NULL DEFAULT ''"),
+    ("epistemic_claims", "archived_at", "ALTER TABLE epistemic_claims ADD COLUMN archived_at DATETIME"),
+    ("epistemic_claims", "archived_by", "ALTER TABLE epistemic_claims ADD COLUMN archived_by TEXT NOT NULL DEFAULT ''"),
+    ("skills", "archived_at", "ALTER TABLE skills ADD COLUMN archived_at DATETIME"),
+    ("skills", "archived_by", "ALTER TABLE skills ADD COLUMN archived_by TEXT NOT NULL DEFAULT ''"),
+)
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Apply additive column migrations. Idempotent, and safe to run on boot."""
+    applied: list[str] = []
+    for table, column, statement in MIGRATIONS:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if not columns or column in columns:
+            continue
+        conn.execute(statement)
+        applied.append(f"{table}.{column}")
+    return applied
+
+
 def init_schema(conn: sqlite3.Connection, *, cfg: Settings | None = None) -> None:
     cfg = cfg or settings()
     dim = cfg.embedding_dim
@@ -386,6 +424,7 @@ def init_schema(conn: sqlite3.Connection, *, cfg: Settings | None = None) -> Non
         f"embedding float[{dim}] distance_metric=cosine)"
     )
     conn.executescript(TRIGGERS)
+    migrate(conn)
 
 
 def tenant(user_id: str, *, cfg: Settings | None = None) -> sqlite3.Connection:
@@ -600,12 +639,29 @@ def set_claim_embedding(
     )
 
 
-def set_claim_status(conn: sqlite3.Connection, claim_id: str, status: str) -> bool:
+def _archival(status: str, actor: str) -> tuple[str | None, str]:
+    """When and by whom, or cleared on restore.
+
+    §7.12 orders the Archive by archive date and prints `archived by you` or
+    `archived by Brain` beside every row — it calls that attribution the point
+    of the page. Neither can be reconstructed after the fact, so both are
+    recorded at the moment the status changes.
+    """
+    if status == "active":
+        return None, ""
+    return _now(), ("brain" if actor == "brain" else "you")
+
+
+def set_claim_status(
+    conn: sqlite3.Connection, claim_id: str, status: str, *, actor: str = "you"
+) -> bool:
     if status not in ("active", "archived"):
         raise ValueError(status)
+    at, by = _archival(status, actor)
     cur = conn.execute(
-        "UPDATE epistemic_claims SET status = ? WHERE id = ? AND status != ?",
-        (status, claim_id, status),
+        "UPDATE epistemic_claims SET status = ?, archived_at = ?, archived_by = ? "
+        "WHERE id = ? AND status != ?",
+        (status, at, by, claim_id, status),
     )
     return cur.rowcount > 0
 
@@ -798,7 +854,7 @@ def upsert_skill(
             UPDATE skills SET name = ?, description = ?, trigger_when = ?,
                    execution_steps_json = ?, guardrails = ?, output_template = ?,
                    linked_claim_ids = ?, origin_type = ?, version = version + 1,
-                   status = 'active', updated_at = CURRENT_TIMESTAMP
+                   updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (
@@ -847,33 +903,44 @@ def set_skill_embedding(
     )
 
 
-def set_skill_status(conn: sqlite3.Connection, skill_id: str, status: str) -> bool:
+def set_skill_status(
+    conn: sqlite3.Connection, skill_id: str, status: str, *, actor: str = "you"
+) -> bool:
     if status not in ("active", "archived"):
         raise ValueError(status)
+    at, by = _archival(status, actor)
     cur = conn.execute(
-        "UPDATE skills SET status = ?, updated_at = CURRENT_TIMESTAMP "
-        "WHERE id = ? AND status != ?",
-        (status, skill_id, status),
+        "UPDATE skills SET status = ?, archived_at = ?, archived_by = ?, "
+        "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status != ?",
+        (status, at, by, skill_id, status),
     )
     return cur.rowcount > 0
 
 
-def set_source_status(conn: sqlite3.Connection, source_id: str, status: str) -> bool:
+def set_source_status(
+    conn: sqlite3.Connection, source_id: str, status: str, *, actor: str = "you"
+) -> bool:
     if status not in ("active", "archived", "trash"):
         raise ValueError(status)
+    at, by = _archival(status, actor)
     cur = conn.execute(
-        "UPDATE sources SET status = ? WHERE id = ? AND status != ?",
-        (status, source_id, status),
+        "UPDATE sources SET status = ?, archived_at = ?, archived_by = ? "
+        "WHERE id = ? AND status != ?",
+        (status, at, by, source_id, status),
     )
     if cur.rowcount and status in ("archived", "trash"):
-        # Archiving a source archives the claims that came out of it.
+        # Archiving a source archives the claims that came out of it — and
+        # they carry the same stamp, so the Archive can say who and when for
+        # every row rather than only for the one that was clicked.
         conn.execute(
-            "UPDATE epistemic_claims SET status = 'archived' WHERE source_id = ? AND status = 'active'",
-            (source_id,),
+            "UPDATE epistemic_claims SET status = 'archived', archived_at = ?, archived_by = ? "
+            "WHERE source_id = ? AND status = 'active'",
+            (at, by, source_id),
         )
     elif cur.rowcount and status == "active":
         conn.execute(
-            "UPDATE epistemic_claims SET status = 'active' WHERE source_id = ? AND status = 'archived'",
+            "UPDATE epistemic_claims SET status = 'active', archived_at = NULL, archived_by = '' "
+            "WHERE source_id = ? AND status = 'archived'",
             (source_id,),
         )
     return cur.rowcount > 0

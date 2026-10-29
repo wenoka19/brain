@@ -248,14 +248,43 @@ def deep_link(source_url: str, locator_type: str, locator_value: str) -> str:
 # ===========================================================================
 # 2. fetch
 # ===========================================================================
+def _visible(ctx: Context, record: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Over MCP, an archived item is not hidden — it does not exist.
+
+    `MASTER_PLAN.md` §9.2: *"Never exposed: anything archived … This is
+    enforced server-side, not by prompt."* §7.12 makes the person the matching
+    promise: *"nothing here is reachable by your AI until you restore it."*
+
+    So an archived id must be indistinguishable from an id that was never
+    issued: the same `not_found`, the same wording, the same audit line. A
+    "that exists but you may not have it" would leak the one bit the promise
+    is about.
+
+    The filter lives here rather than in `tenant_db` for two reasons:
+    `op_archive_item` has to read an archived row in order to restore it, and
+    the web surface has a whole page for them (§7.12).
+    """
+    if record is None:
+        return None
+    if ctx.surface == "mcp" and record.get("status") != "active":
+        return None
+    return record
+
+
 def op_fetch(ctx: Context, item_id: str) -> OpResult:
     item_id = (item_id or "").strip()
     if not item_id:
         return _fail("fetch", "empty_id", "An id is required.")
 
-    claim = tenant_db.get_claim(ctx.tenant, item_id)
+    claim = _visible(ctx, tenant_db.get_claim(ctx.tenant, item_id))
     if claim:
         source = tenant_db.get_source(ctx.tenant, claim["source_id"]) or {}
+        # Archiving a source cascades to its claims, so an active claim under
+        # an archived source should not exist. Checked anyway: the cascade is
+        # one `UPDATE` away from a future change, and this costs nothing.
+        if _visible(ctx, source) is None and source:
+            claim = None
+    if claim:
         tensions = tenant_db.tensions_for_claims(ctx.tenant, [item_id]).get(item_id, [])
         ctx.audit("fetch", "ok", target_id=item_id, detail={"kind": "claim"})
         return OpResult(
@@ -282,10 +311,12 @@ def op_fetch(ctx: Context, item_id: str) -> OpResult:
             },
         )
 
-    skill = tenant_db.get_skill(ctx.tenant, item_id) or tenant_db.get_skill_by_slug(ctx.tenant, item_id)
+    skill = _visible(ctx, tenant_db.get_skill(ctx.tenant, item_id)) or _visible(
+        ctx, tenant_db.get_skill_by_slug(ctx.tenant, item_id)
+    )
     if skill:
         linked = [
-            tenant_db.get_claim(ctx.tenant, cid)
+            _visible(ctx, tenant_db.get_claim(ctx.tenant, cid))
             for cid in skill["linked_claim_ids"]
         ]
         ctx.audit("fetch", "ok", target_id=skill["id"], detail={"kind": "skill"})
@@ -794,21 +825,38 @@ def op_archive_item(ctx: Context, item_type: ItemType, item_id: str, *, restore:
     if item_type not in ("source", "claim", "skill"):
         return _fail("archive_item", "bad_item_type", "item_type must be source, claim or skill.")
     target_status = "active" if restore else "archived"
+    # §7.12 prints `archived by you` or `archived by Brain` beside every row,
+    # in amber for the second — "when something vanishes from the library
+    # untouched, this page says who". An agent reaches the engine over MCP; a
+    # person reaches it from the web.
+    actor = "brain" if ctx.surface == "mcp" else "you"
 
+    # Deliberately NOT filtered through `_visible`: restoring requires reading
+    # the archived row, and archiving something twice should stay a no-op
+    # rather than a lie about what exists.
     if item_type == "claim":
         record = tenant_db.get_claim(ctx.tenant, item_id)
-        changed = tenant_db.set_claim_status(ctx.tenant, item_id, target_status) if record else False
+        changed = (
+            tenant_db.set_claim_status(ctx.tenant, item_id, target_status, actor=actor)
+            if record else False
+        )
         label = record["claim"][:120] if record else ""
     elif item_type == "skill":
         record = tenant_db.get_skill(ctx.tenant, item_id) or tenant_db.get_skill_by_slug(
             ctx.tenant, item_id
         )
-        changed = tenant_db.set_skill_status(ctx.tenant, record["id"], target_status) if record else False
+        changed = (
+            tenant_db.set_skill_status(ctx.tenant, record["id"], target_status, actor=actor)
+            if record else False
+        )
         label = record["name"] if record else ""
         item_id = record["id"] if record else item_id
     else:
         record = tenant_db.get_source(ctx.tenant, item_id)
-        changed = tenant_db.set_source_status(ctx.tenant, item_id, target_status) if record else False
+        changed = (
+            tenant_db.set_source_status(ctx.tenant, item_id, target_status, actor=actor)
+            if record else False
+        )
         label = record["title"] if record else ""
 
     if record is None:
