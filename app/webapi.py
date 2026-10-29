@@ -408,6 +408,31 @@ async def api_job_run(request: Request) -> Response:
 
 
 @endpoint
+async def api_summaries(request: Request) -> Response:
+    """§7.6's list."""
+    ctx = _context(request)
+    _rate_limit(ctx, "list_summaries", {})
+    return _result(E.op_list_summaries(ctx))
+
+
+@endpoint
+async def api_summary(request: Request) -> Response:
+    ctx = _context(request)
+    summary_id = request.path_params["summary_id"]
+    _rate_limit(ctx, "get_summary", {"summary_id": summary_id})
+    return _result(E.op_get_summary(ctx, summary_id=summary_id), status_on_error=404)
+
+
+@endpoint
+async def api_source_summary(request: Request) -> Response:
+    """The same summary reached from §7.3's source detail."""
+    ctx = _context(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "get_summary", {"source_id": source_id})
+    return _result(E.op_get_summary(ctx, source_id=source_id), status_on_error=404)
+
+
+@endpoint
 async def api_source_progress(request: Request) -> Response:
     """§9.5 `GET /api/sources/:id/job` — step states, for the work block."""
     ctx = _context(request)
@@ -733,6 +758,9 @@ ROUTES = [
     Route("/api/jobs/run", api_job_run, methods=["POST"]),
     Route("/api/jobs/{job_id}/rescue", api_job_rescue, methods=["POST"]),
     Route("/api/sources/{source_id}/job", api_source_progress, methods=["GET"]),
+    Route("/api/sources/{source_id}/summary", api_source_summary, methods=["GET"]),
+    Route("/api/summaries", api_summaries, methods=["GET"]),
+    Route("/api/summaries/{summary_id}", api_summary, methods=["GET"]),
     Route("/api/archive/{item_type}/{item_id}", api_archive, methods=["POST"]),
     Route("/api/trash/{item_type}/{item_id}", api_trash_item, methods=["POST"]),
     Route("/api/delete/{item_id}", api_delete, methods=["POST"]),

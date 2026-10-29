@@ -61,6 +61,34 @@ CREATE TABLE IF NOT EXISTS source_content (
     cues_json TEXT NOT NULL DEFAULT '[]'
 );
 
+-- `MASTER_PLAN.md` §7.6 and §8. One summary per source, rewritten rather than
+-- duplicated when a source is re-processed.
+--
+-- `points` carries `[{text, t_ms}]` because §7.6 is explicit that every point
+-- clicks through to its moment in the transcript: "this is what makes a
+-- generated summary trustworthy". A point without its timestamp is the thing
+-- the section exists to prevent.
+--
+-- `gist` and `points` are the Brief reading; `chapters` is what Full adds. The
+-- segmented control "must change something real" (§7.6), so the two readings
+-- are stored separately rather than one being a truncation of the other.
+CREATE TABLE IF NOT EXISTS summaries (
+    rowid         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            TEXT UNIQUE NOT NULL,
+    source_id     TEXT NOT NULL UNIQUE REFERENCES sources(id) ON DELETE CASCADE,
+    gist          TEXT NOT NULL,
+    points_json   TEXT NOT NULL DEFAULT '[]',
+    chapters_json TEXT NOT NULL DEFAULT '[]',
+    instruction   TEXT NOT NULL DEFAULT '',
+    word_count    INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','archived')),
+    archived_at   DATETIME,
+    archived_by   TEXT NOT NULL DEFAULT '',
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_summaries_status ON summaries(status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS epistemic_claims (
     rowid              INTEGER PRIMARY KEY AUTOINCREMENT,
     id                 TEXT UNIQUE NOT NULL,
@@ -652,6 +680,107 @@ def _archival(status: str, actor: str) -> tuple[str | None, str]:
     return _now(), ("brain" if actor == "brain" else "you")
 
 
+def upsert_summary(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    gist: str,
+    points: Sequence[dict[str, Any]],
+    chapters: Sequence[dict[str, Any]] = (),
+    instruction: str = "",
+) -> dict[str, Any]:
+    """Write the one summary a source has, replacing any earlier one.
+
+    Re-processing a source (§7.3's overflow menu) must not leave two summaries
+    behind — hence the unique `source_id` and the upsert.
+    """
+    existing = conn.execute(
+        "SELECT id FROM summaries WHERE source_id = ?", (source_id,)
+    ).fetchone()
+    summary_id = existing["id"] if existing else new_id("sum")
+    words = len(gist.split()) + sum(len(str(p.get("text", "")).split()) for p in points)
+
+    conn.execute(
+        """
+        INSERT INTO summaries (id, source_id, gist, points_json, chapters_json,
+                               instruction, word_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET
+            gist = excluded.gist,
+            points_json = excluded.points_json,
+            chapters_json = excluded.chapters_json,
+            instruction = excluded.instruction,
+            word_count = excluded.word_count,
+            status = 'active',
+            archived_at = NULL,
+            archived_by = '',
+            created_at = CURRENT_TIMESTAMP
+        """,
+        (
+            summary_id,
+            source_id,
+            gist,
+            json.dumps(list(points), ensure_ascii=False),
+            json.dumps(list(chapters), ensure_ascii=False),
+            instruction[:2000],
+            words,
+        ),
+    )
+    return get_summary(conn, source_id=source_id)  # type: ignore[return-value]
+
+
+def hydrate_summary(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    record = dict(row)
+    record["points"] = json.loads(record.pop("points_json", "[]") or "[]")
+    record["chapters"] = json.loads(record.pop("chapters_json", "[]") or "[]")
+    # §7.6 puts a read time in the meta, and the Brief/Full control changes it.
+    # 220 words a minute, floored at one, so a short summary never reads "0 min".
+    record["read_minutes"] = max(1, round(record.get("word_count", 0) / 220))
+    return record
+
+
+def get_summary(
+    conn: sqlite3.Connection, *, summary_id: str | None = None, source_id: str | None = None
+) -> dict[str, Any] | None:
+    if summary_id:
+        row = conn.execute("SELECT * FROM summaries WHERE id = ?", (summary_id,)).fetchone()
+    elif source_id:
+        row = conn.execute(
+            "SELECT * FROM summaries WHERE source_id = ?", (source_id,)
+        ).fetchone()
+    else:
+        raise ValueError("one of summary_id or source_id is required")
+    return hydrate_summary(row) if row else None
+
+
+def list_summaries(
+    conn: sqlite3.Connection, *, limit: int = 50, active_only: bool = True
+) -> list[dict[str, Any]]:
+    sql = (
+        "SELECT su.*, s.title AS source_title, s.source_type, s.canonical_url, "
+        "       s.duration_sec "
+        "FROM summaries su JOIN sources s ON s.id = su.source_id"
+    )
+    if active_only:
+        sql += " WHERE su.status = 'active' AND s.status = 'active'"
+    sql += " ORDER BY su.created_at DESC LIMIT ?"
+    return [hydrate_summary(row) for row in conn.execute(sql, (limit,)).fetchall()]
+
+
+def set_summary_status(
+    conn: sqlite3.Connection, summary_id: str, status: str, *, actor: str = "you"
+) -> bool:
+    if status not in ("active", "archived"):
+        raise ValueError(status)
+    at, by = _archival(status, actor)
+    cur = conn.execute(
+        "UPDATE summaries SET status = ?, archived_at = ?, archived_by = ? "
+        "WHERE id = ? AND status != ?",
+        (status, at, by, summary_id, status),
+    )
+    return cur.rowcount > 0
+
+
 def set_claim_status(
     conn: sqlite3.Connection, claim_id: str, status: str, *, actor: str = "you"
 ) -> bool:
@@ -937,9 +1066,22 @@ def set_source_status(
             "WHERE source_id = ? AND status = 'active'",
             (at, by, source_id),
         )
+        # And the summary that came out of it. §7.12's filter offers a
+        # `Summary` pill, so an orphan summary of an archived source would sit
+        # in the library pointing at nothing.
+        conn.execute(
+            "UPDATE summaries SET status = 'archived', archived_at = ?, archived_by = ? "
+            "WHERE source_id = ? AND status = 'active'",
+            (at, by, source_id),
+        )
     elif cur.rowcount and status == "active":
         conn.execute(
             "UPDATE epistemic_claims SET status = 'active', archived_at = NULL, archived_by = '' "
+            "WHERE source_id = ? AND status = 'archived'",
+            (source_id,),
+        )
+        conn.execute(
+            "UPDATE summaries SET status = 'active', archived_at = NULL, archived_by = '' "
             "WHERE source_id = ? AND status = 'archived'",
             (source_id,),
         )

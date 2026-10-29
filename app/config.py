@@ -172,6 +172,10 @@ class Settings:
     llm_timeout_sec: float = 60.0
     llm_max_retries: int = 2
     llm_max_output_tokens: int = 4096
+    #: How much of a source the summariser is shown. A 42-minute transcript is
+    #: well past any sensible context window, and a summary of the first part
+    #: with a truthful gist beats a truncation error that loses the source.
+    summary_input_chars: int = 24000
     #: All three are "unset" sentinels. What they resolve to depends on which
     #: keys exist — see `resolved_embedding_*`.
     embedding_base_url: str = ""

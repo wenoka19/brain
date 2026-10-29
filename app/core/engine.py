@@ -8,6 +8,8 @@ so nothing here hard-codes how `brain` speaks.
 
 from __future__ import annotations
 
+import logging
+
 import functools
 import json
 import math
@@ -46,6 +48,9 @@ class OpResult:
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+
+
+LOGGER = logging.getLogger("brain.engine")
 
 def _fail(action: str, reason: str, message: str) -> OpResult:
     return OpResult(ok=False, action=action, error_reason=reason, error_message=message)
@@ -1062,14 +1067,46 @@ def _ingest_content(job, content, *, cfg, finish):
     tenant_db.set_source_content(tdb, source["id"], content.full_text, content.cues)
 
     # ---- step 3: writing the summary --------------------------------------
-    # Not built yet. Recorded as `skipped` with the reason rather than quietly
-    # dropped from the list: §4.4's six steps are fixed, and a row that
-    # vanishes is harder to read than one that says why it did nothing.
-    control_db.finish_step(
-        control, job_id, "summarise",
-        detail="not built yet",
-        state="skipped",
-    )
+    control_db.start_step(control, job_id, "summarise")
+    try:
+        written = prov.summariser.summarise(
+            content.full_text,
+            content.cues,
+            {
+                "title": source["title"],
+                "source_type": job["source_type"],
+                "author": content.author,
+                "user_note": job["user_note"],
+            },
+        ) if prov.summariser else {}
+    except Exception as exc:  # pragma: no cover - defensive
+        # §9.1 allows the summary step to fail without taking the source with
+        # it: the transcript and the rules are still worth having.
+        written = {}
+        LOGGER.warning("summary failed for job %s: %s", job_id, exc)
+
+    if written.get("gist"):
+        summary = tenant_db.upsert_summary(
+            tdb,
+            source_id=source["id"],
+            gist=written["gist"],
+            points=written.get("points") or [],
+            chapters=written.get("chapters") or [],
+            instruction=job["user_note"],
+        )
+        control_db.finish_step(
+            control, job_id, "summarise",
+            detail=(
+                "following your instruction" if job["user_note"]
+                else f"{len(summary['points'])} key points"
+            ),
+        )
+    else:
+        control_db.finish_step(
+            control, job_id, "summarise",
+            detail="nothing in this source was long enough to summarise",
+            state="skipped",
+        )
 
     # ---- step 4: extracting rules -----------------------------------------
     control_db.set_job_status(control, job_id, "extracting")
@@ -1147,6 +1184,57 @@ def _ingest_content(job, content, *, cfg, finish):
     outcome["rejected"] = extraction.rejected
     outcome["title"] = source["title"]
     return outcome
+
+
+def op_list_summaries(ctx: Context, *, limit: int = 50) -> OpResult:
+    """§7.6's list. Archived summaries never appear, on any surface: the
+    Archive has its own view of them."""
+    rows = tenant_db.list_summaries(ctx.tenant, limit=max(1, min(limit, 200)))
+    ctx.audit("list_summaries", "ok", detail={"count": len(rows)})
+    return OpResult(ok=True, action="list_summaries", data={"summaries": rows})
+
+
+def op_get_summary(
+    ctx: Context, *, summary_id: str | None = None, source_id: str | None = None
+) -> OpResult:
+    """One summary, by its own id or by the source it came from.
+
+    Both doors exist because §7.6 is reached two ways: from the Summaries list
+    by summary id, and from §7.3's source detail by source id.
+    """
+    if not summary_id and not source_id:
+        return _fail("get_summary", "empty_id", "A summary id or a source id is required.")
+
+    record = tenant_db.get_summary(ctx.tenant, summary_id=summary_id, source_id=source_id)
+    record = _visible(ctx, record)
+    if record is None:
+        ctx.audit("get_summary", "not_found", target_id=summary_id or source_id or "")
+        return _fail("get_summary", "not_found", "No summary is on record for that id.")
+
+    source = _visible(ctx, tenant_db.get_source(ctx.tenant, record["source_id"])) or {}
+    ctx.audit("get_summary", "ok", target_id=record["id"])
+    return OpResult(
+        ok=True,
+        action="get_summary",
+        data={
+            "summary": record,
+            "source": source,
+            # §7.6: every point clicks through to its moment. The deep link is
+            # built here, from the source's own URL, so no caller has to know
+            # how a YouTube timestamp differs from a PDF page.
+            "points": [
+                {
+                    **point,
+                    "deep_link": (
+                        deep_link(source.get("canonical_url", ""), "timestamp",
+                                  str(int(point["t_ms"] / 1000)))
+                        if point.get("t_ms") is not None else ""
+                    ),
+                }
+                for point in record["points"]
+            ],
+        },
+    )
 
 
 def op_source_progress(ctx: Context, source_id: str) -> OpResult:

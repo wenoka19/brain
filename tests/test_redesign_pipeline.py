@@ -102,15 +102,22 @@ class TestTheLedgerIsTheSixSteps:
         assert transcribe["state"] == "skipped"
         assert "no audio" in transcribe["detail"]
 
-    def test_the_two_unbuilt_steps_admit_it(self, cfg, user):
-        """`summarise` and `draft_skills` have no producer yet. They are
-        recorded as skipped with the reason — not quietly dropped, and not
-        shown as done."""
+    def test_an_unbuilt_step_admits_it(self, cfg, user):
+        """`draft_skills` has no producer yet, and is recorded as skipped with
+        the reason — not quietly dropped, and never shown as done.
+
+        `summarise` was here too until step 3 landed. The test narrowing is the
+        point: a step moves off this list by growing a producer, and until then
+        it says so to the person's face.
+        """
         job_id, _ = ingest(user, cfg)
         by_step = {s["step"]: s for s in steps_of(job_id)}
-        for step in ("summarise", "draft_skills"):
-            assert by_step[step]["state"] == "skipped"
-            assert by_step[step]["detail"] == "not built yet"
+        assert by_step["draft_skills"]["state"] == "skipped"
+        assert by_step["draft_skills"]["detail"] == "not built yet"
+
+        # Step 3 has a producer now, and must not regress into a caption.
+        assert by_step["summarise"]["state"] == "done"
+        assert by_step["summarise"]["detail"] != "not built yet"
 
 
 class TestAFailedJobLeavesNothingSpinning:
