@@ -237,7 +237,10 @@ Ordered by cost. Nothing on this list is touched before the founder says so.
 
 | Run | Result |
 |---|---|
-| `BRAIN_ENV=test python3 -m pytest -q` @ `c9a3cbb` | recorded in `PROGRESS.md` for the redesign phase |
+| `BRAIN_ENV=test python3 -m pytest` @ `0674eb0` | **808 passed, 0 failed**, 25 warnings, 109s |
+
+Warnings are all one kind: `InsecureKeyLengthWarning` from PyJWT, raised by tests that
+sign with deliberately short throwaway keys. Not a product finding.
 
 `.claude/setup.sh` does **not** install `mcp` or `yt-dlp` (§1.1) — both are
 needed before the suite can run in a fresh Cloud VM.
