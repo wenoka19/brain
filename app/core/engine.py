@@ -887,6 +887,22 @@ def op_archive_item(ctx: Context, item_type: ItemType, item_id: str, *, restore:
 # ===========================================================================
 # the ingestion pipeline + synchronous runner
 # ===========================================================================
+def _step_detail_read(job: dict[str, Any], content: Any) -> str:
+    """What step 1 reveals beside its name once it is done.
+
+    The capture shows a URL for a link and a format for a file, elided rather
+    than wrapped — the result sits inline next to the step name (§4.4), so a
+    long one would push the row off the card.
+    """
+    target = job.get("input_target") or ""
+    if job["source_type"] in ("pdf", "docx", "text", "image"):
+        pages = (getattr(content, "metadata", None) or {}).get("pages")
+        kind = job["source_type"].upper()
+        return f"{kind} · {pages} pages" if pages else kind
+    target = target.replace("https://", "").replace("http://", "")
+    return target if len(target) <= 48 else target[:45] + "…"
+
+
 def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str, Any]:
     """Run one leased job all the way through: fetch -> extract -> link."""
     cfg = cfg or settings()
@@ -905,6 +921,9 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
             control, job_id, status, error_message=message, claims_extracted=claims
         )
         if status in ("failed", "blocked_by_platform"):
+            # Nothing may stay `running` once the job is over, or the work
+            # block spins a step forever on a job that died (§4.4, §9.1).
+            control_db.abandon_steps(control, job_id, reason=message)
             # Give back whatever the queue booked, so a failure costs no quota.
             control_db.release_quota(
                 control,
@@ -929,8 +948,13 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
             "source_id": job["source_id"],
         }
 
-    # ---- fetch ------------------------------------------------------------
+    # ---- step 1: reading the source ---------------------------------------
+    # The ledger is seeded at queue time. This is the safety net for a job
+    # queued before that was true, and it is `INSERT OR IGNORE`, so a retried
+    # job keeps the history it already has.
+    control_db.seed_job_steps(control, job_id)
     control_db.set_job_status(control, job_id, "fetching")
+    control_db.start_step(control, job_id, "read")
     try:
         if job["source_type"] in ("pdf", "docx", "text", "image"):
             validated = gatekeeper.validate_file(job["input_target"], cfg=cfg)
@@ -948,6 +972,27 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
 
     if not content.full_text:
         return finish("failed", message="Nothing readable was found at that source.")
+
+    control_db.finish_step(
+        control, job_id, "read", detail=_step_detail_read(job, content)
+    )
+
+    # ---- step 2: transcribing audio ---------------------------------------
+    # The same fetch produced it, so there is no second call to make: what the
+    # person is told is what actually happened. A source with no spoken audio
+    # says so rather than claiming a transcription that never ran.
+    control_db.start_step(control, job_id, "transcribe")
+    words = len(content.full_text.split())
+    if job["source_type"] == "youtube":
+        control_db.finish_step(
+            control, job_id, "transcribe", detail=f"{words:,} words captured"
+        )
+    else:
+        control_db.finish_step(
+            control, job_id, "transcribe",
+            detail=f"{words:,} words read — no audio in this source",
+            state="skipped",
+        )
 
     # A GitHub markdown file is usually a `SKILL.md` — procedural text the user
     # intends to *run*. Unlike a transcript, which is only ever quoted back
@@ -1016,8 +1061,19 @@ def _ingest_content(job, content, *, cfg, finish):
     )
     tenant_db.set_source_content(tdb, source["id"], content.full_text, content.cues)
 
-    # ---- extract + ground -------------------------------------------------
+    # ---- step 3: writing the summary --------------------------------------
+    # Not built yet. Recorded as `skipped` with the reason rather than quietly
+    # dropped from the list: §4.4's six steps are fixed, and a row that
+    # vanishes is harder to read than one that says why it did nothing.
+    control_db.finish_step(
+        control, job_id, "summarise",
+        detail="not built yet",
+        state="skipped",
+    )
+
+    # ---- step 4: extracting rules -----------------------------------------
     control_db.set_job_status(control, job_id, "extracting")
+    control_db.start_step(control, job_id, "extract")
     try:
         extraction = extract_grounded_claims(
             content, extractor=prov.extractor, user_note=job["user_note"], cfg=cfg
@@ -1060,10 +1116,30 @@ def _ingest_content(job, content, *, cfg, finish):
         stored.append(record)
         embeddings[record["id"]] = vector
 
-    # ---- link -------------------------------------------------------------
+    control_db.finish_step(
+        control, job_id, "extract",
+        detail=f"{len(stored)} found" if stored else "nothing could be grounded",
+    )
+
+    # ---- step 5: drafting skills ------------------------------------------
+    control_db.finish_step(
+        control, job_id, "draft_skills",
+        detail="not built yet",
+        state="skipped",
+    )
+
+    # ---- step 6: updating memory ------------------------------------------
+    # The embeddings were written alongside each claim above and the FTS index
+    # by its triggers; what is left is the cross-source link pass. This step is
+    # what makes the library searchable, which is why §9.1 names it "updating
+    # memory" rather than "linking".
     control_db.set_job_status(control, job_id, "linking")
+    control_db.start_step(control, job_id, "remember")
     link_result = link_claims(
         tdb, stored, embeddings=embeddings, classifier=prov.linker, cfg=cfg
+    )
+    control_db.finish_step(
+        control, job_id, "remember", detail="available to every connection"
     )
 
     outcome = finish("ready", claims=len(stored))
@@ -1071,6 +1147,40 @@ def _ingest_content(job, content, *, cfg, finish):
     outcome["rejected"] = extraction.rejected
     outcome["title"] = source["title"]
     return outcome
+
+
+def op_source_progress(ctx: Context, source_id: str) -> OpResult:
+    """The six steps behind one source, for the work block of §4.4.
+
+    §9.1: "The UI polls or streams from those rows — the work block is a view
+    of real state, never a fake animation." So this returns exactly what the
+    ledger holds, including a step that was skipped and why.
+    """
+    source_id = (source_id or "").strip()
+    if not source_id:
+        return _fail("source_progress", "empty_id", "A source id is required.")
+
+    job = control_db.latest_job_for_source(ctx.control, ctx.user_id, source_id)
+    if job is None:
+        return _fail(
+            "source_progress", "not_found", f"No ingestion is on record for `{source_id}`."
+        )
+
+    steps = control_db.job_steps(ctx.control, job["job_id"])
+    done = [s for s in steps if s["finished_at"]]
+    return OpResult(
+        ok=True,
+        action="source_progress",
+        data={
+            "source_id": source_id,
+            "job_id": job["job_id"],
+            "status": job["status"],
+            "error_message": job["error_message"],
+            "steps": steps,
+            "finished": len(done) == len(steps) and len(steps) > 0,
+            "started_at": job["created_at"],
+        },
+    )
 
 
 def run_pending_jobs_sync(

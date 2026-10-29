@@ -87,6 +87,28 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_user ON ingestion_jobs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_pending ON ingestion_jobs(status, locked_until);
 
+-- One row per pipeline step, per job. `MASTER_PLAN.md` §9.1: "Each transition
+-- writes a `job` row. The UI polls or streams from those rows -- the work block
+-- is a view of real state, never a fake animation."
+--
+-- The job's own `status` column cannot carry this: it holds one value, and the
+-- work block of §4.4 shows six, each with its own result line, its own timing
+-- and its own failure. `detail` is what a finished step reveals beside its
+-- name -- "8,412 words captured", "3 found" -- and it stays empty while the
+-- step runs, because §4.4 is explicit that a running step reveals nothing.
+CREATE TABLE IF NOT EXISTS job_steps (
+    job_id      TEXT NOT NULL REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
+    ordinal     INTEGER NOT NULL,
+    step        TEXT NOT NULL,
+    state       TEXT NOT NULL DEFAULT 'pending'
+                CHECK (state IN ('pending','running','done','skipped','failed')),
+    detail      TEXT NOT NULL DEFAULT '',
+    started_at  DATETIME,
+    finished_at DATETIME,
+    PRIMARY KEY (job_id, step)
+);
+CREATE INDEX IF NOT EXISTS idx_job_steps ON job_steps(job_id, ordinal);
+
 -- Authorization codes are short-lived (60s), single-use and PKCE-bound. They
 -- live in the database rather than in process memory so the token exchange
 -- still works behind more than one uvicorn worker.
@@ -498,6 +520,35 @@ def list_sessions(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]
 # ---------------------------------------------------------------------------
 # ingestion jobs
 # ---------------------------------------------------------------------------
+#: The pipeline, as the person sees it (§9.1). Fixed, ordered, and the same six
+#: for every source — a step that does not apply to this source type is marked
+#: `skipped` with a reason rather than quietly left out, because a list whose
+#: length changes cannot be read at a glance.
+JOB_STEPS: tuple[tuple[str, str], ...] = (
+    ("read", "Reading the source"),
+    ("transcribe", "Transcribing audio"),
+    ("summarise", "Writing the summary"),
+    ("extract", "Extracting rules"),
+    ("draft_skills", "Drafting skills"),
+    ("remember", "Updating memory"),
+)
+
+STEP_KEYS = tuple(key for key, _ in JOB_STEPS)
+STEP_LABELS = dict(JOB_STEPS)
+
+
+def seed_job_steps(conn: sqlite3.Connection, job_id: str) -> None:
+    """Lay all six down as `pending` the moment the job is queued.
+
+    The frame shows six rows from the first paint (§7.3), so they must exist
+    before any of them runs. `INSERT OR IGNORE` keeps a retried job's history.
+    """
+    conn.executemany(
+        "INSERT OR IGNORE INTO job_steps (job_id, ordinal, step) VALUES (?, ?, ?)",
+        [(job_id, i, key) for i, key in enumerate(STEP_KEYS)],
+    )
+
+
 def create_job(
     conn: sqlite3.Connection,
     user_id: str,
@@ -528,6 +579,11 @@ def create_job(
             reserved_files,
         ),
     )
+    # Seeded here, at queue time, not when a worker claims the job. §7.3 draws
+    # six rows from the first paint, and a job sits `queued` for as long as the
+    # queue is busy — during which the work block would otherwise have nothing
+    # to show at all.
+    seed_job_steps(conn, job_id)
     return get_job(conn, job_id)  # type: ignore[return-value]
 
 
@@ -583,6 +639,90 @@ def set_job_status(
         sets.append("locked_until = NULL")
     params.append(job_id)
     conn.execute(f"UPDATE ingestion_jobs SET {', '.join(sets)} WHERE job_id = ?", params)
+
+
+def start_step(conn: sqlite3.Connection, job_id: str, step: str) -> None:
+    if step not in STEP_KEYS:
+        raise ValueError(f"unknown pipeline step: {step}")
+    conn.execute(
+        "UPDATE job_steps SET state = 'running', detail = '', "
+        "started_at = CURRENT_TIMESTAMP, finished_at = NULL "
+        "WHERE job_id = ? AND step = ?",
+        (job_id, step),
+    )
+
+
+def finish_step(
+    conn: sqlite3.Connection,
+    job_id: str,
+    step: str,
+    *,
+    detail: str = "",
+    state: str = "done",
+) -> None:
+    """Close a step and record what it found.
+
+    `detail` is the only thing the frame shows beside a step's name, and §4.4
+    says it appears only once the step is done — so it is written here and
+    never while the step is running.
+    """
+    if step not in STEP_KEYS:
+        raise ValueError(f"unknown pipeline step: {step}")
+    if state not in ("done", "skipped", "failed"):
+        raise ValueError(f"not a terminal step state: {state}")
+    conn.execute(
+        "UPDATE job_steps SET state = ?, detail = ?, finished_at = CURRENT_TIMESTAMP, "
+        "started_at = COALESCE(started_at, CURRENT_TIMESTAMP) "
+        "WHERE job_id = ? AND step = ?",
+        (state, detail[:300], job_id, step),
+    )
+
+
+def abandon_steps(conn: sqlite3.Connection, job_id: str, *, reason: str = "") -> None:
+    """A job died. Everything still open stops, so no step spins forever.
+
+    The failing step has already recorded its own reason; the ones after it
+    never started, and saying "failed" of a step that never ran would be a
+    second lie on top of the first.
+    """
+    conn.execute(
+        "UPDATE job_steps SET state = 'failed', detail = ?, finished_at = CURRENT_TIMESTAMP "
+        "WHERE job_id = ? AND state = 'running'",
+        (reason[:300], job_id),
+    )
+    conn.execute(
+        "UPDATE job_steps SET state = 'skipped', finished_at = CURRENT_TIMESTAMP "
+        "WHERE job_id = ? AND state = 'pending'",
+        (job_id,),
+    )
+
+
+def latest_job_for_source(
+    conn: sqlite3.Connection, user_id: str, source_id: str
+) -> dict[str, Any] | None:
+    """The job behind a source page.
+
+    Scoped to `user_id` and not to `source_id` alone: a source id arrives from
+    the client, and §10.7 is explicit that every query filters on the user —
+    "the single most likely data-leak bug in this app".
+
+    Newest first, because a re-processed source has more than one.
+    """
+    row = conn.execute(
+        "SELECT * FROM ingestion_jobs WHERE user_id = ? AND source_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (user_id, source_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def job_steps(conn: sqlite3.Connection, job_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT ordinal, step, state, detail, started_at, finished_at "
+        "FROM job_steps WHERE job_id = ? ORDER BY ordinal",
+        (job_id,),
+    ).fetchall()
+    return [{**dict(row), "label": STEP_LABELS[row["step"]]} for row in rows]
 
 
 def claim_next_job(

@@ -408,6 +408,15 @@ async def api_job_run(request: Request) -> Response:
 
 
 @endpoint
+async def api_source_progress(request: Request) -> Response:
+    """§9.5 `GET /api/sources/:id/job` — step states, for the work block."""
+    ctx = _context(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "source_progress", {"source_id": source_id})
+    return _result(E.op_source_progress(ctx, source_id), status_on_error=404)
+
+
+@endpoint
 async def api_job_rescue(request: Request) -> Response:
     ctx = _context(request)
     _require_csrf(request)
@@ -723,6 +732,7 @@ ROUTES = [
     Route("/api/jobs", api_jobs, methods=["GET"]),
     Route("/api/jobs/run", api_job_run, methods=["POST"]),
     Route("/api/jobs/{job_id}/rescue", api_job_rescue, methods=["POST"]),
+    Route("/api/sources/{source_id}/job", api_source_progress, methods=["GET"]),
     Route("/api/archive/{item_type}/{item_id}", api_archive, methods=["POST"]),
     Route("/api/trash/{item_type}/{item_id}", api_trash_item, methods=["POST"]),
     Route("/api/delete/{item_id}", api_delete, methods=["POST"]),
