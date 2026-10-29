@@ -1,7 +1,8 @@
 /* brain — the token layer.
-   MASTER_PLAN.md §2, implemented exactly as written. No value here was chosen
-   by the build: every literal is quoted from §2.1, and every semantic is the
-   reference §2.2 assigns to it.
+   MASTER_PLAN.md §2, implemented as written, with the five values the founder
+   ruled on in OPEN-6. No value here was chosen by the build: every literal is
+   quoted from §2.1 or carries a founder ruling in the comment beside it, and
+   every semantic is the reference §2.2 assigns to it.
 
    Two layers, and the separation is the point:
      · PRIMITIVES hold values. They are the only place a literal may appear.
@@ -32,7 +33,14 @@
   --grey-200: #d9d9d9;
   --white: #ffffff;
   --ink-900: #343a40;
-  --blue-600: #118ab2;
+  /* §2.1 says #118ab2. Raised to #1080a6 by founder ruling on OPEN-6: at
+     #118ab2 a white label on a filled primary button measured 3.96:1, under
+     §14.4's 4.5:1. Seven percent of lightness buys 4.51:1 and is imperceptible
+     against the captures. The accent is only ever a FILL or a RING in this
+     plan (§2.2: "primary actions, focus ring, meters") — never body text on
+     the canvas, where even this value reaches only 3.95:1. A frame that wants
+     accent-coloured text must put it on a card. */
+  --blue-600: #1080a6;
   --blue-200: #a2d2ff;
   --amber-100: #fbeec9;
   --amber-700: #7a5500;
@@ -122,21 +130,36 @@
 
   /* ---- text ---- */
   --text-primary: var(--ink-900);   /* titles, values, menu paths */
-  --text-secondary: color-mix(in srgb, var(--ink-900) 62%, transparent); /* every explanatory sentence */
-  --text-muted: color-mix(in srgb, var(--ink-900) 45%, transparent);     /* labels, metadata, placeholders ONLY */
+  /* §2.2 says 62%, which measured 3.54:1 — under §14.4. Raised to 77% by
+     founder ruling: this token carries "every explanatory sentence", so it is
+     body text and the 4.5:1 bar applies. Clears on all three surfaces, the
+     sidebar included (4.58:1). */
+  --text-secondary: color-mix(in srgb, var(--ink-900) 77%, transparent);
+  /* Left at the specified 45% — 2.36:1 — deliberately, by the same ruling.
+     §2.2 restricts this token to "labels, metadata, placeholders ONLY", and
+     §6 rule 6 forbids using it for a sentence. Raising it would flatten the
+     quiet metadata the captures depend on. The exception is recorded rather
+     than hidden: this is the one token in the system that does not meet
+     §14.4, and it is confined to text that repeats information available
+     elsewhere on the page. */
+  --text-muted: color-mix(in srgb, var(--ink-900) 45%, transparent);
 
   /* ---- borders ----
      `--border-subtle` is decorative and §2.2 exempts it from 3:1.
-     `--border-control` is annotated "MUST pass 3:1" in §2.2 — see OPEN-6 in
-     MASTER_PLAN.md §13: at 16% it measures 1.32:1, so the plan's value and the
-     plan's rule disagree. The value is kept as specified until that is ruled
-     on; nothing here was adjusted by the build. */
+     `--border-control` was specified at 16%, which measures 1.33:1 — against
+     the "MUST pass 3:1" that §2.2 writes on that very line. Raised to 56% by
+     founder ruling on OPEN-6. It matters more than it looks: an input is a
+     white field on a near-white canvas (1.07:1), so the border is the only
+     thing telling someone where the control is. */
   --border-subtle: color-mix(in srgb, var(--ink-900) 9%, transparent);
-  --border-control: color-mix(in srgb, var(--ink-900) 16%, transparent);
+  --border-control: color-mix(in srgb, var(--ink-900) 56%, transparent);
 
   /* ---- icons ---- */
   --icon-default: var(--ink-900);
-  --icon-muted: color-mix(in srgb, var(--ink-900) 55%, transparent);
+  /* §2.2 says 55%, which measured 2.75:1 on the sidebar. 59% reaches 3.01:1
+     there — the smallest change that clears the bar on the darkest surface an
+     icon sits on. Founder ruling, OPEN-6. */
+  --icon-muted: color-mix(in srgb, var(--ink-900) 59%, transparent);
 
   /* ---- accent ---- */
   --accent: var(--blue-600);        /* primary actions, focus ring, meters */
@@ -154,7 +177,12 @@
   --danger: var(--red-600);
   --danger-soft: var(--red-100);
 
-  /* ---- controls ---- */
+  /* ---- controls ----
+     Both left exactly as §2.1/§2.2 specify. They are fills behind a
+     meaningful element — the switch knob, the meter's accent bar — and not
+     text or a control border, which is what §14.4 governs. What carries the
+     state is the knob's position and the accent fill, both of which clear
+     their own bar. */
   --switch-off: color-mix(in srgb, var(--ink-900) 22%, transparent);
   --meter-track: color-mix(in srgb, var(--ink-900) 10%, transparent);
 }

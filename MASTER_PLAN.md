@@ -1150,12 +1150,25 @@ A fixed bottom composer adds `env(safe-area-inset-bottom)` to its own padding.
 | OPEN-3 | Does Home keep a thread history in the sidebar, or does each thread resolve into its source? | §7.2 |
 | OPEN-4 | Plan limits — the numbers in §7.10 are placeholders | Activity, billing |
 | OPEN-5 | Audio retention is stated as 30 days on the transcript page; confirm | legal copy |
-| **OPEN-6** | **§2.2's values cannot satisfy §14.4's criterion.** Measured in Chromium against the plan's own palette: `--border-control` at ink 16% gives **1.33:1** on a card while §2.2 annotates it *"MUST pass 3:1"*; `--text-secondary` at 62% gives **3.54:1** and `--text-muted` at 45% gives **2.36:1** against §14.4's 4.5:1; `--icon-muted` at 55% gives **2.75:1** against 3:1; and `--accent` `#118ab2` gives **3.96:1** both as text on white and as white on a filled primary button. Minimum passing values: border-control 56%, the text greys 77%, icon-muted 59%, accent darkened 7% in lightness to `#1080a6`. The two cheap ones are visually imperceptible; raising the border and the greys visibly changes the captures | every frame — the palette is layer 1 |
+| ~~OPEN-6~~ | **RULED 29 Oct 2026.** §2.2's values could not satisfy §14.4. Four tokens raised to the smallest values that clear the bar, two left below it deliberately. See `R-5` | closed |
 
-`OPEN-6` is **not** a licence to adjust the palette. `app/static/tokens.css`
-implements §2 exactly as written, contradiction included, and
-`tests/test_redesign_tokens.py` records the measurements so the shortfall
-cannot be forgotten or drift silently.
+**`R-5` — the OPEN-6 ruling, as built.**
+
+| Token | §2 said | Measured | Now | Measures | Why |
+|---|---|---|---|---|---|
+| `--blue-600` (→ `--accent`) | `#118ab2` | 3.96:1 white-on-fill | `#1080a6` | 4.51:1 | A white label on a filled primary button was under the bar. −7% lightness, imperceptible against the captures |
+| `--border-control` | ink 16% | 1.33:1 | ink **56%** | 3.18:1 | §2.2 annotated this very token *"MUST pass 3:1"*. An input is a white field on a near-white canvas — 1.07:1 — so the border is the only thing locating the control |
+| `--text-secondary` | ink 62% | 3.54:1 | ink **77%** | 4.58:1 worst | It carries *"every explanatory sentence"*, so it is body text |
+| `--icon-muted` | ink 55% | 2.75:1 | ink **59%** | 3.01:1 worst | Set by the sidebar, the darkest surface an icon sits on |
+| `--text-muted` | ink 45% | 2.36:1 | **unchanged** | 2.36:1 | Deliberate. §2.2 confines it to *"labels, metadata, placeholders ONLY"* and §6 rule 6 forbids a sentence in it. Raising it would flatten the quiet metadata the captures depend on |
+| `--switch-off`, `--meter-track` | ink 22% / 10% | 1.49:1 / 1.19:1 | **unchanged** | — | Out of scope, not overlooked: they are fills under a knob and a bar. What carries the state is the knob's position and the accent fill, which clear their own bars |
+
+**One constraint this creates.** Even at `#1080a6` the accent reaches only
+3.95:1 as text on the canvas. Every capture uses it as a **fill** or a **ring**
+— §2.2's own wording is *"primary actions, focus ring, meters"* — so this is
+not a problem today. A frame that wants accent-coloured text must put it on a
+card. `tests/test_redesign_tokens.py` asserts the limit so it cannot be
+crossed by accident.
 
 ---
 
@@ -1372,14 +1385,13 @@ alert variant is reserved for a queue that actually has something in it.
   button §7.7 describes is not visible at rest, so it belongs with the
   hover actions.
 
-> **CONFLICT R-1 vs the capture — needs the founder.** The transcript capture
-> shows `2 speakers` in the meta line **and** `Host` / `Guest` labels marking
-> every speaker change in the body, while override `R-1` drops speakers at the
-> founder's instruction. The design does not merely *mention* speakers: it is
-> **structured by them** — the body is a sequence of attributed turns, and
-> removing attribution changes what that grid renders. Nothing in the ingestion
-> pipeline records a speaker per cue (`STACK_AUDIT.md` C5), so this is a real
-> fork, not a wording choice.
+> **R-1 vs the capture — RULED 29 Oct 2026: the override stands, the capture
+> does not.** The transcript capture shows `2 speakers` in the meta and
+> `Host` / `Guest` above every speaker change. Put to the founder with the cost,
+> the answer was to drop speakers entirely. So: **no speaker label anywhere, and
+> `2 speakers` leaves the meta line.** The body keeps its grid — timestamps in
+> the gutter, text at reading size — as a sequence of timestamped blocks without
+> attribution. This is the one place where a capture is knowingly not followed.
 
 ### 18.6 Still to arrive
 
@@ -1398,6 +1410,7 @@ never disagrees with what is being built.
 | `R-2` | §7.8, §7.12, all cards | Expert disagreement (`tension_links`) is not surfaced in the web app at all. It stays on the MCP side, where a host LLM or agent reads it | 29 Oct 2026 |
 | `R-3` | §1.1 | Jinja2 and Tailwind-via-CDN are not adopted. The 14 screens are real URLs behind a `pushState` router on the existing static shell; CSS stays hand-written and tokenised | 29 Oct 2026 |
 | `R-4` | §9.2 | The MCP tool surface keeps the shipped 8 names. §7.10's call log shows those, not the plan's illustrative `search_rules` | 29 Oct 2026 |
+| `R-5` | §2.1, §2.2 | Four token values raised so §14.4 can be met; two left below it deliberately. Table in §13 | 29 Oct 2026 |
 
 Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 

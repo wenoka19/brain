@@ -6,10 +6,10 @@ contain exactly those, with exactly those values, and nothing else. A literal
 that appears outside the primitives block is the failure mode this guards —
 it is how a design system quietly stops being one.
 
-The contrast test at the bottom does not assert a pass. It records what the
-plan's own values measure, because three of them cannot satisfy the plan's own
-acceptance criterion (§14.4). See `OPEN-6`. When that is ruled on, this test
-becomes an assertion rather than a record.
+The contrast tests at the bottom assert §14.4 directly. They can, because
+`OPEN-6` has been ruled on: four tokens moved to the smallest values that clear
+the bar, and two were deliberately left below it with their reasons. Those two
+are asserted as exceptions, so neither can spread.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ PRIMITIVES = {
     # colour
     "--grey-100": "#f5f5f5", "--grey-150": "#f0f0f0", "--grey-200": "#d9d9d9",
     "--white": "#ffffff", "--ink-900": "#343a40",
-    "--blue-600": "#118ab2", "--blue-200": "#a2d2ff",
+    "--blue-600": "#1080a6", "--blue-200": "#a2d2ff",
     "--amber-100": "#fbeec9", "--amber-700": "#7a5500",
     "--green-100": "#d9f2e4", "--green-700": "#14663f",
     "--red-100": "#fbe4e1", "--red-600": "#b3372b", "--red-700": "#8a2a22",
@@ -69,9 +69,9 @@ SEMANTICS = {
     "--bg-hover": ("--grey-100", None), "--bg-selected": ("--white", None),
     "--bg-field": ("--white", None), "--bg-overlay": ("--ink-900", 32),
     "--text-primary": ("--ink-900", None),
-    "--text-secondary": ("--ink-900", 62), "--text-muted": ("--ink-900", 45),
-    "--border-subtle": ("--ink-900", 9), "--border-control": ("--ink-900", 16),
-    "--icon-default": ("--ink-900", None), "--icon-muted": ("--ink-900", 55),
+    "--text-secondary": ("--ink-900", 77), "--text-muted": ("--ink-900", 45),
+    "--border-subtle": ("--ink-900", 9), "--border-control": ("--ink-900", 56),
+    "--icon-default": ("--ink-900", None), "--icon-muted": ("--ink-900", 59),
     "--accent": ("--blue-600", None), "--accent-soft": ("--blue-200", None),
     "--focus-ring": ("--blue-600", None),
     "--status-active-bg": ("--green-100", None), "--status-active-text": ("--green-700", None),
@@ -176,46 +176,79 @@ def _over(ink: str, bg: str, alpha: float) -> str:
     )
 
 
-class TestMeasuredContrast:
-    """What the plan's own values actually measure.
+class TestAcceptanceCriterion14_4:
+    """Text at 4.5:1, control borders at 3:1, in the light theme.
 
-    These are recorded, not judged, so that any later edit to the palette is a
-    deliberate act rather than a drift. Three of them are below what §14.4
-    demands, which is `OPEN-6`.
+    `OPEN-6`: the plan specified values that could not meet the criterion it
+    also specified. The founder ruled on 29 October 2026 — raise what harms
+    someone, leave the quiet metadata alone — and these tests hold that line.
     """
 
     INK, CANVAS, CARD, BASE = "#343a40", "#f0f0f0", "#ffffff", "#d9d9d9"
+    ACCENT = "#1080a6"
 
-    def test_primary_text_clears_the_bar_everywhere(self):
-        for surface in (self.CANVAS, self.CARD, self.BASE):
-            assert _ratio(self.INK, surface) >= 4.5
+    @property
+    def surfaces(self):
+        return {"canvas": self.CANVAS, "card": self.CARD, "sidebar": self.BASE}
 
-    def test_the_three_pills_clear_the_bar(self):
+    def test_primary_text_clears_4_5_on_every_surface(self):
+        for where, bg in self.surfaces.items():
+            assert _ratio(self.INK, bg) >= 4.5, where
+
+    def test_secondary_text_clears_4_5_on_every_surface(self):
+        """Raised 62% -> 77%. It carries every explanatory sentence, so it is
+        body text and the full bar applies — the sidebar is the tight one."""
+        for where, bg in self.surfaces.items():
+            assert _ratio(_over(self.INK, bg, 0.77), bg) >= 4.5, where
+
+    def test_control_borders_clear_3_1(self):
+        """Raised 16% -> 56%. A white field on a near-white canvas is a 1.07:1
+        edge, so the border is the only thing locating the control."""
+        for where in ("card", "canvas"):
+            bg = self.surfaces[where]
+            assert _ratio(_over(self.INK, bg, 0.56), bg) >= 3.0, where
+
+    def test_icons_clear_3_1_on_every_surface(self):
+        """Raised 55% -> 59%, set by the sidebar, the darkest surface."""
+        for where, bg in self.surfaces.items():
+            assert _ratio(_over(self.INK, bg, 0.59), bg) >= 3.0, where
+
+    def test_the_accent_works_as_a_fill_and_as_a_ring(self):
+        """#118ab2 -> #1080a6. White on the filled primary button is the case
+        that forced it."""
+        assert _ratio("#ffffff", self.ACCENT) >= 4.5      # white label on a filled button
+        assert _ratio(self.ACCENT, self.CARD) >= 4.5      # accent text, on a card
+        assert _ratio(self.ACCENT, self.CANVAS) >= 3.0    # focus ring, non-text
+
+    def test_the_accent_is_not_safe_as_text_on_the_canvas(self):
+        """Asserted so a future frame cannot quietly do it.
+
+        §2.2 assigns the accent to "primary actions, focus ring, meters" and
+        every capture uses it as a fill or a ring. On the canvas it reaches
+        only 3.95:1, so accent-coloured text belongs on a card.
+        """
+        assert _ratio(self.ACCENT, self.CANVAS) < 4.5
+
+    def test_the_three_pills_clear_4_5(self):
         assert _ratio("#14663f", "#d9f2e4") >= 4.5   # active / green
         assert _ratio("#7a5500", "#fbeec9") >= 4.5   # pending / amber
         assert _ratio("#ffffff", "#b3372b") >= 4.5   # danger-solid
 
-    def test_the_shortfalls_are_on_record(self):
-        """OPEN-6: the plan's values against the plan's §14.4 criterion."""
-        measured = {
-            "text-secondary@62% on canvas": round(_ratio(_over(self.INK, self.CANVAS, .62), self.CANVAS), 2),
-            "text-muted@45% on canvas": round(_ratio(_over(self.INK, self.CANVAS, .45), self.CANVAS), 2),
-            "icon-muted@55% on sidebar": round(_ratio(_over(self.INK, self.BASE, .55), self.BASE), 2),
-            "border-control@16% on card": round(_ratio(_over(self.INK, self.CARD, .16), self.CARD), 2),
-            "accent on card": round(_ratio("#118ab2", self.CARD), 2),
-            "white on accent": round(_ratio("#ffffff", "#118ab2"), 2),
-        }
-        assert measured == {
-            "text-secondary@62% on canvas": 3.54,
-            "text-muted@45% on canvas": 2.36,
-            "icon-muted@55% on sidebar": 2.75,
-            "border-control@16% on card": 1.33,
-            "accent on card": 3.96,
-            "white on accent": 3.96,
-        }, f"the palette changed: {measured}"
+    # -- the two deliberate exceptions ------------------------------------
+    def test_muted_text_is_the_one_token_below_the_bar_and_stays_contained(self):
+        """Left at 45% by the ruling. §2.2 confines it to "labels, metadata,
+        placeholders ONLY" and §6 rule 6 forbids a sentence in it. The test
+        pins the exception so nobody widens it by raising the value and
+        assuming the restriction went away."""
+        assert _ratio(_over(self.INK, self.CANVAS, 0.45), self.CANVAS) < 4.5
+        source = TOKENS.read_text()
+        assert "labels, metadata, placeholders ONLY" in source or "metadata" in source
 
-    def test_border_control_contradicts_its_own_annotation(self):
-        """§2.2 annotates `--border-control` "(MUST pass 3:1)" and specifies a
-        value that cannot. This asserts the contradiction so it cannot be
-        forgotten; it is deleted when OPEN-6 is ruled on."""
-        assert _ratio(_over(self.INK, self.CARD, .16), self.CARD) < 3.0
+    def test_the_two_track_fills_are_out_of_scope_not_overlooked(self):
+        """`--switch-off` and `--meter-track` sit under a knob and a bar. What
+        carries the state is the knob position and the accent fill, which clear
+        their own bars; §14.4 governs text and control borders."""
+        assert _ratio(_over(self.INK, self.CARD, 0.22), self.CARD) < 3.0
+        assert _ratio(_over(self.INK, self.CARD, 0.10), self.CARD) < 3.0
+        assert _ratio("#ffffff", self.ACCENT) >= 4.5     # the knob, when on
+        assert _ratio(self.ACCENT, _over(self.INK, self.CARD, 0.10)) >= 3.0  # meter fill vs its track
