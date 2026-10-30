@@ -1221,18 +1221,18 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 |---|---|---|---|---|---|
 | 7.1 | `/` | Home — empty state | **built** | ✓ | Shipped app opens on `Everything` (card list), no greeting/typewriter frame |
 | 7.2 | `/` | Home — thread state | not-built | **✓** | Shipped ingestion is a job stepper in a pane, not a conversation thread |
-| 7.3 | `/sources/:id` | Source detail | partial | **✓ ×3** | Inspector pane shows a source's claims; no 6-step work block, no route |
+| 7.3 | `/sources/:id` | Source detail | **built** | ✓ ×3 | Inspector pane shows a source's claims; no 6-step work block, no route |
 | 7.4 | `/library/transcripts` | Transcripts list | **built** | ✓ | `source_content.full_text` exists; never surfaced as a transcript |
 | 7.5 | `/transcripts/:id` | Transcript reader | **built** | ✓ | No timestamp-gutter reader, no in-page search, no export |
 | 7.6 | `/library/summaries`, `/summaries/:id` | Summaries | **built** | ✓ ×2 | No `summary` entity in the engine at all |
 | 7.7 | `/library/sources` | Sources list | **built** | ✓ | Sources appear inside `Everything`; no type-first meta, no yield column |
-| 7.8 | `/rules` | Rules | partial | **✓ ×2** | `Library` shows epistemic claims — richer than a rule, different card |
-| 7.9 | `/skills` | My skills | partial | **✓ ×3** | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
+| 7.8 | `/rules` | Rules | **built** | ✓ ×2 | `Library` shows epistemic claims — richer than a rule, different card |
+| 7.9 | `/skills` | My skills | **built** | ✓ ×3 | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
 | 7.10 | `/activity` | Activity | partial | **✓ ×2** | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |
 | 7.11 | `/connections` | Connections | partial | **✓ ×3** | Profile block 2 carries the `/mcp` link + live sessions; no key-in-URL, no tiles |
 | 7.12 | `/archive` | Archive | partial | **✓ ×2** | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
 | 7.13 | `/profile` | Profile | shipped-divergent | **✓ ×3** | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
-| 7.14 | `/signin` | Sign in | partial | — | Email-keyed login exists in `/api/login`; no dedicated frame |
+| 7.14 | `/signin` | Sign in | **built** | — | Email-keyed login exists in `/api/login`; no dedicated frame |
 
 ## 18. REFERENCE IMAGES — WHAT EACH CAPTURE ADDS
 

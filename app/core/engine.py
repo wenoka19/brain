@@ -1363,6 +1363,62 @@ def op_list_sources(ctx: Context, *, limit: int = 100) -> OpResult:
     return OpResult(ok=True, action="list_sources", data={"sources": rows})
 
 
+def op_get_source(ctx: Context, source_id: str) -> OpResult:
+    """§7.3: one source and everything it produced, in one read.
+
+    The frame is a single page — header, instruction, the six steps, then
+    "What came out of it" — so it is one request. Fetching the summary, the
+    rules and the skills separately would make four round trips to draw one
+    screen, and a half-drawn page while they land.
+    """
+    source = _visible(ctx, tenant_db.get_source(ctx.tenant, (source_id or "").strip()))
+    if source is None:
+        return _fail("get_source", "not_found", f"No source has the id `{source_id}`.")
+
+    rules = tenant_db.claims_for_source(ctx.tenant, source["id"], limit=50)
+    skills = [
+        dict(row)
+        for row in ctx.tenant.execute(
+            "SELECT * FROM skills WHERE source_id = ? AND status IN ('proposed','active') "
+            "ORDER BY CASE status WHEN 'proposed' THEN 0 ELSE 1 END, updated_at DESC",
+            (source["id"],),
+        ).fetchall()
+    ]
+    summary = tenant_db.get_summary(ctx.tenant, source_id=source["id"])
+    progress = op_source_progress(ctx, source["id"])
+
+    ctx.audit("get_source", "ok", target_id=source["id"])
+    return OpResult(
+        ok=True,
+        action="get_source",
+        data={
+            "source": source,
+            "instruction": _instruction_for(ctx, source["id"]),
+            "summary": summary,
+            "rules": [
+                {
+                    **rule,
+                    "deep_link": deep_link(
+                        source.get("canonical_url", ""),
+                        rule.get("locator_type", ""),
+                        rule.get("locator_value", ""),
+                    ),
+                }
+                for rule in rules
+            ],
+            "skills": [tenant_db.hydrate_skill(row) for row in skills],
+            "has_transcript": tenant_db.get_source_content(ctx.tenant, source["id"]) is not None,
+            "progress": progress.data if progress.ok else None,
+        },
+    )
+
+
+def _instruction_for(ctx: Context, source_id: str) -> str:
+    """What the person asked for when they handed this over (§7.3)."""
+    job = control_db.latest_job_for_source(ctx.control, ctx.user_id, source_id)
+    return (job or {}).get("user_note", "") or ""
+
+
 def op_list_transcripts(ctx: Context, *, limit: int = 100) -> OpResult:
     """§7.4. A transcript is a source whose text was captured."""
     rows = tenant_db.list_transcripts(ctx.tenant, limit=limit)
@@ -1515,6 +1571,23 @@ def op_source_progress(ctx: Context, source_id: str) -> OpResult:
 
     steps = control_db.job_steps(ctx.control, job["job_id"])
     done = [s for s in steps if s["finished_at"]]
+
+    # §7.3's header reads "Done in 2m 14s". Measured from the first step that
+    # started to the last that finished, which is the work the person waited
+    # for — not the job row's age, which includes time spent queued.
+    elapsed = None
+    started = [s["started_at"] for s in steps if s["started_at"]]
+    finished = [s["finished_at"] for s in steps if s["finished_at"]]
+    if started and finished and len(done) == len(steps):
+        from datetime import datetime
+
+        def parse(value: str) -> datetime:
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+
+        try:
+            elapsed = max(0, int((parse(max(finished)) - parse(min(started))).total_seconds()))
+        except (ValueError, TypeError):
+            elapsed = None
     return OpResult(
         ok=True,
         action="source_progress",
@@ -1525,6 +1598,7 @@ def op_source_progress(ctx: Context, source_id: str) -> OpResult:
             "error_message": job["error_message"],
             "steps": steps,
             "finished": len(done) == len(steps) and len(steps) > 0,
+            "elapsed_sec": elapsed,
             "started_at": job["created_at"],
         },
     )

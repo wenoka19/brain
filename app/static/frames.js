@@ -248,6 +248,13 @@ export async function api(path) {
     credentials: "same-origin",
   });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 403) {
+    // No session. §7.14 is the door, and a 401 rendered as a page error tells
+    // the person nothing they can act on (§6 rule 11).
+    const error = new Error("Sign in to open your library.");
+    error.reason = "needs_sign_in";
+    throw error;
+  }
   if (!response.ok || body.ok === false) {
     const error = new Error(body.message || `Request failed (${response.status})`);
     error.reason = body.reason || String(response.status);
@@ -307,6 +314,15 @@ export function duration(seconds) {
   return h
     ? `${h}:${String(m).padStart(2, "0")}:${String(rest).padStart(2, "0")}`
     : `${m}:${String(rest).padStart(2, "0")}`;
+}
+
+/** "2m 14s", the way §7.3 writes it. */
+export function humanDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return rest ? `${m}m ${rest}s` : `${m}m`;
 }
 
 export function stamp(ms) {
@@ -622,6 +638,450 @@ FRAMES.summary = async function summary(params) {
 };
 
 /* ---------------------------------------------------------------------- */
+/* §7.3 SOURCE DETAIL — the work block                                     */
+/* ---------------------------------------------------------------------- */
+
+/** §4.4. The marker is the state: a dot, a spinner, a check. A running step
+ *  reveals nothing — that rule is enforced in the markup and not only in the
+ *  data, so a future caller cannot leak a result early. */
+function workStep(step) {
+  const done = step.state === "done" || step.state === "skipped";
+  return `
+    <li class="work-step" data-state="${esc(step.state === "skipped" ? "done" : step.state)}">
+      <span class="work-marker">${step.state === "done" ? icon("check") : ""}</span>
+      <span>${esc(step.label)}</span>
+      ${done && step.detail ? `<span class="work-result">${esc(step.detail)}</span>` : ""}
+    </li>`;
+}
+
+FRAMES.source = async function source(params) {
+  const data = await api(`/api/sources/${encodeURIComponent(params.id)}`);
+  const src = data.source;
+  const progress = data.progress;
+  const running = progress && !progress.finished;
+
+  const stepsHtml = progress ? progress.steps.map(workStep).join("") : "";
+  // §7.3's header: "Working on it" while it runs, "Done in 2m 14s" after.
+  const elapsed =
+    progress && progress.finished
+      ? progress.elapsed_sec !== null && progress.elapsed_sec !== undefined
+        ? `Done in ${humanDuration(progress.elapsed_sec)}`
+        : "Done"
+      : "Working on it";
+
+  // §18.4: the block collapses on Home and stays open here.
+  const workHtml = progress
+    ? `<div class="work">
+         <div class="work-head">
+           <span>${esc(elapsed)}</span>
+           <span class="pill" data-state="archived">${esc(String(progress.steps.length))} steps</span>
+         </div>
+         <ul class="work-steps">${stepsHtml}</ul>
+       </div>
+       <p class="work-hint">You can leave this page. Brain keeps working and
+          Activity will show when it lands.</p>`
+    : "";
+
+  const rulesHtml = data.rules
+    .map(
+      (rule) => `
+      <li class="yield-row">
+        <span class="yield-text">${esc(rule.claim)}</span>
+        <span class="yield-time">${
+          rule.deep_link
+            ? `<a href="${esc(rule.deep_link)}" target="_blank" rel="noopener">${esc(rule.locator_value || "")}</a>`
+            : esc(rule.locator_value || "")
+        }</span>
+      </li>`
+    )
+    .join("");
+
+  const needingReview = data.skills.filter((s) => s.status === "proposed").length;
+  const skillsHtml = data.skills
+    .map(
+      (skill) => `
+      <li class="yield-row">
+        <span class="yield-text">${esc(skill.name)}</span>
+        ${
+          skill.status === "proposed"
+            ? `<button class="btn" data-size="sm" data-variant="primary"
+                       data-approve="${esc(skill.id)}">Approve</button>`
+            : ""
+        }
+      </li>`
+    )
+    .join("");
+
+  const node = el(`
+    <div class="wrap">
+      <a class="action-link back" href="/library/sources">${icon("caret", "icon back-caret")}Sources</a>
+
+      <header class="source-head">
+        <span class="source-thumb">${icon(TYPE_ICON[src.source_type] || "doc")}</span>
+        <div>
+          <h1 class="read-title">${esc(src.title)}</h1>
+          <p class="read-meta">${metaHtml([
+            FORMAT_WORD[src.source_type] || src.source_type,
+            duration(src.duration_sec),
+            `added ${dateLabel(src.created_at).toLowerCase()}`,
+          ])}</p>
+          <span class="pill" data-state="${running ? "pending" : "active"}">${
+            running ? "Processing" : "In memory"
+          }</span>
+        </div>
+      </header>
+
+      ${
+        data.instruction
+          ? `<div class="note-box">
+               <span class="field-label">Your instruction</span>
+               <p class="note-text">${esc(data.instruction)}</p>
+             </div>`
+          : ""
+      }
+
+      ${workHtml}
+
+      <section class="section">
+        <div class="yield-head">
+          <h2 class="section-title">What came out of it</h2>
+          ${
+            data.has_transcript
+              ? `<a class="btn" data-variant="secondary" href="/transcripts/${esc(src.id)}">Open transcript</a>`
+              : ""
+          }
+        </div>
+
+        ${
+          data.summary
+            ? `<article class="yield-card">
+                 <div class="yield-card-head">${slot("summaries")}<span>Summary</span></div>
+                 <p class="yield-gist">${esc(data.summary.gist)}</p>
+               </article>`
+            : ""
+        }
+
+        ${
+          data.rules.length
+            ? `<article class="yield-card">
+                 <div class="yield-card-head">${slot("rules")}<span>Rules</span>
+                   <span class="pill" data-state="active">${esc(String(data.rules.length))} added</span>
+                 </div>
+                 <ul class="yield-list">${rulesHtml}</ul>
+               </article>`
+            : ""
+        }
+
+        ${
+          data.skills.length
+            ? `<article class="yield-card">
+                 <div class="yield-card-head">${slot("skills")}<span>Skills</span>
+                   ${
+                     needingReview
+                       ? `<span class="pill" data-state="pending">${esc(String(needingReview))} need review</span>`
+                       : ""
+                   }
+                 </div>
+                 <ul class="yield-list">${skillsHtml}</ul>
+               </article>`
+            : ""
+        }
+      </section>
+    </div>`);
+
+  wireApprovals(node);
+  return node;
+};
+
+/** Approve, wherever an Approve button appears. */
+function wireApprovals(node) {
+  for (const button of node.querySelectorAll("[data-approve]")) {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      button.disabled = true;
+      try {
+        await post(`/api/skills/${encodeURIComponent(button.dataset.approve)}/review`, {
+          decision: "approve",
+        });
+        button.replaceWith(el('<span class="pill" data-state="active">Approved</span>'));
+        refreshCounts();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = error.message.slice(0, 40);
+      }
+    });
+  }
+}
+
+export async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Brain-Request": "1",
+      "X-Brain-CSRF": csrfToken(),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) {
+    const error = new Error(payload.message || `Request failed (${response.status})`);
+    error.reason = payload.reason || String(response.status);
+    throw error;
+  }
+  return payload;
+}
+
+/** The double-submit token the API checks. Read from the cookie it was set
+ *  in, which is what makes it a double submit rather than a second secret. */
+function csrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)brain_csrf=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+/* ---------------------------------------------------------------------- */
+/* §7.8 RULES, §7.9 SKILLS                                                 */
+/* ---------------------------------------------------------------------- */
+
+/** §4.2's expandable card. Collapsed shows one clamped line; the caret turns.
+ *  `R-6`: the group heading above it carries no count and no dash. */
+function expandable({ id, icon: glyph, title, sub, bodyHtml, state = "" }) {
+  return `
+    <article class="exp-card" data-open="false"${state ? ` data-state="${esc(state)}"` : ""}>
+      <button class="exp-head" type="button" data-toggle="${esc(id)}" aria-expanded="false">
+        <!-- Points DOWN at rest: §4.2 rotates it -90 degrees when closed, so
+             the base must be the open position or the two states swap. -->
+        <span class="exp-caret slot">${icon("chevron-down")}</span>
+        <span class="item-type">${icon(glyph)}</span>
+        <span class="item-text">
+          <span class="item-title">${esc(title)}</span>
+          <span class="item-meta exp-summary">${esc(sub)}</span>
+        </span>
+      </button>
+      <div class="exp-body">${bodyHtml}</div>
+    </article>`;
+}
+
+function wireExpanders(node) {
+  for (const head of node.querySelectorAll("[data-toggle]")) {
+    head.addEventListener("click", () => {
+      const card = head.closest(".exp-card");
+      const open = card.dataset.open === "true";
+      card.dataset.open = String(!open);
+      head.setAttribute("aria-expanded", String(!open));
+    });
+  }
+}
+
+FRAMES.rules = async function rules() {
+  const data = await api("/api/rules");
+
+  const card = (rule) => {
+    const written = !rule.provenance.title || rule.source_id === "src_user_axioms";
+    const origin = written ? "Written here" : rule.provenance.title;
+    const detail = [rule.when_it_applies, rule.when_it_fails && `Not when ${rule.when_it_fails}`]
+      .filter(Boolean)
+      .join(" ");
+    return expandable({
+      id: rule.id,
+      icon: "rules",
+      title: rule.claim,
+      sub: [origin, rule.provenance.locator].filter(Boolean).join(" · "),
+      bodyHtml: `
+        <p class="rule-full">${esc(detail || rule.claim)}</p>
+        ${
+          rule.anchor_quote
+            ? `<blockquote class="rule-quote">${esc(rule.anchor_quote)}</blockquote>`
+            : ""
+        }
+        <div class="chip-row">
+          <span class="chip">${icon("sources")}${esc(origin)}</span>
+          ${
+            rule.provenance.deep_link
+              ? `<a class="chip" href="${esc(rule.provenance.deep_link)}" target="_blank" rel="noopener">${icon("clock")}${esc(rule.provenance.locator)}</a>`
+              : ""
+          }
+        </div>
+        <div class="btn-row">
+          <button class="btn" data-variant="secondary">Edit</button>
+          <button class="btn" data-variant="ghost">Archive</button>
+        </div>`,
+    });
+  };
+
+  const section = (title, note, rows) =>
+    rows.length
+      ? `<section class="section">
+           <div class="group-head">
+             <h2 class="group-title">${esc(title)}</h2>
+             <p class="group-note">${esc(note)}</p>
+           </div>
+           <div class="stack">${rows.map(card).join("")}</div>
+         </section>`
+      : "";
+
+  const anything = data.mine.length + data.from_your_sources.length;
+  const node = el(`
+    <div class="wrap">
+      <h1 class="page-title">Rules</h1>
+      <div class="toolbar">
+        <span class="search">${slot("search")}
+          <input class="input" placeholder="Search rules" aria-label="Search rules">
+          <kbd class="kbd">Ctrl K</kbd>
+        </span>
+        <a class="btn" data-variant="primary" href="/rules?create=1">${icon("plus")}Write a rule</a>
+      </div>
+      ${
+        anything
+          ? section("My rules", "Written by you, or pulled from your own AI chats.", data.mine) +
+            section(
+              "From your sources",
+              "Extracted by Brain, traceable to where they were said.",
+              data.from_your_sources
+            )
+          : `<div class="empty">
+               <p>No rules yet. Tell Brain how you work, or give it something to
+                  read, and the standing instructions it finds land here.</p>
+               <a class="btn" data-variant="primary" href="/">Teach Brain</a>
+             </div>`
+      }
+    </div>`);
+
+  wireExpanders(node);
+  return node;
+};
+
+FRAMES.skills = async function skills() {
+  const data = await api("/api/skills");
+
+  const card = (skill, kind) =>
+    expandable({
+      id: skill.id,
+      icon: "skills",
+      title: skill.name,
+      sub: skill.description,
+      state: kind === "proposed" ? "proposed" : kind === "inactive" ? "inactive" : "",
+      bodyHtml: `
+        <span class="field-label">When to use it</span>
+        <p class="rule-full">${esc(skill.trigger_when || "—")}</p>
+        <span class="field-label">What it does</span>
+        <ol class="steps-list steps-plain">${(skill.execution_steps || [])
+          .map((step) => `<li>${esc(step)}</li>`)
+          .join("")}</ol>
+        <div class="btn-row">
+          ${
+            kind === "proposed"
+              ? `<button class="btn" data-variant="primary" data-approve="${esc(skill.id)}">Approve</button>
+                 <button class="btn" data-variant="secondary">Edit</button>
+                 <button class="btn" data-variant="ghost" data-dismiss="${esc(skill.id)}">Dismiss</button>`
+              : `<button class="btn" data-variant="secondary">Edit</button>
+                 <button class="icon-btn" aria-label="More">${icon("more")}</button>`
+          }
+        </div>`,
+    });
+
+  const section = (title, note, rows, kind) =>
+    rows.length
+      ? `<section class="section">
+           <div class="group-head">
+             <h2 class="group-title">${esc(title)}</h2>
+             <p class="group-note">${esc(note)}</p>
+           </div>
+           <div class="stack">${rows.map((row) => card(row, kind)).join("")}</div>
+         </section>`
+      : "";
+
+  const total = data.from_your_sources.length + data.active.length + data.inactive.length;
+  const node = el(`
+    <div class="wrap">
+      <h1 class="page-title">My skills</h1>
+      <div class="toolbar">
+        <span class="search">${slot("search")}
+          <input class="input" placeholder="Search skills" aria-label="Search skills">
+          <kbd class="kbd">Ctrl K</kbd>
+        </span>
+        <a class="btn" data-variant="primary" href="/skills?create=1">${icon("plus")}Add a skill</a>
+      </div>
+      ${
+        total
+          ? section(
+              "From your sources",
+              "Drafted by Brain. Not in use until you approve them.",
+              data.from_your_sources,
+              "proposed"
+            ) +
+            section("Active", "Available to every connection.", data.active, "active") +
+            section("Inactive", "Kept, but your AI cannot reach them.", data.inactive, "inactive")
+          : `<div class="empty">
+               <p>No skills yet. When Brain reads something that describes how to
+                  do a thing, it drafts one here for you to approve.</p>
+               <a class="btn" data-variant="primary" href="/">Teach Brain</a>
+             </div>`
+      }
+    </div>`);
+
+  wireExpanders(node);
+  wireApprovals(node);
+  for (const button of node.querySelectorAll("[data-dismiss]")) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      await post(`/api/skills/${encodeURIComponent(button.dataset.dismiss)}/review`, {
+        decision: "dismiss",
+      }).catch(() => {});
+      button.closest(".exp-card").remove();
+      refreshCounts();
+    });
+  }
+  return node;
+};
+
+/* ---------------------------------------------------------------------- */
+/* §7.14 SIGN IN                                                           */
+/* ---------------------------------------------------------------------- */
+
+FRAMES.signin = function signin() {
+  const node = el(`
+    <div class="signin">
+      <div class="signin-card">
+        <span class="brand-mark"></span>
+        <h1 class="signin-title">Sign in to Brain</h1>
+        <p class="signin-lede">Your library is keyed to your email. The same address
+           next time signs you back into the same library; a new one creates it.</p>
+        <form class="signin-form">
+          <label class="field-label" for="email">Email</label>
+          <input class="input" id="email" type="email" name="email" required
+                 autocomplete="email" placeholder="you@example.com">
+          <button class="btn" data-variant="primary" type="submit">Continue</button>
+          <p class="signin-error" id="signin-error" hidden></p>
+        </form>
+        <hr class="divider">
+        <ul class="signin-promises">
+          <li>${icon("check")}Lands you in a workspace with three editable demo items.</li>
+          <li>${icon("check")}Connects to Claude, ChatGPT or an agent with one link.</li>
+          <li>${icon("check")}Agents can archive, never permanently delete.</li>
+        </ul>
+      </div>
+    </div>`);
+
+  const form = node.querySelector(".signin-form");
+  const error = node.querySelector("#signin-error");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.hidden = true;
+    try {
+      await post("/api/login", { email: node.querySelector("#email").value.trim() });
+      window.location.assign(href("/"));
+    } catch (problem) {
+      error.textContent = problem.message;
+      error.hidden = false;
+    }
+  });
+  return node;
+};
+
+/* ---------------------------------------------------------------------- */
 /* the router                                                              */
 /* ---------------------------------------------------------------------- */
 
@@ -667,6 +1127,11 @@ export function createRouter({ root, nav, announcer, context = {} } = {}) {
     try {
       node = await frame(hit?.params ?? {}, context);
     } catch (error) {
+      if (error?.reason === "needs_sign_in" && route?.frame !== "signin") {
+        // Not an error state: a door. Replace, so Back does not bounce the
+        // person between the page they cannot see and the form.
+        return go(href("/signin"), { replace: true });
+      }
       node = failed(error);
     }
     if (mine !== generation) return route ?? null;

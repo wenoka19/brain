@@ -443,6 +443,15 @@ async def api_sources(request: Request) -> Response:
 
 
 @endpoint
+async def api_source(request: Request) -> Response:
+    """§7.3 in one read."""
+    ctx = _context(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "get_source", {"source_id": source_id}, repeatable=True)
+    return _result(E.op_get_source(ctx, source_id), status_on_error=404)
+
+
+@endpoint
 async def api_transcripts(request: Request) -> Response:
     ctx = _context(request)
     _rate_limit(ctx, "list_transcripts", {}, repeatable=True)
@@ -846,6 +855,7 @@ ROUTES = [
     Route("/api/sources/{source_id}/summary", api_source_summary, methods=["GET"]),
     Route("/api/counts", api_counts, methods=["GET"]),
     Route("/api/sources", api_sources, methods=["GET"]),
+    Route("/api/sources/{source_id}", api_source, methods=["GET"]),
     Route("/api/transcripts", api_transcripts, methods=["GET"]),
     Route("/api/transcripts/{source_id}", api_transcript, methods=["GET"]),
     Route("/api/rules", api_rules, methods=["GET"]),

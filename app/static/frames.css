@@ -121,7 +121,8 @@
 
 /* §6 rule 4. A section is a titled block; its note sits one step below the
    title, and its content four steps below the note. */
-.section + .section { margin-top: var(--space-8); }
+.section { margin-top: var(--space-8); }
+.section:first-child { margin-top: 0; }
 
 .section-title {
   margin: 0;
@@ -507,3 +508,210 @@
 @media (max-width: 719px) {
   .transcript-body { grid-template-columns: 48px 1fr; }
 }
+
+/* ======================================================================
+   §7.3 SOURCE DETAIL
+   ====================================================================== */
+.source-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+/* §7.3's 132x74 thumbnail. `--bg-code` is grey-150, which is also the canvas,
+   so a thumb painted with it is invisible on this page. `--bg-base` is the
+   next step down and is what makes it read as a frame. */
+.source-thumb {
+  display: grid;
+  place-items: center;
+  width: 132px;
+  height: 74px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  color: var(--icon-muted);
+}
+
+.source-head .read-title { margin-bottom: var(--space-1); }
+.source-head .read-meta { margin-bottom: var(--space-2); }
+
+.work { margin-top: var(--space-6); }
+
+.work-hint {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.yield-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.yield-head .section-title { flex: 1 1 auto; }
+
+.yield-card {
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.yield-card + .yield-card { margin-top: var(--space-2); }
+
+.yield-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-weight: var(--weight-medium);
+}
+
+.yield-card-head .slot { color: var(--icon-muted); }
+.yield-card-head .pill { margin-left: auto; }
+
+.yield-gist {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: var(--leading-read);
+}
+
+.yield-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.yield-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+}
+
+.yield-row + .yield-row {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.yield-text { flex: 1 1 auto; }
+
+.yield-time {
+  flex: 0 0 auto;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.yield-time a { color: inherit; text-decoration: none; }
+
+.yield-time a:hover,
+.yield-time a[data-force~="hover"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ======================================================================
+   §7.8 RULES and §7.9 SKILLS — inside an expansion
+   ====================================================================== */
+.rule-full {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+}
+
+.rule-quote {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-control);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* §4.10's counter is for genuine sequences. A skill's steps are one — §7.9
+   calls them "the only numbered list in the app outside guided setup" — but
+   they sit inside a card, so they carry no circular counter. */
+.steps-plain > li {
+  grid-template-columns: 1fr;
+  padding: var(--space-1) 0;
+  border-top: 0;
+  list-style: decimal inside;
+  display: list-item;
+}
+
+.steps-plain > li::before { content: none; }
+
+/* ======================================================================
+   §7.14 SIGN IN
+   ====================================================================== */
+.signin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100svh - var(--space-8) * 2);
+}
+
+/* "The card must be width-capped and centred." The known bug §7.14 names:
+   as a flex child with no max-width the column collapses to ~240px and the
+   placeholder truncates mid-word. */
+.signin-card {
+  width: 100%;
+  max-width: 380px;
+  flex: 0 0 auto;
+  padding: var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.signin-title {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+}
+
+.signin-lede {
+  margin: 0 0 var(--space-5);
+  color: var(--text-secondary);
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.signin-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.signin-card .divider { margin: var(--space-5) 0; }
+
+.signin-promises {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.signin-promises > li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.signin-promises .icon { color: var(--status-active-text); margin-top: 2px; }
+
+/* §4.10's counter is for a guided sequence; a skill's steps sit inside a card
+   and want no circle and no rules between them. The divider lives on
+   `li + li`, so neutralising it needs the same shape, not a looser one. */
+.steps-plain > li + li { border-top: 0; }
