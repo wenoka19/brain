@@ -192,8 +192,20 @@ export function typewriter(input, strings, { onStop } = {}) {
   return { stop };
 }
 
-FRAMES.home = function home(_params, ctx) {
-  const name = ctx?.user?.name ?? "there";
+FRAMES.home = async function home(_params, ctx) {
+  // The greeting reads a name, so it has to fetch one. §7.1 renders
+  // "Good evening, Expedit." — reading an empty context produced
+  // "Good evening, there." on every load, which is a greeting from nobody.
+  let name = ctx?.user?.name ?? "";
+  if (!name) {
+    try {
+      const profile = await api("/api/profile");
+      name = profile.display_name || (profile.email || "").split("@")[0] || "there";
+    } catch (error) {
+      if (error?.reason === "needs_sign_in") throw error;
+      name = "there";
+    }
+  }
   const node = el(`
     <div class="home">
       <div class="home-stack">
@@ -217,15 +229,105 @@ FRAMES.home = function home(_params, ctx) {
           <a class="action-link" href="/rules?create=1">${slot("rules")}Write a rule</a>
         </div>
 
+        <p class="omni-status" id="omni-status" role="status" hidden></p>
+
         <input type="file" id="omni-file" class="sr-only"
                accept=".pdf,.docx,.txt,.md,image/png,image/jpeg,image/webp" multiple>
       </div>
     </div>`);
 
   const input = node.querySelector("#omni-input");
+  const picker = node.querySelector("#omni-file");
+  const status = node.querySelector("#omni-status");
   typewriter(input);
 
-  const picker = node.querySelector("#omni-file");
+  function say(message, tone = "") {
+    status.textContent = message;
+    status.hidden = !message;
+    status.dataset.tone = tone;
+  }
+
+  /** §7.1: "Submit creates a source, starts ingestion."
+   *
+   *  The whole purpose of the frame — "one job: get the first source in" —
+   *  and the one thing it could not do. A link in the field is the source and
+   *  anything else around it is the instruction, which is what makes "paste a
+   *  link and tell it what you want" one action rather than two.
+   */
+  const URL_RE = /\bhttps?:\/\/\S+/i;
+
+  async function submit() {
+    const raw = input.value.trim();
+    if (!raw) return;
+    const match = raw.match(URL_RE);
+    if (!match) {
+      say("Paste a link, or drop a file — Brain reads sources, not questions, for now.");
+      return;
+    }
+    const note = raw.replace(match[0], "").trim();
+    input.disabled = true;
+    say("Queued. Brain is reading it.");
+    try {
+      const queued = await post("/api/ingest", { url: match[0], user_note: note });
+      input.value = "";
+      input.disabled = false;
+      refreshCounts();
+      if (queued.duplicate) {
+        // Navigating silently to the old one looks like it worked and then
+        // shows a page with no work on it.
+        say("You already have this one. Opening it.");
+        setTimeout(() => window.location.assign(href(`/sources/${queued.source_id}`)), 900);
+        return;
+      }
+      // §7.1: submit turns Home into the thread. Until §7.2 exists, the
+      // source's own page is where the work is visible — and it is the page
+      // §7.2 ends on anyway.
+      window.location.assign(href(`/sources/${queued.source_id}`));
+    } catch (error) {
+      input.disabled = false;
+      say(error.message, "error");
+    }
+  }
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  });
+
+  /** A dropped or chosen file goes the same way, through `/api/upload`. */
+  async function send(files) {
+    const chosen = [...(files || [])];
+    if (!chosen.length) return;
+    say(`Reading ${chosen.length === 1 ? chosen[0].name : `${chosen.length} files`}…`);
+    try {
+      let last = null;
+      for (const file of chosen) {
+        const form = new FormData();
+        form.append("file", file);
+        if (input.value.trim()) form.append("user_note", input.value.trim());
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "X-Brain-Request": "1", "X-Brain-CSRF": csrfToken() },
+          body: form,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.message || `Could not read ${file.name}`);
+        }
+        last = payload;
+      }
+      refreshCounts();
+      if (last?.source_id) window.location.assign(href(`/sources/${last.source_id}`));
+      else say("Queued. Brain is reading it.");
+    } catch (error) {
+      say(error.message, "error");
+    }
+  }
+
+  picker.addEventListener("change", () => send(picker.files));
   node.querySelector("#omni-add").addEventListener("click", () => picker.click());
 
   // "Teach Brain → focuses the omnibar and opens the file picker" (§7.1).
@@ -235,6 +337,13 @@ FRAMES.home = function home(_params, ctx) {
     picker.click();
   });
 
+  // §6 rule 11: an unavailable control says what is missing rather than
+  // sitting there doing nothing. There is no speech-to-text behind this yet.
+  node.querySelector("#omni-mic").addEventListener("click", () => {
+    say("Recording is not wired up yet. Paste a link or drop a file instead.");
+  });
+
+  node.dataset.acceptsDrop = "true";
   return node;
 };
 
@@ -323,6 +432,23 @@ export function humanDuration(seconds) {
   const m = Math.floor(s / 60);
   const rest = s % 60;
   return rest ? `${m}m ${rest}s` : `${m}m`;
+}
+
+/** §18.4: a rule's locator reads `14:02`, not `842`.
+ *
+ *  The grounder stores whole seconds for a video and a bare page number for a
+ *  document, so what it means depends on `locator_type` — printing the raw
+ *  value made a timestamp look like a word count.
+ */
+export function locatorLabel(rule) {
+  const value = rule.locator_value || "";
+  if (!value) return "";
+  if (rule.locator_type === "timestamp") {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) ? duration(seconds) : value;
+  }
+  if (rule.locator_type === "page") return `p. ${value}`;
+  return value;
 }
 
 export function stamp(ms) {
@@ -645,12 +771,16 @@ FRAMES.summary = async function summary(params) {
  *  reveals nothing — that rule is enforced in the markup and not only in the
  *  data, so a future caller cannot leak a result early. */
 function workStep(step) {
-  const done = step.state === "done" || step.state === "skipped";
+  // A failed step is not a finished one. Rendering `failed` as `done` turned
+  // a blocked ingestion into a page that claimed it had worked.
+  const settled = step.state === "done" || step.state === "skipped" || step.state === "failed";
   return `
-    <li class="work-step" data-state="${esc(step.state === "skipped" ? "done" : step.state)}">
-      <span class="work-marker">${step.state === "done" ? icon("check") : ""}</span>
+    <li class="work-step" data-state="${esc(step.state)}">
+      <span class="work-marker">${
+        step.state === "done" || step.state === "skipped" ? icon("check") : ""
+      }</span>
       <span>${esc(step.label)}</span>
-      ${done && step.detail ? `<span class="work-result">${esc(step.detail)}</span>` : ""}
+      ${settled && step.detail ? `<span class="work-result">${esc(step.detail)}</span>` : ""}
     </li>`;
 }
 
@@ -659,11 +789,16 @@ FRAMES.source = async function source(params) {
   const src = data.source;
   const progress = data.progress;
   const running = progress && !progress.finished;
+  // §7.7's third state. `blocked_by_platform` is the plan's "Needs you": a
+  // private post, a scanned PDF with no text layer, a rate-limited host —
+  // Brain did not fail, Brain needs the person.
+  const blocked = progress && ["failed", "blocked_by_platform"].includes(progress.status);
 
   const stepsHtml = progress ? progress.steps.map(workStep).join("") : "";
   // §7.3's header: "Working on it" while it runs, "Done in 2m 14s" after.
-  const elapsed =
-    progress && progress.finished
+  const elapsed = blocked
+    ? "Stopped"
+    : progress && progress.finished
       ? progress.elapsed_sec !== null && progress.elapsed_sec !== undefined
         ? `Done in ${humanDuration(progress.elapsed_sec)}`
         : "Done"
@@ -678,8 +813,14 @@ FRAMES.source = async function source(params) {
          </div>
          <ul class="work-steps">${stepsHtml}</ul>
        </div>
-       <p class="work-hint">You can leave this page. Brain keeps working and
-          Activity will show when it lands.</p>`
+       ${
+         blocked
+           ? `<p class="work-hint" data-tone="error">${esc(
+               progress.error_message || "Brain could not read this one."
+             )}</p>`
+           : `<p class="work-hint">You can leave this page. Brain keeps working and
+                Activity will show when it lands.</p>`
+       }`
     : "";
 
   const rulesHtml = data.rules
@@ -689,8 +830,10 @@ FRAMES.source = async function source(params) {
         <span class="yield-text">${esc(rule.claim)}</span>
         <span class="yield-time">${
           rule.deep_link
-            ? `<a href="${esc(rule.deep_link)}" target="_blank" rel="noopener">${esc(rule.locator_value || "")}</a>`
-            : esc(rule.locator_value || "")
+            ? `<a href="${esc(rule.deep_link)}" target="_blank" rel="noopener">${esc(
+                locatorLabel(rule)
+              )}</a>`
+            : esc(locatorLabel(rule))
         }</span>
       </li>`
     )
@@ -725,8 +868,8 @@ FRAMES.source = async function source(params) {
             duration(src.duration_sec),
             `added ${dateLabel(src.created_at).toLowerCase()}`,
           ])}</p>
-          <span class="pill" data-state="${running ? "pending" : "active"}">${
-            running ? "Processing" : "In memory"
+          <span class="pill" data-state="${blocked || running ? "pending" : "active"}">${
+            blocked ? "Needs you" : running ? "Processing" : "In memory"
           }</span>
         </div>
       </header>
@@ -742,6 +885,7 @@ FRAMES.source = async function source(params) {
 
       ${workHtml}
 
+      ${data.summary || data.rules.length || data.skills.length ? `
       <section class="section">
         <div class="yield-head">
           <h2 class="section-title">What came out of it</h2>
@@ -786,7 +930,7 @@ FRAMES.source = async function source(params) {
                </article>`
             : ""
         }
-      </section>
+      </section>` : ""}
     </div>`);
 
   wireApprovals(node);
@@ -847,7 +991,7 @@ function csrfToken() {
 
 /** §4.2's expandable card. Collapsed shows one clamped line; the caret turns.
  *  `R-6`: the group heading above it carries no count and no dash. */
-function expandable({ id, icon: glyph, title, sub, bodyHtml, state = "" }) {
+function expandable({ id, icon: glyph, title, sub, metaHtml: meta, bodyHtml, state = "" }) {
   return `
     <article class="exp-card" data-open="false"${state ? ` data-state="${esc(state)}"` : ""}>
       <button class="exp-head" type="button" data-toggle="${esc(id)}" aria-expanded="false">
@@ -857,7 +1001,7 @@ function expandable({ id, icon: glyph, title, sub, bodyHtml, state = "" }) {
         <span class="item-type">${icon(glyph)}</span>
         <span class="item-text">
           <span class="item-title">${esc(title)}</span>
-          <span class="item-meta exp-summary">${esc(sub)}</span>
+          <span class="item-meta exp-summary">${meta ?? esc(sub)}</span>
         </span>
       </button>
       <div class="exp-body">${bodyHtml}</div>
@@ -1038,6 +1182,311 @@ FRAMES.skills = async function skills() {
 };
 
 /* ---------------------------------------------------------------------- */
+/* §7.12 ARCHIVE                                                           */
+/* ---------------------------------------------------------------------- */
+
+const ARCHIVE_ICON = { source: "sources", rule: "rules", skill: "skills", summary: "summaries" };
+
+FRAMES.archive = async function archive() {
+  const data = await api("/api/archive");
+
+  const card = (item) =>
+    expandable({
+      id: item.id,
+      icon: ARCHIVE_ICON[item.kind] || "doc",
+      title: item.label,
+      // §7.12: the attribution matters. "When something vanishes from the
+      // library untouched, this page says who" — in amber when it was Brain.
+      sub: "",
+      // §7.12: "the attribution matters. When something vanishes from the
+      // library untouched, this page says who" — amber when it was Brain.
+      metaHtml: `
+        <span data-kind="${esc(item.kind)}">${esc(
+          item.kind.charAt(0).toUpperCase() + item.kind.slice(1)
+        )}</span>
+        <span class="${item.archived_by === "brain" ? "item-attribution" : ""}">archived by ${esc(
+          item.archived_by === "brain" ? "Brain" : "you"
+        )}</span>
+        <span>added ${esc(dateLabel(item.created_at).toLowerCase())}</span>`,
+      bodyHtml: `
+        ${item.detail ? `<p class="rule-full">${esc(item.detail)}</p>` : ""}
+        ${
+          item.extra
+            ? `<span class="field-label">Original link</span>
+               <input class="input" readonly value="${esc(item.extra)}">`
+            : ""
+        }
+        <div class="btn-row">
+          <button class="btn" data-variant="secondary">Edit</button>
+          <button class="btn" data-variant="ghost" data-delete="${esc(item.id)}">
+            Delete permanently
+          </button>
+        </div>`,
+    });
+
+  // §7.12 orders by ARCHIVE date, not creation date: "people come here to
+  // undo something they just did."
+  const groups = byDate(data.items, "archived_at", "Archived").map((group) => ({
+    title: group.title,
+    rows: group.rows.map(card),
+  }));
+
+  const node = el(`
+    <div class="wrap">
+      <h1 class="page-title">Archive</h1>
+      <p class="section-note">Out of the way, still yours. Nothing here is
+         reachable by your AI until you restore it.</p>
+      <div class="toolbar">
+        <span class="search">${slot("search")}
+          <input class="input" placeholder="Search the archive" aria-label="Search the archive">
+        </span>
+      </div>
+      <div class="filter-row">
+        <button class="filter-pill" aria-pressed="true" data-filter="all">All</button>
+        ${data.types
+          .map(
+            (type) =>
+              `<button class="filter-pill" aria-pressed="false" data-filter="${esc(type)}">${esc(
+                type.charAt(0).toUpperCase() + type.slice(1)
+              )}</button>`
+          )
+          .join("")}
+      </div>
+      ${
+        groups.length
+          ? groups
+              .map(
+                (group) => `
+            <section class="date-group">
+              <h2 class="date-label">${esc(group.title)}</h2>
+              <div class="stack">${group.rows.join("")}</div>
+            </section>`
+              )
+              .join("")
+          : `<div class="empty">
+               <p>Nothing is set aside. What you or Brain archive lands here,
+                  out of the way and still yours.</p>
+               <a class="btn" data-variant="secondary" href="/library/sources">Back to Sources</a>
+             </div>`
+      }
+    </div>`);
+
+  wireExpanders(node);
+
+  // The filter exists here and nowhere else, because this is the only
+  // heterogeneous list in the app (§7.12).
+  for (const pill of node.querySelectorAll("[data-filter]")) {
+    pill.addEventListener("click", () => {
+      const wanted = pill.dataset.filter;
+      for (const other of node.querySelectorAll("[data-filter]")) {
+        other.setAttribute("aria-pressed", String(other === pill));
+      }
+      for (const card of node.querySelectorAll(".exp-card")) {
+        const kind = card.querySelector("[data-kind]")?.dataset.kind || "";
+        card.hidden = wanted !== "all" && kind !== wanted;
+      }
+      for (const group of node.querySelectorAll(".date-group")) {
+        // §6 rule 13: a section with zero items hides itself, title included.
+        group.hidden = ![...group.querySelectorAll(".exp-card")].some((c) => !c.hidden);
+      }
+    });
+  }
+  return node;
+};
+
+/* ---------------------------------------------------------------------- */
+/* §7.13 PROFILE                                                           */
+/* ---------------------------------------------------------------------- */
+
+function settingRow({ label, help, controlHtml }) {
+  return `
+    <div class="setting-row">
+      <span class="setting-text">
+        <span class="setting-label">${esc(label)}</span>
+        <span class="setting-help">${esc(help)}</span>
+      </span>
+      <span class="setting-control">${controlHtml}</span>
+    </div>`;
+}
+
+function switchHtml(name, on) {
+  return `<button class="switch" role="switch" aria-checked="${on ? "true" : "false"}"
+                  data-switch="${esc(name)}" aria-label="${esc(name)}"></button>`;
+}
+
+FRAMES.profile = async function profile() {
+  const data = await api("/api/profile");
+  const wants = data.ingestion;
+
+  const themes = ["light", "dark"]
+    .map(
+      (theme) => `
+      <button class="theme-option" data-theme-pick="${esc(theme)}"
+              aria-pressed="${data.theme_mode === theme ? "true" : "false"}">
+        <span class="theme-swatch" data-swatch="${esc(theme)}"></span>
+        <span>${esc(theme === "light" ? "Light" : "Dark")}</span>
+      </button>`
+    )
+    .join("");
+
+  const node = el(`
+    <div class="wrap" data-narrow>
+      <h1 class="page-title">Profile</h1>
+
+      <section class="section">
+        <h2 class="section-title">Account</h2>
+        <p class="section-note">Who Brain thinks you are.</p>
+        <div class="card-group">
+          <div class="setting-row">
+            <span class="avatar avatar-lg">${esc((data.email || "?")[0].toUpperCase())}</span>
+            <span class="setting-text">
+              <!-- The email twice is not an identity. With no name set, the
+                   address is the identity and the help line says nothing. -->
+              <span class="setting-label">${esc(data.display_name || data.email)}</span>
+              <span class="setting-help">${esc(data.display_name ? data.email : "")}</span>
+            </span>
+          </div>
+          ${settingRow({
+            label: "Name",
+            help: "What Brain calls you on the home screen.",
+            controlHtml: `<input class="input" id="display-name" value="${esc(data.display_name)}"
+                                 placeholder="Your name">`,
+          })}
+          ${settingRow({
+            label: "Email",
+            help: "Your library is keyed to this address.",
+            controlHtml: `<input class="input" readonly value="${esc(data.email)}">`,
+          })}
+          ${settingRow({
+            label: "Sign out",
+            help: "Ends this session everywhere you are signed in.",
+            controlHtml: `<button class="btn" data-variant="secondary" id="sign-out">Sign out</button>`,
+          })}
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Appearance</h2>
+        <p class="section-note">How Brain looks and which language it speaks to you in.</p>
+        <div class="card-group">
+          ${settingRow({
+            label: "Theme",
+            help: "Pick one, or let Brain follow the time of day.",
+            controlHtml: `<span class="theme-row">${themes}</span>`,
+          })}
+          ${settingRow({
+            label: "Language",
+            help: "Brain speaks to you in this language.",
+            controlHtml: `<select class="select" id="locale">
+                <option value=""${data.locale ? "" : " selected"}>Follow my browser</option>
+                <option value="en"${data.locale === "en" ? " selected" : ""}>English</option>
+                <option value="fr"${data.locale === "fr" ? " selected" : ""}>Français</option>
+              </select>`,
+          })}
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">What Brain does with new sources</h2>
+        <p class="section-note">Without this, these choices get asked on every upload.</p>
+        <div class="card-group">
+          ${settingRow({
+            label: "Write a summary",
+            help: "Every source gets one, so you never have to read the whole thing.",
+            controlHtml: switchHtml("want_summary", wants.want_summary),
+          })}
+          ${settingRow({
+            label: "Extract rules",
+            help: "Standing instructions Brain finds in what you feed it.",
+            controlHtml: switchHtml("want_rules", wants.want_rules),
+          })}
+          ${settingRow({
+            label: "Draft skills",
+            help: "Procedures worth reusing. They wait for your approval either way.",
+            controlHtml: switchHtml("want_skills", wants.want_skills),
+          })}
+          ${settingRow({
+            label: "Write them in",
+            help: "Summaries and rules come out in this language, whatever the source.",
+            controlHtml: `<select class="select" id="write-in">
+                <option value="source"${wants.write_in === "source" ? " selected" : ""}>The language of the source</option>
+                <option value="en"${wants.write_in === "en" ? " selected" : ""}>English</option>
+                <option value="fr"${wants.write_in === "fr" ? " selected" : ""}>Français</option>
+              </select>`,
+          })}
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Your data</h2>
+        <p class="section-note">Everything Brain holds is yours to take or to remove.</p>
+        <div class="card-group">
+          ${settingRow({
+            label: "Export everything",
+            help: "Sources, transcripts, summaries, rules and skills, as Markdown in a zip.",
+            controlHtml: `<a class="btn" data-variant="secondary" href="/api/export">Export</a>`,
+          })}
+          ${settingRow({
+            label: "Delete my library",
+            help: "Removes every source and everything made from it. Your account stays.",
+            controlHtml: `<button class="btn" data-variant="danger">Delete library</button>`,
+          })}
+          ${settingRow({
+            label: "Delete my account",
+            help: "Closes the account and everything in it.",
+            controlHtml: `<button class="btn" data-variant="danger">Delete account</button>`,
+          })}
+        </div>
+      </section>
+      <p class="save-note" id="save-note" hidden></p>
+    </div>`);
+
+  const note = node.querySelector("#save-note");
+  async function save(fields) {
+    try {
+      await post("/api/profile", fields);
+      note.textContent = "Saved.";
+      note.hidden = false;
+    } catch (error) {
+      note.textContent = error.message;
+      note.hidden = false;
+    }
+  }
+
+  for (const toggle of node.querySelectorAll("[data-switch]")) {
+    toggle.addEventListener("click", () => {
+      const on = toggle.getAttribute("aria-checked") !== "true";
+      toggle.setAttribute("aria-checked", String(on));
+      save({ [toggle.dataset.switch]: on });
+    });
+  }
+  for (const option of node.querySelectorAll("[data-theme-pick]")) {
+    option.addEventListener("click", () => {
+      const theme = option.dataset.themePick;
+      document.documentElement.dataset.theme = theme;
+      for (const other of node.querySelectorAll("[data-theme-pick]")) {
+        other.setAttribute("aria-pressed", String(other === option));
+      }
+      save({ theme_mode: theme });
+    });
+  }
+  node.querySelector("#display-name").addEventListener("change", (event) =>
+    save({ display_name: event.target.value })
+  );
+  node.querySelector("#locale").addEventListener("change", (event) =>
+    save({ locale: event.target.value })
+  );
+  node.querySelector("#write-in").addEventListener("change", (event) =>
+    save({ write_in: event.target.value })
+  );
+  node.querySelector("#sign-out").addEventListener("click", async () => {
+    await post("/api/logout", {}).catch(() => {});
+    window.location.assign(href("/signin"));
+  });
+  return node;
+};
+
+/* ---------------------------------------------------------------------- */
 /* §7.14 SIGN IN                                                           */
 /* ---------------------------------------------------------------------- */
 
@@ -1149,13 +1598,15 @@ export function createRouter({ root, nav, announcer, context = {} } = {}) {
     return route ?? null;
   }
 
+  /** Returns the render it started, so a caller can act once the new frame
+   *  exists — `Ctrl K` from a page with no omnibar focused nothing, because
+   *  it reached for the field before the frame that owns it had rendered. */
   function go(href, { replace = false } = {}) {
     const url = new URL(href, window.location.origin);
-    if (url.origin !== window.location.origin) return false;
+    if (url.origin !== window.location.origin) return Promise.resolve(false);
     if (replace) window.history.replaceState({}, "", url);
     else window.history.pushState({}, "", url);
-    render(url.pathname);
-    return true;
+    return render(url.pathname);
   }
 
   /* A single delegated listener for every internal link, so a frame never
@@ -1242,9 +1693,12 @@ export function wireShell(router) {
         omni.focus();
         omni.select?.();
       } else {
+        // The omnibar does not exist on this page yet, and `render` is async,
+        // so focusing before it resolves focuses nothing.
         event.preventDefault();
-        router.go(href("/"));
-        document.getElementById("omni-input")?.focus();
+        Promise.resolve(router.go(href("/"))).then(() => {
+          document.getElementById("omni-input")?.focus();
+        });
       }
       return;
     }
@@ -1261,7 +1715,16 @@ export function wireShell(router) {
     };
     content.addEventListener("dragover", over(true));
     content.addEventListener("dragleave", over(false));
-    content.addEventListener("drop", over(false));
+    // §7.1: "drag onto the page → same as `+`". Clearing the highlight and
+    // dropping the files on the floor is not the same as `+`.
+    content.addEventListener("drop", (event) => {
+      over(false)(event);
+      const picker = document.getElementById("omni-file");
+      const files = event.dataTransfer?.files;
+      if (!picker || !files || !files.length) return;
+      picker.files = files;
+      picker.dispatchEvent(new Event("change"));
+    });
   }
 
   return { setNav };

@@ -715,3 +715,98 @@
    and want no circle and no rules between them. The divider lives on
    `li + li`, so neutralising it needs the same shape, not a looser one. */
 .steps-plain > li + li { border-top: 0; }
+
+/* ======================================================================
+   §7.13 PROFILE
+   ====================================================================== */
+.card-group {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  overflow: hidden;
+}
+
+.avatar-lg {
+  width: 40px;
+  height: 40px;
+  font-size: var(--text-base);
+  flex: 0 0 auto;
+}
+
+.theme-row {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.theme-option[aria-pressed="true"] { color: var(--text-primary); }
+
+/* §7.13: "a theme picker where each option shows itself" — a swatch
+   reproducing that theme's sidebar/canvas split. The two literals here are
+   the one place a theme must paint a colour it is not currently in, so they
+   name the primitives of the theme they depict. */
+.theme-swatch {
+  display: block;
+  width: 58px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-control);
+}
+
+.theme-option[aria-pressed="true"] .theme-swatch {
+  box-shadow:
+    inset 0 0 0 var(--border-width) var(--accent),
+    0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.theme-swatch[data-swatch="light"] {
+  background: linear-gradient(to right, var(--grey-200) 0 30%, var(--grey-150) 30% 100%);
+}
+
+.theme-swatch[data-swatch="dark"] {
+  background: linear-gradient(to right, var(--ink-950) 0 30%, var(--ink-925) 30% 100%);
+}
+
+.save-note {
+  margin-top: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* ======================================================================
+   §7.12 ARCHIVE
+   ====================================================================== */
+.filter-row { margin-bottom: var(--space-6); }
+
+.date-group[hidden] { display: none; }
+.exp-card[hidden] { display: none; }
+
+/* The omnibar's own status line (§7.1 submit, §6 rule 11). */
+.omni-status {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.omni-status[data-tone="error"] { color: var(--danger); }
+.work-hint[data-tone="error"] { color: var(--danger); }
+
+/* §4.4: a failed step keeps its own marker rather than borrowing the check. */
+.work-step[data-state="failed"] { color: var(--danger); }
+
+.work-step[data-state="failed"] .work-marker::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--danger);
+}

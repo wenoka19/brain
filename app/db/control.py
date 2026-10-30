@@ -235,6 +235,17 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("audit_logs", "reasoning_trace", "ALTER TABLE audit_logs ADD COLUMN reasoning_trace TEXT NOT NULL DEFAULT ''"),
     ("ingestion_jobs", "reserved_files", "ALTER TABLE ingestion_jobs ADD COLUMN reserved_files INTEGER NOT NULL DEFAULT 0"),
     ("ingestion_jobs", "claims_extracted", "ALTER TABLE ingestion_jobs ADD COLUMN claims_extracted INTEGER NOT NULL DEFAULT 0"),
+    # §7.13's Account block: the name Brain calls the person on the home
+    # screen, and the language it speaks to them in.
+    ("users", "display_name", "ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"),
+    ("users", "locale", "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''"),
+    # §7.13's "What Brain does with new sources". §9.1 says steps 3 to 5
+    # honour these, so they are stored as what the pipeline reads — not as
+    # three switches that look wired and are not.
+    ("users", "want_summary", "ALTER TABLE users ADD COLUMN want_summary INTEGER NOT NULL DEFAULT 1"),
+    ("users", "want_rules", "ALTER TABLE users ADD COLUMN want_rules INTEGER NOT NULL DEFAULT 1"),
+    ("users", "want_skills", "ALTER TABLE users ADD COLUMN want_skills INTEGER NOT NULL DEFAULT 1"),
+    ("users", "write_in", "ALTER TABLE users ADD COLUMN write_in TEXT NOT NULL DEFAULT 'source'"),
 )
 
 
@@ -312,13 +323,30 @@ def get_user(conn: sqlite3.Connection, user_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+#: §7.13's "Write them in": the language summaries and rules come out in,
+#: whatever the source was.
+WRITE_IN_CHOICES = ("source", "en", "fr")
+
+
 def update_profile(
     conn: sqlite3.Connection,
     user_id: str,
     *,
     about_you_context: str | None = None,
     theme_mode: str | None = None,
+    display_name: str | None = None,
+    locale: str | None = None,
+    want_summary: bool | None = None,
+    want_rules: bool | None = None,
+    want_skills: bool | None = None,
+    write_in: str | None = None,
 ) -> dict[str, Any] | None:
+    """Write the fields §7.13 lets the person change.
+
+    A value outside its allowed set raises rather than being dropped: the set
+    is this module's contract, and silently storing nothing would leave the
+    person looking at a switch that did not move.
+    """
     sets, params = [], []
     if about_you_context is not None:
         sets.append("about_you_context = ?")
@@ -328,6 +356,27 @@ def update_profile(
             raise ValueError(f"unknown theme_mode: {theme_mode}")
         sets.append("theme_mode = ?")
         params.append(theme_mode)
+    if display_name is not None:
+        sets.append("display_name = ?")
+        params.append(str(display_name).strip()[:120])
+    if locale is not None:
+        if locale not in ("", "en", "fr"):
+            raise ValueError(f"unknown locale: {locale}")
+        sets.append("locale = ?")
+        params.append(locale)
+    if write_in is not None:
+        if write_in not in WRITE_IN_CHOICES:
+            raise ValueError(f"unknown write_in: {write_in}")
+        sets.append("write_in = ?")
+        params.append(write_in)
+    for name, value in (
+        ("want_summary", want_summary),
+        ("want_rules", want_rules),
+        ("want_skills", want_skills),
+    ):
+        if value is not None:
+            sets.append(f"{name} = ?")
+            params.append(1 if value else 0)
     if sets:
         params.append(user_id)
         conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE user_id = ?", params)
@@ -615,6 +664,26 @@ def count_active_jobs(conn: sqlite3.Connection, user_id: str) -> int:
         (user_id, *TERMINAL_STATUSES),
     ).fetchone()
     return int(row[0])
+
+
+def ingestion_defaults(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]:
+    """What the pipeline reads before steps 3, 4 and 5.
+
+    Defaults to doing everything, for a row written before these columns
+    existed: `COALESCE` rather than a Python fallback, so a NULL from an old
+    row and a missing row answer the same way.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(want_summary, 1) AS want_summary, "
+        "       COALESCE(want_rules, 1) AS want_rules, "
+        "       COALESCE(want_skills, 1) AS want_skills, "
+        "       COALESCE(write_in, 'source') AS write_in "
+        "FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return {"want_summary": 1, "want_rules": 1, "want_skills": 1, "write_in": "source"}
+    return dict(row)
 
 
 def set_job_status(

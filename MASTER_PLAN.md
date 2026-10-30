@@ -1230,8 +1230,8 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 | 7.9 | `/skills` | My skills | **built** | ✓ ×3 | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
 | 7.10 | `/activity` | Activity | partial | **✓ ×2** | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |
 | 7.11 | `/connections` | Connections | partial | **✓ ×3** | Profile block 2 carries the `/mcp` link + live sessions; no key-in-URL, no tiles |
-| 7.12 | `/archive` | Archive | partial | **✓ ×2** | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
-| 7.13 | `/profile` | Profile | shipped-divergent | **✓ ×3** | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
+| 7.12 | `/archive` | Archive | **built** | ✓ ×2 | `Archived` view exists; no type filter pills, no `archived by Brain` attribution |
+| 7.13 | `/profile` | Profile | **built** | ✓ ×3 | 6-block modal (Checkpoint B + Phase 6), not a 4-section page |
 | 7.14 | `/signin` | Sign in | **built** | — | Email-keyed login exists in `/api/login`; no dedicated frame |
 
 ## 18. REFERENCE IMAGES — WHAT EACH CAPTURE ADDS

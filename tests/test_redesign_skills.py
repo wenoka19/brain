@@ -213,18 +213,34 @@ class TestTheTableRebuild:
         conn.execute("DROP TABLE probe_skills")
         assert live == probe, f"missing from rebuild: {live - probe}; extra: {probe - live}"
 
-    def test_detection_reads_the_constraint_not_the_comment(self):
+    def test_detection_reads_the_constraint_not_the_comment(self, tmp_path, cfg):
         """`sqlite_master.sql` keeps comments, and this table's own comment
         explains what `proposed` means. Searching the raw text for that word
         reported the migration as applied on a database that had never seen
-        it — found by running it, not by reading it."""
-        assert "proposed" in tenant_db.SCHEMA  # the comment is still there
-        source = tenant_db._rebuild_skills_for_the_wider_status.__doc__ or ""
-        assert source  # documented
-        import inspect
+        it — found by running it, not by reading it.
 
-        body = inspect.getsource(tenant_db._rebuild_skills_for_the_wider_status)
-        assert "CHECK" in body and "re.sub" in body
+        Exercised rather than read: the check moved into a shared helper when
+        `sources` needed the same widening, and a test that greps the old
+        function's body would have called that a failure.
+        """
+        assert "proposed" in tenant_db.SCHEMA, "the comment that caused it is gone"
+
+        conn = self._old_schema_db(tmp_path, cfg)
+        assert not tenant_db._check_allows(conn, "skills", "proposed")
+        assert tenant_db._check_allows(conn, "skills", "archived")
+
+        tenant_db.migrate(conn)
+        assert tenant_db._check_allows(conn, "skills", "proposed")
+        assert tenant_db._check_allows(conn, "skills", "inactive")
+
+    def test_a_table_that_does_not_exist_is_not_migrated(self, tmp_path, cfg):
+        """The detector answers "already fine" for a missing table, so a
+        migration never runs against nothing."""
+        import sqlite3
+
+        conn = sqlite3.connect(tmp_path / "empty.db")
+        conn.row_factory = sqlite3.Row
+        assert tenant_db._check_allows(conn, "skills", "proposed")
 
 
 # ---------------------------------------------------------------------------

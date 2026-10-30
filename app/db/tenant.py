@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS sources (
     language      TEXT NOT NULL DEFAULT 'en',
     source_type   TEXT NOT NULL,
     duration_sec  INTEGER NOT NULL DEFAULT 0,
+    -- `processing` exists from the moment a job is queued (§7.7's three
+    -- states), not from the moment a fetch succeeds.
     status        TEXT NOT NULL DEFAULT 'active'
-                  CHECK (status IN ('active','archived','trash')),
+                  CHECK (status IN ('active','processing','blocked','archived','trash')),
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_sources_hash ON sources(content_hash);
@@ -470,6 +472,26 @@ CREATE TABLE skills_rebuild (
 );
 """
 
+SCHEMA_SOURCES_REBUILD = """
+CREATE TABLE sources_rebuild (
+    rowid         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            TEXT UNIQUE NOT NULL,
+    canonical_url TEXT NOT NULL DEFAULT '',
+    content_hash  TEXT NOT NULL DEFAULT '',
+    title         TEXT NOT NULL,
+    author        TEXT NOT NULL DEFAULT '',
+    published_at  TEXT NOT NULL DEFAULT '',
+    language      TEXT NOT NULL DEFAULT 'en',
+    source_type   TEXT NOT NULL,
+    duration_sec  INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','processing','blocked','archived','trash')),
+    archived_at   DATETIME,
+    archived_by   TEXT NOT NULL DEFAULT '',
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 SKILL_STATUSES = ("proposed", "active", "inactive", "archived")
 
 #: The one status an MCP client may ever see. §9.2: "Never exposed: anything
@@ -495,6 +517,68 @@ def _statements(script: str) -> list[str]:
     return out
 
 
+def _check_allows(conn: sqlite3.Connection, table: str, value: str) -> bool:
+    """Does `table`'s status CHECK already permit `value`?
+
+    Read off the constraint with comments stripped, not off the raw SQL:
+    `sqlite_master` keeps comments, and a comment that mentions the value
+    reports a migration as applied on a database that has never seen it.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    if row is None:
+        return True
+    sql = re.sub(r"--[^\n]*", "", row["sql"] or "")
+    match = re.search(r"status[^)]*CHECK\s*\(\s*status\s+IN\s*\(([^)]*)\)", sql)
+    return value in (match.group(1) if match else "")
+
+
+def _rebuild_sources_for_processing(conn: sqlite3.Connection) -> bool:
+    """Let a source be `processing` before anything has read it.
+
+    `sources` carries no triggers and no FTS or vec index of its own, so this
+    is the plain form of the rebuild `skills` needed: copy with rowids, swap,
+    recreate the two indexes. The foreign keys that point AT it are the reason
+    they go off for the swap.
+    """
+    if _check_allows(conn, "sources", "blocked"):
+        return False
+
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(sources)").fetchall()]
+    carried = ", ".join(c for c in columns if c != "rowid")
+
+    conn.commit()
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(SCHEMA_SOURCES_REBUILD)
+        conn.execute(
+            f"INSERT INTO sources_rebuild (rowid, {carried}) "
+            f"SELECT rowid, {carried} FROM sources"
+        )
+        conn.execute("DROP TABLE sources")
+        conn.execute("ALTER TABLE sources_rebuild RENAME TO sources")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sources_hash ON sources(content_hash)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status, created_at DESC)"
+        )
+        broken = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if broken:
+            raise sqlite3.IntegrityError(f"sources rebuild broke {len(broken)} reference(s)")
+        conn.execute("COMMIT")
+    except Exception:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = previous_isolation
+    return True
+
+
 def _rebuild_skills_for_the_wider_status(conn: sqlite3.Connection) -> bool:
     """Replace the two-state CHECK on `skills.status` with the four-state one.
 
@@ -509,22 +593,11 @@ def _rebuild_skills_for_the_wider_status(conn: sqlite3.Connection) -> bool:
     * `skill_versions` references `skills(id)`, so foreign keys are off for the
       swap and `foreign_key_check` runs before it is allowed to commit.
     """
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skills'"
-    ).fetchone()
-    if row is None:
-        return False
-
-    # Detect on the CONSTRAINT, not on the word. `sqlite_master.sql` keeps the
-    # comments, and this table's own comment explains what `proposed` means —
-    # so searching the raw text for that word reports the migration as already
-    # applied on a database that has never seen it. Found by running the
-    # migration against a database built on the old schema, which is the only
-    # test of a rebuild that means anything.
-    sql = re.sub(r"--[^\n]*", "", row["sql"] or "")
-    constraint = re.search(r"status[^)]*CHECK\s*\(\s*status\s+IN\s*\(([^)]*)\)", sql)
-    allowed = constraint.group(1) if constraint else ""
-    if "proposed" in allowed:
+    # Detect on the CONSTRAINT, not on the word: `sqlite_master.sql` keeps
+    # the comments, and this table's own comment explains what `proposed`
+    # means. Found by running the migration against a database built on the
+    # old schema, which is the only test of a rebuild that means anything.
+    if _check_allows(conn, "skills", "proposed"):
         return False
 
     columns = [r["name"] for r in conn.execute("PRAGMA table_info(skills)").fetchall()]
@@ -602,6 +675,8 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         applied.append(f"{table}.{column}")
     if _rebuild_skills_for_the_wider_status(conn):
         applied.append("skills.status(proposed|inactive)")
+    if _rebuild_sources_for_processing(conn):
+        applied.append("sources.status(processing)")
     # Backfill the counts the column was added for; a row written before it
     # existed would otherwise read "0 words" forever.
     backfilled = conn.execute(
@@ -684,13 +759,23 @@ def upsert_source(
     published_at: str = "",
     language: str = "en",
     duration_sec: int = 0,
+    status: str | None = None,
 ) -> dict[str, Any]:
+    """Create or update a source.
+
+    `status` is written only when given, and never on an update: a row that
+    reached `active` must not be dragged back to `processing` by the pipeline
+    re-reading it, and one the person archived must not be revived by a
+    re-process.
+    """
+    if status is not None and status not in ("active", "processing", "blocked", "archived", "trash"):
+        raise ValueError(f"unknown source status: {status}")
     source_id = source_id or new_id("src")
     conn.execute(
         """
         INSERT INTO sources (id, canonical_url, content_hash, title, author,
-                             published_at, language, source_type, duration_sec)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             published_at, language, source_type, duration_sec, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'active'))
         ON CONFLICT(id) DO UPDATE SET
             canonical_url = excluded.canonical_url,
             content_hash  = excluded.content_hash,
@@ -710,6 +795,7 @@ def upsert_source(
             language[:16],
             source_type,
             int(duration_sec or 0),
+            status,
         ),
     )
     return get_source(conn, source_id)  # type: ignore[return-value]
@@ -784,7 +870,11 @@ def list_sources(
     # open, with no type, no yield and nothing to fix.
     where = ["s.source_type != 'user_note'"]
     if active_only:
-        where.append("s.status = 'active'")
+        # §7.7 has three states — in memory, `Processing`, `Needs you` — and
+        # all three are rows on this page. Filtering to `active` would make a
+        # source vanish the moment it was queued and come back when it
+        # finished, which is the opposite of what the page is for.
+        where.append("s.status IN ('active','processing','blocked')")
     sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY s.created_at DESC LIMIT ?"
     return [dict(row) for row in conn.execute(sql, (limit,)).fetchall()]
@@ -828,6 +918,42 @@ def get_transcript(conn: sqlite3.Connection, source_id: str) -> dict[str, Any] |
         "cues": content["cues"],
         "word_count": content.get("word_count") or len(content["full_text"].split()),
     }
+
+
+def list_archive(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[str, Any]]:
+    """§7.12. Every archived thing, newest-archived first.
+
+    "Order: by archive date, most recent first. Not creation date — people
+    come here to undo something they just did." Which is why `archived_at`
+    had to exist before this list could be honest: sorting by `created_at`
+    would put the thing they archived a minute ago wherever it happened to
+    have been made.
+
+    One heterogeneous list, which is why §7.12's type filter exists here and
+    nowhere else.
+    """
+    rows = conn.execute(
+        """
+        SELECT 'source' AS kind, id, title AS label, '' AS detail,
+               archived_at, archived_by, created_at, canonical_url AS extra
+          FROM sources WHERE status = 'archived'
+        UNION ALL
+        SELECT 'rule', id, claim, when_it_applies, archived_at, archived_by, created_at, ''
+          FROM epistemic_claims WHERE status = 'archived'
+        UNION ALL
+        SELECT 'skill', id, name, description, archived_at, archived_by, created_at, ''
+          FROM skills WHERE status = 'archived'
+        UNION ALL
+        SELECT 'summary', su.id, s.title, su.gist, su.archived_at, su.archived_by,
+               su.created_at, ''
+          FROM summaries su JOIN sources s ON s.id = su.source_id
+         WHERE su.status = 'archived'
+        ORDER BY archived_at DESC, created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_rules(
@@ -1378,7 +1504,7 @@ def set_skill_status(
 def set_source_status(
     conn: sqlite3.Connection, source_id: str, status: str, *, actor: str = "you"
 ) -> bool:
-    if status not in ("active", "archived", "trash"):
+    if status not in ("active", "processing", "blocked", "archived", "trash"):
         raise ValueError(status)
     at, by = _archival(status, actor)
     cur = conn.execute(

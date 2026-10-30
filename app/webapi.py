@@ -467,6 +467,21 @@ async def api_transcript(request: Request) -> Response:
 
 
 @endpoint
+async def api_archive_list(request: Request) -> Response:
+    """§7.12's list. Web only — the engine refuses it to an agent.
+
+    Named apart from `api_archive`, which archives ONE item by POST. Two
+    functions of the same name in one module is not an error: Python keeps the
+    second, and the route silently binds to whichever was defined last. Here
+    that pointed a GET at a handler which demands a CSRF token, so the list
+    answered 403 and was never reachable at all.
+    """
+    ctx = _context(request)
+    _rate_limit(ctx, "list_archive", {}, repeatable=True)
+    return _result(E.op_list_archive(ctx))
+
+
+@endpoint
 async def api_rules(request: Request) -> Response:
     ctx = _context(request)
     _rate_limit(ctx, "list_rules", {}, repeatable=True)
@@ -668,11 +683,21 @@ async def api_profile(request: Request) -> Response:
         return _result(E.op_profile(ctx))
     _require_csrf(request)
     payload = await _body(request)
+    def flag(name: str) -> bool | None:
+        value = payload.get(name)
+        return None if value is None else bool(value)
+
     return _result(
         E.op_update_profile(
             ctx,
             about_you_context=payload.get("about_you_context"),
             theme_mode=payload.get("theme_mode"),
+            display_name=payload.get("display_name"),
+            locale=payload.get("locale"),
+            want_summary=flag("want_summary"),
+            want_rules=flag("want_rules"),
+            want_skills=flag("want_skills"),
+            write_in=payload.get("write_in"),
         )
     )
 
@@ -859,6 +884,7 @@ ROUTES = [
     Route("/api/transcripts", api_transcripts, methods=["GET"]),
     Route("/api/transcripts/{source_id}", api_transcript, methods=["GET"]),
     Route("/api/rules", api_rules, methods=["GET"]),
+    Route("/api/archive", api_archive_list, methods=["GET"]),
     Route("/api/skills", api_skills, methods=["GET"]),
     Route("/api/skills/{skill_id}/review", api_review_skill, methods=["POST"]),
     Route("/api/skills/{skill_id}/state", api_skill_state, methods=["POST"]),

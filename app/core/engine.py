@@ -8,7 +8,9 @@ so nothing here hard-codes how `brain` speaks.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import re
 
 import functools
 import json
@@ -401,6 +403,25 @@ def op_ingest_source(
             )
 
     source_id = control_db.new_id("src")
+
+    # The row exists from the moment the work is queued, not from the moment
+    # the fetch succeeds. §7.7 has three states — none, `Processing`, `Needs
+    # you` — and the last two have nothing to attach to if the row only
+    # appears on success. It is also what makes §7.1's submit able to land on
+    # the source's own page: before this, it landed on a 404.
+    #
+    # The title is provisional and the pipeline overwrites it with the real
+    # one; until then it is the thing the person handed over, which is what
+    # they would recognise it by anyway.
+    tenant_db.upsert_source(
+        ctx.tenant,
+        source_id=source_id,
+        title=_provisional_title(target),
+        source_type=target.source_type,
+        canonical_url=target.canonical_url,
+        status="processing",
+    )
+
     job = control_db.create_job(
         ctx.control,
         ctx.user_id,
@@ -976,6 +997,13 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
             # Nothing may stay `running` once the job is over, or the work
             # block spins a step forever on a job that died (§4.4, §9.1).
             control_db.abandon_steps(control, job_id, reason=message)
+            # §7.7's third state. "Brain did not fail; Brain needs the
+            # person" — so the row stays, carrying that, rather than
+            # disappearing or pretending to be in memory.
+            with contextlib.suppress(Exception):
+                tenant_db.set_source_status(
+                    tenant_db.tenant(user_id, cfg=cfg), job["source_id"], "blocked"
+                )
             # Give back whatever the queue booked, so a failure costs no quota.
             control_db.release_quota(
                 control,
@@ -1112,48 +1140,65 @@ def _ingest_content(job, content, *, cfg, finish):
         duration_sec=content.duration_sec,
     )
     tenant_db.set_source_content(tdb, source["id"], content.full_text, content.cues)
+    # The row was created `processing` when the work was queued. It becomes a
+    # thing in the library only now that something has actually been read.
+    tenant_db.set_source_status(tdb, source["id"], "active")
+
+    # §9.1: "Steps 3-5 honour the person's ingestion defaults and their
+    # per-source instruction." Read once, here, so a switch in §7.13 that is
+    # off actually stops work rather than decorating the Profile page.
+    wants = control_db.ingestion_defaults(control, user_id)
 
     # ---- step 3: writing the summary --------------------------------------
-    control_db.start_step(control, job_id, "summarise")
-    try:
-        written = prov.summariser.summarise(
-            content.full_text,
-            content.cues,
-            {
-                "title": source["title"],
-                "source_type": job["source_type"],
-                "author": content.author,
-                "user_note": job["user_note"],
-            },
-        ) if prov.summariser else {}
-    except Exception as exc:  # pragma: no cover - defensive
-        # §9.1 allows the summary step to fail without taking the source with
-        # it: the transcript and the rules are still worth having.
-        written = {}
-        LOGGER.warning("summary failed for job %s: %s", job_id, exc)
-
-    if written.get("gist"):
-        summary = tenant_db.upsert_summary(
-            tdb,
-            source_id=source["id"],
-            gist=written["gist"],
-            points=written.get("points") or [],
-            chapters=written.get("chapters") or [],
-            instruction=job["user_note"],
-        )
+    if not wants["want_summary"]:
         control_db.finish_step(
             control, job_id, "summarise",
-            detail=(
-                "following your instruction" if job["user_note"]
-                else f"{len(summary['points'])} key points"
-            ),
-        )
-    else:
-        control_db.finish_step(
-            control, job_id, "summarise",
-            detail="nothing in this source was long enough to summarise",
+            detail="off in your settings",
             state="skipped",
         )
+        written = {}
+    else:
+        control_db.start_step(control, job_id, "summarise")
+        try:
+            written = prov.summariser.summarise(
+                content.full_text,
+                content.cues,
+                {
+                    "title": source["title"],
+                    "source_type": job["source_type"],
+                    "author": content.author,
+                    "user_note": job["user_note"],
+                    "write_in": wants["write_in"],
+                },
+            ) if prov.summariser else {}
+        except Exception as exc:  # pragma: no cover - defensive
+            # §9.1 allows the summary step to fail without taking the source
+            # with it: the transcript and the rules are still worth having.
+            written = {}
+            LOGGER.warning("summary failed for job %s: %s", job_id, exc)
+
+        if written.get("gist"):
+            summary = tenant_db.upsert_summary(
+                tdb,
+                source_id=source["id"],
+                gist=written["gist"],
+                points=written.get("points") or [],
+                chapters=written.get("chapters") or [],
+                instruction=job["user_note"],
+            )
+            control_db.finish_step(
+                control, job_id, "summarise",
+                detail=(
+                    "following your instruction" if job["user_note"]
+                    else f"{len(summary['points'])} key points"
+                ),
+            )
+        else:
+            control_db.finish_step(
+                control, job_id, "summarise",
+                detail="nothing in this source was long enough to summarise",
+                state="skipped",
+            )
 
     # ---- step 4: extracting rules -----------------------------------------
     control_db.set_job_status(control, job_id, "extracting")
@@ -1211,18 +1256,21 @@ def _ingest_content(job, content, *, cfg, finish):
     # auto-executed. This is why skills require approval — it is a security
     # control, not a UX nicety." A drafted skill is unreachable over MCP until
     # a person approves it, which is enforced by its status and not by tone.
-    control_db.start_step(control, job_id, "draft_skills")
-    drafted = _draft_skills_from_claims(tdb, source, stored, cfg=cfg)
-    if drafted:
+    drafted: list[dict[str, Any]] = []
+    if not wants["want_skills"]:
         control_db.finish_step(
-            control, job_id, "draft_skills",
-            detail=f"{len(drafted)} drafted, waiting for your review",
+            control, job_id, "draft_skills", detail="off in your settings", state="skipped"
         )
     else:
+        control_db.start_step(control, job_id, "draft_skills")
+        drafted = _draft_skills_from_claims(tdb, source, stored, cfg=cfg)
         control_db.finish_step(
             control, job_id, "draft_skills",
-            detail="no procedure in this source was worth keeping",
-            state="skipped",
+            detail=(
+                f"{len(drafted)} drafted, waiting for your review"
+                if drafted else "no procedure in this source was worth keeping"
+            ),
+            state="done" if drafted else "skipped",
         )
 
     # ---- step 6: updating memory ------------------------------------------
@@ -1413,6 +1461,21 @@ def op_get_source(ctx: Context, source_id: str) -> OpResult:
     )
 
 
+def _provisional_title(target: Any) -> str:
+    """What to call a source before anything has read it.
+
+    What the person pasted, minus the scheme. The last path segment was the
+    obvious choice and it is wrong for exactly the commonest case: every
+    YouTube link would have been titled "watch". The real title replaces this
+    the moment step 1 finishes.
+    """
+    raw = (getattr(target, "canonical_url", "") or getattr(target, "identifier", "") or "").strip()
+    if not raw:
+        return "New source"
+    shown = re.sub(r"^https?://(www\.)?", "", raw).rstrip("/")
+    return shown[:120] or "New source"
+
+
 def _instruction_for(ctx: Context, source_id: str) -> str:
     """What the person asked for when they handed this over (§7.3)."""
     job = control_db.latest_job_for_source(ctx.control, ctx.user_id, source_id)
@@ -1469,6 +1532,30 @@ def op_get_transcript(ctx: Context, source_id: str) -> OpResult:
             "turns": turns,
             "full_text": record["full_text"],
             "has_summary": tenant_db.get_summary(ctx.tenant, source_id=source["id"]) is not None,
+        },
+    )
+
+
+def op_list_archive(ctx: Context, *, limit: int = 200) -> OpResult:
+    """§7.12's one heterogeneous list, with who set each thing aside.
+
+    Web only. §7.12's promise to the person is that nothing here is reachable
+    by their AI, so the engine does not serve this list to an agent at all —
+    not even filtered.
+    """
+    refusal = _person_only(ctx, "list_archive")
+    if refusal:
+        return refusal
+
+    rows = tenant_db.list_archive(ctx.tenant, limit=limit)
+    ctx.audit("list_archive", "ok", detail={"count": len(rows)})
+    return OpResult(
+        ok=True,
+        action="list_archive",
+        data={
+            "items": rows,
+            # §7.12's filter pills, and the only place a type filter exists.
+            "types": ["source", "transcript", "summary", "rule", "skill"],
         },
     )
 
@@ -1976,6 +2063,13 @@ def op_profile(ctx: Context) -> OpResult:
             "sessions": sessions,
             "mcp_url": ctx.cfg.audience,
             "library_counts": tenant_db.counts(ctx.tenant),
+            # §7.13's Account and Appearance blocks.
+            "display_name": user.get("display_name", ""),
+            "locale": user.get("locale", ""),
+            # §7.13's "What Brain does with new sources". Returned as what the
+            # pipeline actually reads, so the switches and the behaviour
+            # cannot drift apart.
+            "ingestion": control_db.ingestion_defaults(ctx.control, ctx.user_id),
         },
     )
 
@@ -2057,14 +2151,35 @@ def op_audit_log(ctx: Context, *, limit: int = 40, include_reads: bool = False) 
 
 
 def op_update_profile(
-    ctx: Context, *, about_you_context: str | None = None, theme_mode: str | None = None
+    ctx: Context,
+    *,
+    about_you_context: str | None = None,
+    theme_mode: str | None = None,
+    display_name: str | None = None,
+    locale: str | None = None,
+    want_summary: bool | None = None,
+    want_rules: bool | None = None,
+    want_skills: bool | None = None,
+    write_in: str | None = None,
 ) -> OpResult:
+    """§7.13's four sections write through here.
+
+    A value outside its allowed set comes back as a refusal rather than being
+    dropped: a switch that does not move, with no explanation, is worse than
+    an error that says why.
+    """
     try:
         control_db.update_profile(
             ctx.control,
             ctx.user_id,
             about_you_context=None if about_you_context is None else clean_text(about_you_context),
             theme_mode=theme_mode,
+            display_name=None if display_name is None else clean_text(display_name),
+            locale=locale,
+            want_summary=want_summary,
+            want_rules=want_rules,
+            want_skills=want_skills,
+            write_in=write_in,
         )
     except ValueError as exc:
         return _fail("update_profile", "invalid_value", str(exc))
