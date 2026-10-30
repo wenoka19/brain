@@ -846,10 +846,29 @@ def op_save_skill(
 # ===========================================================================
 # 8. archive_item   (soft only — there is no delete over MCP)
 # ===========================================================================
+#: §7.12's list and §5's tool call the same thing by two names. The Archive
+#: emits `rule`, because that is the word on the page; the MCP tool's signature
+#: is `claim`, and a published tool signature does not change to suit a frame.
+#: `summary` exists on the page and not in the tool — an agent has no business
+#: setting aside a summary of a source it can still read.
+_ARCHIVABLE = {
+    "source": "source",
+    "claim": "claim",
+    "rule": "claim",      # §7.12's word for the same row
+    "skill": "skill",
+    "summary": "summary",  # web only; the MCP tool's Literal stays at three
+}
+
+
 @_syncs_tenant
 def op_archive_item(ctx: Context, item_type: ItemType, item_id: str, *, restore: bool = False) -> OpResult:
-    if item_type not in ("source", "claim", "skill"):
-        return _fail("archive_item", "bad_item_type", "item_type must be source, claim or skill.")
+    item_type = _ARCHIVABLE.get(item_type, "")  # type: ignore[arg-type]
+    if not item_type:
+        return _fail(
+            "archive_item",
+            "bad_item_type",
+            "item_type must be source, claim (or rule), skill or summary.",
+        )
     target_status = "active" if restore else "archived"
     # §7.12 prints `archived by you` or `archived by Brain` beside every row,
     # in amber for the second — "when something vanishes from the library
@@ -877,6 +896,13 @@ def op_archive_item(ctx: Context, item_type: ItemType, item_id: str, *, restore:
         )
         label = record["name"] if record else ""
         item_id = record["id"] if record else item_id
+    elif item_type == "summary":
+        record = tenant_db.get_summary(ctx.tenant, summary_id=item_id)
+        changed = (
+            tenant_db.set_summary_status(ctx.tenant, item_id, target_status, actor=actor)
+            if record else False
+        )
+        label = record["gist"][:120] if record else ""
     else:
         record = tenant_db.get_source(ctx.tenant, item_id)
         changed = (
@@ -985,13 +1011,23 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
     prov = providers(cfg)
     job_id = job["job_id"]
 
-    def finish(status: str, *, message: str = "", claims: int = 0) -> dict[str, Any]:
+    def finish(
+        status: str, *, message: str = "", reason: str = "", claims: int = 0
+    ) -> dict[str, Any]:
         # Even a failure can have written a source row before giving up, so
         # the tenant is flagged on every exit from the pipeline, not just on
         # `ready`.
         r2_sync.mark_dirty(user_id)
         control_db.set_job_status(
-            control, job_id, status, error_message=message, claims_extracted=claims
+            control,
+            job_id,
+            status,
+            error_message=message,
+            # §7.7's `Fix this` tooltip states the remedy, and a sentence
+            # written for the person cannot be matched on. The provider's own
+            # reason code rides along so the frame can map it.
+            error_reason=reason,
+            claims_extracted=claims,
         )
         if status in ("failed", "blocked_by_platform"):
             # Nothing may stay `running` once the job is over, or the work
@@ -1043,15 +1079,21 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
             target = gatekeeper.normalize_url(job["input_target"], cfg=cfg)
             content = prov.fetcher.fetch_url(target, cfg=cfg)
     except GatekeeperError as exc:
-        return finish("failed", message=exc.message)
+        return finish("failed", message=exc.message, reason=getattr(exc, "reason", "refused"))
     except ProviderError as exc:
         status = "blocked_by_platform" if exc.reason == "blocked_by_platform" else "failed"
-        return finish(status, message=exc.message)
+        return finish(status, message=exc.message, reason=exc.reason)
     except Exception as exc:  # pragma: no cover - defensive
-        return finish("failed", message=f"Unexpected error while fetching: {exc}")
+        return finish(
+            "failed", message=f"Unexpected error while fetching: {exc}", reason="unexpected"
+        )
 
     if not content.full_text:
-        return finish("failed", message="Nothing readable was found at that source.")
+        return finish(
+            "failed",
+            message="Nothing readable was found at that source.",
+            reason="empty_content",
+        )
 
     control_db.finish_step(
         control, job_id, "read", detail=_step_detail_read(job, content)
@@ -1300,15 +1342,22 @@ def _ingest_content(job, content, *, cfg, finish):
 _PERSON_ONLY = ("web_ui", "web_omnibar", "system")
 
 
-def _person_only(ctx: Context, action: str) -> OpResult | None:
+def _person_only(
+    ctx: Context,
+    action: str,
+    because: str = "Only the person can decide a skill's state. Approve it in Brain's web app.",
+) -> OpResult | None:
+    """Refuse an action that belongs to the person, and say which one.
+
+    The default sentence is about skills because that is where this guard
+    started, but it also covers the archive and the two source actions — and
+    an agent told its archive read was refused "because only the person can
+    decide a skill's state" learns nothing it can act on.
+    """
     if ctx.surface in _PERSON_ONLY:
         return None
     ctx.audit(action, "refused_surface", detail={"surface": ctx.surface})
-    return _fail(
-        action,
-        "person_only",
-        "Only the person can decide a skill's state. Approve it in Brain's web app.",
-    )
+    return _fail(action, "person_only", because)
 
 
 def op_list_skills(ctx: Context) -> OpResult:
@@ -1405,8 +1454,20 @@ def op_set_skill_state(ctx: Context, skill_id: str, state: str) -> OpResult:
 
 
 def op_list_sources(ctx: Context, *, limit: int = 100) -> OpResult:
-    """§7.7's list, type-first, with the yield in green."""
+    """§7.7's list, type-first, with the yield in green.
+
+    A blocked row carries why. The reason lives on the job in `control.db` and
+    the row lives in the tenant database, so no query can join them — this is
+    the one place that holds both connections, which is why the enrichment
+    happens here and not in `tenant.list_sources`.
+    """
     rows = tenant_db.list_sources(ctx.tenant, limit=limit)
+    for row in rows:
+        if row["status"] != "blocked":
+            continue
+        job = control_db.latest_job_for_source(ctx.control, ctx.user_id, row["id"])
+        row["block_reason"] = (job or {}).get("error_reason", "")
+        row["block_message"] = (job or {}).get("error_message", "")
     ctx.audit("list_sources", "ok", detail={"count": len(rows)})
     return OpResult(ok=True, action="list_sources", data={"sources": rows})
 
@@ -1554,7 +1615,12 @@ def op_list_archive(ctx: Context, *, limit: int = 200) -> OpResult:
     by their AI, so the engine does not serve this list to an agent at all —
     not even filtered.
     """
-    refusal = _person_only(ctx, "list_archive")
+    refusal = _person_only(
+        ctx,
+        "list_archive",
+        "The archive is the person's alone. What they set aside is not reachable "
+        "from here — treat it as though it does not exist.",
+    )
     if refusal:
         return refusal
 
@@ -1702,6 +1768,189 @@ def op_source_progress(ctx: Context, source_id: str) -> OpResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# §7.3 and §7.4's overflow menus
+# ---------------------------------------------------------------------------
+# Three actions the card menus offer. All three are the person's: renaming
+# their own library, spending quota on a re-read, and asking for a summary
+# they turned off are decisions an agent does not get to make on their
+# behalf — and §2's "zero destructive LLM tools" is the same argument.
+
+
+@_syncs_tenant
+def op_rename_source(ctx: Context, source_id: str, title: str) -> OpResult:
+    """§7.4's overflow `Rename`, which §7.3 and §7.12 reach too.
+
+    The title is what every list, card and reader shows, so it is the one
+    field of a source the person can correct — an auto-extracted title is
+    often a channel's boilerplate.
+    """
+    refusal = _person_only(
+        ctx,
+        "rename_source",
+        "Renaming is the person's — their library's titles are not yours to change.",
+    )
+    if refusal:
+        return refusal
+
+    title = " ".join((title or "").split())[:500]
+    if not title:
+        return _fail("rename_source", "empty_title", "A source needs a title.")
+
+    source = _visible(ctx, tenant_db.get_source(ctx.tenant, source_id))
+    if source is None:
+        return _fail("rename_source", "not_found", f"No source has the id `{source_id}`.")
+
+    tenant_db.rename_source(ctx.tenant, source["id"], title)
+    ctx.audit("rename_source", "ok", target_id=source["id"])
+    return OpResult(
+        ok=True,
+        action="rename_source",
+        data={"source": tenant_db.get_source(ctx.tenant, source["id"])},
+    )
+
+
+def op_reprocess_source(ctx: Context, source_id: str) -> OpResult:
+    """§7.3's overflow `Re-process`: read the source again from its URL.
+
+    A new job against the same source row, so the six steps of §4.4 are
+    rewritten in place rather than accumulating — the person asked for this
+    source to be redone, not for a second copy of it.
+
+    Only a source that has a URL can be re-read. A pasted rescue or an
+    uploaded file has nothing to go back to, and says so instead of queueing
+    a job that would fail at step 1.
+    """
+    refusal = _person_only(
+        ctx,
+        "reprocess_source",
+        "Re-reading a source spends the person's quota, so they ask for it themselves.",
+    )
+    if refusal:
+        return refusal
+
+    source = _visible(ctx, tenant_db.get_source(ctx.tenant, source_id))
+    if source is None:
+        return _fail("reprocess_source", "not_found", f"No source has the id `{source_id}`.")
+    if not source["canonical_url"]:
+        return _fail(
+            "reprocess_source",
+            "nothing_to_reread",
+            f"`{source['title']}` came from a file or pasted text, so there is no "
+            "address to read again. Add it again to replace it.",
+        )
+
+    running = control_db.latest_job_for_source(ctx.control, ctx.user_id, source["id"])
+    if running and running["status"] in ("queued", "fetching", "extracting", "linking"):
+        return _fail(
+            "reprocess_source",
+            "already_running",
+            f"Brain is still working on `{source['title']}`.",
+        )
+
+    job = control_db.create_job(
+        ctx.control,
+        ctx.user_id,
+        source_id=source["id"],
+        input_target=source["canonical_url"],
+        source_type=source["source_type"],
+        user_note=running["user_note"] if running else "",
+    )
+    tenant_db.set_source_status(ctx.tenant, source["id"], "processing")
+    ctx.audit("reprocess_source", "queued", target_id=source["id"])
+    return OpResult(
+        ok=True,
+        action="reprocess_source",
+        data={
+            "job_id": job["job_id"],
+            "source_id": source["id"],
+            "message": f"Re-reading `{source['title']}`.",
+        },
+    )
+
+
+@_syncs_tenant
+def op_generate_summary(ctx: Context, source_id: str) -> OpResult:
+    """§7.4's overflow `Generate a summary`, for a transcript that has none.
+
+    The text is already stored, so this runs the summariser over it rather
+    than re-reading the source — which is the whole reason the action exists
+    on a transcript card: a person who had summaries switched off can still
+    have one for this source without spending the quota again.
+    """
+    refusal = _person_only(
+        ctx,
+        "generate_summary",
+        "A summary is written when the person asks for it.",
+    )
+    if refusal:
+        return refusal
+
+    source = _visible(ctx, tenant_db.get_source(ctx.tenant, source_id))
+    if source is None:
+        return _fail("generate_summary", "not_found", f"No source has the id `{source_id}`.")
+
+    existing = tenant_db.get_summary(ctx.tenant, source_id=source["id"])
+    if existing:
+        return OpResult(
+            ok=True,
+            action="generate_summary",
+            data={"summary": existing, "created": False},
+        )
+
+    content = tenant_db.get_source_content(ctx.tenant, source["id"])
+    if not content or not (content["full_text"] or "").strip():
+        return _fail(
+            "generate_summary",
+            "no_text",
+            f"`{source['title']}` has no stored text to summarise.",
+        )
+
+    if ctx.prov.summariser is None:  # pragma: no cover - the bundle always has one
+        return _fail("generate_summary", "unavailable", "No summariser is configured.")
+
+    wants = control_db.ingestion_defaults(ctx.control, ctx.user_id)
+    try:
+        written = ctx.prov.summariser.summarise(
+            content["full_text"],
+            content["cues"],
+            {
+                "title": source["title"],
+                "source_type": source["source_type"],
+                "author": source["author"],
+                "user_note": "",
+                "write_in": wants["write_in"],
+            },
+        )
+    except Exception as exc:
+        LOGGER.warning("on-demand summary failed for %s: %s", source["id"], exc)
+        return _fail(
+            "generate_summary", "summariser_failed", "The summary could not be written."
+        )
+
+    if not written.get("gist"):
+        return _fail(
+            "generate_summary",
+            "too_short",
+            f"There is not enough in `{source['title']}` to summarise.",
+        )
+
+    summary = tenant_db.upsert_summary(
+        ctx.tenant,
+        source_id=source["id"],
+        gist=written["gist"],
+        points=written.get("points") or [],
+        chapters=written.get("chapters") or [],
+        instruction="",
+    )
+    ctx.audit("generate_summary", "ok", target_id=summary["id"])
+    return OpResult(
+        ok=True,
+        action="generate_summary",
+        data={"summary": summary, "created": True},
+    )
+
+
 def run_pending_jobs_sync(
     user_id: str | None = None, *, cfg: Settings | None = None, limit: int = 10
 ) -> list[dict[str, Any]]:
@@ -1829,32 +2078,98 @@ def op_list_trash(ctx: Context) -> OpResult:
     )
 
 
+#: Which table an id belongs to. The ids are prefixed at creation, so §7.12's
+#: one heterogeneous list does not have to carry a type through the frame for
+#: `Delete permanently` to know what it is deleting.
+_ID_PREFIX = {"src": "source", "clm": "claim", "skl": "skill", "sum": "summary"}
+
+
 @_syncs_tenant
-def op_permanent_delete(ctx: Context, item_id: str) -> OpResult:
-    """Hard delete. Only reachable from the Web UI, only from Trash.
+def op_permanent_delete(
+    ctx: Context, item_id: str, item_type: str | None = None
+) -> OpResult:
+    """Hard delete, of anything the person has already set aside.
 
     This is the single destructive path in the product, and an agent cannot
-    reach it: there is no MCP tool that calls this function.
+    reach it: there is no MCP tool that calls this function, and the surface
+    guard below refuses one that tries.
+
+    **Already set aside** is the precondition, not "in Trash". §9.4 puts
+    `Delete permanently` on an archived card, so demanding Trash first — a
+    source-only concept — meant the button on §7.12's cards could only ever
+    answer `not_in_trash`, and for a rule, skill or summary `not_found`,
+    because the id was resolved against `sources` alone.
+
+    Archiving stays the first gate and §9.4's two-step dialog the second: the
+    person sets a thing aside, finds it on the one page that lists what they
+    set aside, and types the word.
     """
-    source = tenant_db.get_source(ctx.tenant, item_id)
-    if source is None:
-        return _fail("permanent_delete", "not_found", f"No source has the id `{item_id}`.")
-    if source["status"] != "trash":
+    refusal = _person_only(
+        ctx,
+        "permanent_delete",
+        "Nothing is deleted by an agent. Archive it instead — the person deletes, "
+        "from Archive, and confirms.",
+    )
+    if refusal:
+        return refusal
+
+    # The same map `op_archive_item` uses, so `rule` means here exactly what
+    # it means there — the whole point of the defect this fixed.
+    kind = _ARCHIVABLE.get(item_type, "") if item_type else _ID_PREFIX.get(item_id[:3], "")
+    if kind not in ("source", "claim", "skill", "summary"):
+        return _fail(
+            "permanent_delete", "bad_item_type", f"`{item_id}` is not an id this can delete."
+        )
+
+    readers = {
+        "source": lambda: tenant_db.get_source(ctx.tenant, item_id),
+        "claim": lambda: tenant_db.get_claim(ctx.tenant, item_id),
+        "skill": lambda: tenant_db.get_skill(ctx.tenant, item_id),
+        "summary": lambda: tenant_db.get_summary(ctx.tenant, summary_id=item_id),
+    }
+    record = readers[kind]()
+    if record is None:
+        return _fail("permanent_delete", "not_found", f"No {kind} has the id `{item_id}`.")
+    if record["status"] not in ("archived", "trash"):
         return _fail(
             "permanent_delete",
-            "not_in_trash",
-            "Only items in Trash can be permanently deleted. Move it to Trash first.",
+            "not_set_aside",
+            "Only something you have already archived can be deleted for good. "
+            "Archive it first.",
         )
-    claims = len(tenant_db.claims_for_source(ctx.tenant, item_id, active_only=False))
-    ctx.tenant.execute("DELETE FROM sources WHERE id = ?", (item_id,))
-    ctx.audit("permanent_delete", "ok", target_id=item_id, detail={"claims": claims})
+
+    # A source takes its content, rules, skills and summary with it — that is
+    # what `ON DELETE CASCADE` is for, and it is why the count is read first.
+    cascaded = (
+        len(tenant_db.claims_for_source(ctx.tenant, item_id, active_only=False))
+        if kind == "source"
+        else 0
+    )
+    table = {
+        "source": "sources",
+        "claim": "epistemic_claims",
+        "skill": "skills",
+        "summary": "summaries",
+    }[kind]
+    ctx.tenant.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
+
+    label = {
+        "source": lambda: record["title"],
+        "claim": lambda: record["claim"][:120],
+        "skill": lambda: record["name"],
+        "summary": lambda: record["gist"][:120],
+    }[kind]()
+    ctx.audit(
+        "permanent_delete", "ok", target_id=item_id, detail={"kind": kind, "claims": cascaded}
+    )
     return OpResult(
         ok=True,
         action="permanent_delete",
         data={
             "id": item_id,
-            "label": source["title"],
-            "deleted_claims": claims,
+            "item_type": kind,
+            "label": label,
+            "deleted_claims": cascaded,
             "library_counts": tenant_db.counts(ctx.tenant),
         },
     )
@@ -2441,6 +2756,107 @@ def op_clear_demo(ctx: Context) -> OpResult:
         ok=True,
         action="clear_demo",
         data={"cleared": cleared, "library_counts": tenant_db.counts(ctx.tenant)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# §7.13's `Your data` — the two acts the product cannot take back
+# ---------------------------------------------------------------------------
+#: §9.4 gates both on typing `DELETE`. The word is checked **here** as well as
+#: in the dialog: a dialog is a frame's promise, and a frame is one bug away
+#: from firing a POST with an empty body. An op that destroys a library should
+#: not be callable by accident from anywhere.
+DELETE_WORD = "DELETE"
+
+
+def _typed_the_word(action: str, typed: str) -> OpResult | None:
+    if (typed or "").strip() != DELETE_WORD:
+        return _fail(
+            action,
+            "not_confirmed",
+            f"Type {DELETE_WORD} to confirm. Nothing was changed.",
+        )
+    return None
+
+
+@_syncs_tenant
+def op_delete_library(ctx: Context, *, typed: str = "") -> OpResult:
+    """§7.13: "Removes every source and everything made from it. Your account
+    stays."
+
+    Every content table, emptied in one transaction — not row by row through
+    the archive, which would leave the person watching a progress bar for
+    something that should be instantaneous and atomic. The account, its
+    settings, its connections and its sessions all survive: this is the person
+    clearing their library, not leaving.
+    """
+    refusal = _person_only(
+        ctx,
+        "delete_library",
+        "Nothing is deleted by an agent. This is the person's own door, in Brain's web app.",
+    )
+    if refusal:
+        return refusal
+    refusal = _typed_the_word("delete_library", typed)
+    if refusal:
+        return refusal
+
+    before = tenant_db.counts(ctx.tenant)
+    with ctx.tenant:  # one transaction: all of it goes, or none of it does
+        # `sources` cascades to source_content, claims, tension_links and
+        # summaries; skills hang off a source but survive its deletion when
+        # they were written by hand, so they are cleared explicitly.
+        ctx.tenant.execute("DELETE FROM sources")
+        ctx.tenant.execute("DELETE FROM skills")
+    ctx.audit("delete_library", "ok", detail=before)
+    return OpResult(
+        ok=True,
+        action="delete_library",
+        data={"deleted": before, "library_counts": tenant_db.counts(ctx.tenant)},
+    )
+
+
+def op_delete_account(ctx: Context, *, typed: str = "") -> OpResult:
+    """§7.13: "Closes the account and everything in it."
+
+    The tenant database file is unlinked, every session is revoked, and the
+    `users` row goes — which cascades `oauth_sessions`, `ingestion_jobs` and
+    their steps in `control.db`. The audit rows are deliberately left: they
+    carry no content, and a deletion that erases its own record is not one the
+    person can later prove happened.
+    """
+    refusal = _person_only(
+        ctx,
+        "delete_account",
+        "An account is closed by the person who owns it, in Brain's web app.",
+    )
+    if refusal:
+        return refusal
+    refusal = _typed_the_word("delete_account", typed)
+    if refusal:
+        return refusal
+
+    user_id = ctx.user_id
+    counts = tenant_db.counts(ctx.tenant)
+    sessions = control_db.revoke_all_sessions(ctx.control, user_id)
+
+    # Audited BEFORE the row goes: the foreign key on `audit_logs.user_id` is
+    # nullable by design, but the row has to be written while there is still a
+    # user to attribute it to.
+    ctx.audit("delete_account", "ok", detail={"sessions": sessions, **counts})
+
+    tenant_db.close_tenant(user_id, cfg=ctx.cfg)
+    path = ctx.cfg.tenant_db_path(user_id)
+    for suffix in ("", "-wal", "-shm"):
+        candidate = path.with_name(path.name + suffix)
+        with contextlib.suppress(FileNotFoundError):
+            candidate.unlink()
+
+    control_db.delete_user(ctx.control, user_id)
+    return OpResult(
+        ok=True,
+        action="delete_account",
+        data={"user_id": user_id, "sessions_revoked": sessions, "deleted": counts},
     )
 
 

@@ -1645,6 +1645,9 @@ never disagrees with what is being built.
 | `R-10` | §2.3, §7.13 | **No warm sunset.** Two themes, Light and Dark. The Profile picker shows two swatches, and the "switch to warm sunset in the evening" row of §7.13 goes with it | 29 Oct 2026 |
 | `R-11` | §2.1, §2.3 | §2.3's *"primitives never change"* cannot be met — §2.1 holds no dark surface. The set **grows** by 13 and no existing value moves. The dark theme redefines semantics only, which is the half of the rule that can be kept | 29 Oct 2026 |
 | `R-12` | §2.2, §3.3, §3.7 | `--on-accent` and `--on-danger` added, closing `G-1`. Optional while only light existed, where both are white; the dark theme makes them load bearing, because its lifted accent cannot carry a white label | 29 Oct 2026 |
+| `R-13` | §7.1 | The Home stack is 720, not the ~900 the capture shows | 29 Oct 2026 |
+| `R-14` | §7.9, §6 r8, §9.4 | **`Delete` in a skill's overflow menu sets the skill aside; it does not destroy it.** §7.9 lists `Delete (confirms)` in the menu, and §6 rule 8 says *"only the person deletes, and only from Archive or Profile"* — the two cannot both hold on a live skill's card. Rule 8 wins, because §2's 30-day recovery buffer is a security property and a menu item is not a place to spend it. The item keeps §7.9's name, the dialog says plainly that the skill moves to Archive, and the permanent delete stays where rule 8 puts it | 30 Oct 2026 |
+| `R-15` | §9.4, §2 | **`Delete permanently` requires the thing to be set aside** — archived *or* trashed — not trashed specifically. §9.4 puts the control on an archived card, and Trash is a source-level concept, so the original rule meant the button could only ever answer `not_in_trash`. Archiving is the first gate, the dialog the second | 30 Oct 2026 |
 
 Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 

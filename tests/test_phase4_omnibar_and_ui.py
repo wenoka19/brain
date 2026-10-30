@@ -482,11 +482,11 @@ class TestWebApiSurface:
         out = signed_in.post("/api/synthesize", json={"task": "run an outbound sprint"}).json()
         assert out["ok"] and out["origin"] in ("saved", "synthesized")
 
-    def test_permanent_deletion_requires_trash_first(self, signed_in):
+    def test_permanent_deletion_requires_it_set_aside_first(self, signed_in):
         signed_in.post("/api/demo/seed", json={})
         source_id = E.DEMO_SOURCE_VIDEO
         refused = signed_in.post(f"/api/delete/{source_id}", json={})
-        assert refused.status_code == 400 and refused.json()["reason"] == "not_in_trash"
+        assert refused.status_code == 400 and refused.json()["reason"] == "not_set_aside"
 
         assert signed_in.post(f"/api/trash/source/{source_id}", json={}).json()["status"] == "trash"
         assert signed_in.get("/api/trash").json()["items"][0]["id"] == source_id

@@ -1157,27 +1157,57 @@ class TestEngineArchive:
         assert E.op_archive_item(ctx, "database", "x").error_reason == "bad_item_type"  # type: ignore[arg-type]
         assert E.op_archive_item(ctx, "claim", "clm_nope").error_reason == "not_found"
 
-    def test_permanent_deletion_is_reachable_only_from_trash(self, ctx):
-        """Hard delete exists for the Web UI, but it is gated on Trash.
+    def test_permanent_deletion_needs_the_thing_set_aside_first(self, cfg, user):
+        """Hard delete exists for the Web UI, and only for something the
+        person has already set aside.
 
         The invariant that matters is not that the engine contains no DELETE —
         the founder's Profile modal needs one — but that nothing can reach it
-        except a human, from Trash. The MCP-surface half of this is asserted in
+        except a human, and only for something they already archived or
+        trashed. The MCP-surface half of this is also asserted structurally in
         `tests/test_phase3_mcp_and_auth.py`.
+
+        **The precondition used to be Trash specifically**, which is a
+        source-level concept. §9.4 puts `Delete permanently` on an archived
+        card of any kind, so that rule meant the button on §7.12's cards could
+        only ever answer `not_in_trash` — and `not_found` for a rule, skill or
+        summary, whose ids were resolved against `sources` alone. Both states
+        now qualify; neither is reachable without the person having acted.
         """
-        E.op_ingest_source(ctx, YOUTUBE_URL)
-        E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
-        source_id = control_db.list_jobs(ctx.control, ctx.user_id)[0]["source_id"]
+        web = E.build_context(user["user_id"], surface="web_ui")
+        E.op_ingest_source(web, YOUTUBE_URL)
+        E.run_pending_jobs_sync(web.user_id, cfg=web.cfg)
+        source_id = control_db.list_jobs(web.control, web.user_id)[0]["source_id"]
 
-        refused = E.op_permanent_delete(ctx, source_id)
-        assert not refused.ok and refused.error_reason == "not_in_trash"
-        assert tenant_db.get_source(ctx.tenant, source_id) is not None
+        # Active: refused, and it says what to do instead.
+        refused = E.op_permanent_delete(web, source_id)
+        assert not refused.ok and refused.error_reason == "not_set_aside"
+        assert "archive it first" in refused.error_message.lower()
+        assert tenant_db.get_source(web.tenant, source_id) is not None
 
-        E.op_trash_item(ctx, "source", source_id)
-        deleted = E.op_permanent_delete(ctx, source_id)
+        # And an agent is refused even once it IS set aside — the guard is the
+        # surface, not the state.
+        E.op_archive_item(web, "source", source_id)
+        agent = E.build_context(user["user_id"], surface="mcp")
+        blocked = E.op_permanent_delete(agent, source_id)
+        assert not blocked.ok and blocked.error_reason == "person_only"
+        assert tenant_db.get_source(web.tenant, source_id) is not None
+
+        deleted = E.op_permanent_delete(web, source_id)
         assert deleted.ok and deleted.data["deleted_claims"] >= 1
-        assert tenant_db.get_source(ctx.tenant, source_id) is None
-        assert tenant_db.counts(ctx.tenant)["claims"] == 0
+        assert tenant_db.get_source(web.tenant, source_id) is None
+        assert tenant_db.counts(web.tenant)["claims"] == 0
+
+    def test_trash_is_still_a_road_to_deletion(self, cfg, user):
+        """Widening the precondition must not close the path that worked."""
+        web = E.build_context(user["user_id"], surface="web_ui")
+        E.op_ingest_source(web, YOUTUBE_URL)
+        E.run_pending_jobs_sync(web.user_id, cfg=web.cfg)
+        source_id = control_db.list_jobs(web.control, web.user_id)[0]["source_id"]
+
+        E.op_trash_item(web, "source", source_id)
+        assert E.op_permanent_delete(web, source_id).ok
+        assert tenant_db.get_source(web.tenant, source_id) is None
 
     def test_archiving_is_the_only_destructive_verb_an_agent_can_use(self):
         """No `op_*` an MCP tool calls may hard-delete."""

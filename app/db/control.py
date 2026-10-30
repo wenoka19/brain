@@ -246,6 +246,21 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("users", "want_rules", "ALTER TABLE users ADD COLUMN want_rules INTEGER NOT NULL DEFAULT 1"),
     ("users", "want_skills", "ALTER TABLE users ADD COLUMN want_skills INTEGER NOT NULL DEFAULT 1"),
     ("users", "write_in", "ALTER TABLE users ADD COLUMN write_in TEXT NOT NULL DEFAULT 'source'"),
+    # §7.7's `Fix this` tooltip "states the remedy" — "Make it public, then
+    # retry", "No text layer — retype or re-scan". A sentence written for the
+    # person cannot be matched on, so the provider's own reason code is kept
+    # beside it and the frame maps the code to the remedy.
+    ("ingestion_jobs", "error_reason", "ALTER TABLE ingestion_jobs ADD COLUMN error_reason TEXT NOT NULL DEFAULT ''"),
+    # §7.10's four columns — `STACK_AUDIT.md` §9.2 row 2, approved. The capture
+    # is what made the list exact: a row reads
+    #   `14:02 ● Claude Desktop search_rules "planning cycle" 180 ms [OK]`
+    # and expands to `Asked for` / `Returned` / `Payload` / `Connection`.
+    # Nothing in the shipped `audit_logs` could supply the latency, the size,
+    # the one-line result, or which connection made the call.
+    ("audit_logs", "latency_ms", "ALTER TABLE audit_logs ADD COLUMN latency_ms INTEGER"),
+    ("audit_logs", "payload_bytes", "ALTER TABLE audit_logs ADD COLUMN payload_bytes INTEGER"),
+    ("audit_logs", "result_summary", "ALTER TABLE audit_logs ADD COLUMN result_summary TEXT NOT NULL DEFAULT ''"),
+    ("audit_logs", "connection_id", "ALTER TABLE audit_logs ADD COLUMN connection_id TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -321,6 +336,22 @@ def ensure_user(conn: sqlite3.Connection, email: str) -> dict[str, Any]:
 def get_user(conn: sqlite3.Connection, user_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     return dict(row) if row else None
+
+
+def delete_user(conn: sqlite3.Connection, user_id: str) -> bool:
+    """§7.13's `Delete account`. One row, and the schema does the rest.
+
+    `oauth_sessions`, `ingestion_jobs` and `job_steps` all declare
+    `ON DELETE CASCADE` against this row, so they go with it — which is why
+    `PRAGMA foreign_keys = ON` is not optional here, and is asserted in
+    `tests/test_phase1_db_and_security.py`.
+
+    `audit_logs.user_id` carries no foreign key and is left behind on purpose:
+    the rows hold no content, and a deletion that erased its own record would
+    not be one the person could later show had happened.
+    """
+    cur = conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    return cur.rowcount > 0
 
 
 #: §7.13's "Write them in": the language summaries and rules come out in,
@@ -692,6 +723,7 @@ def set_job_status(
     status: str,
     *,
     error_message: str | None = None,
+    error_reason: str | None = None,
     claims_extracted: int | None = None,
 ) -> None:
     if status not in JOB_STATUSES:
@@ -701,6 +733,9 @@ def set_job_status(
     if error_message is not None:
         sets.append("error_message = ?")
         params.append(error_message[:2000])
+    if error_reason is not None:
+        sets.append("error_reason = ?")
+        params.append(error_reason[:64])
     if claims_extracted is not None:
         sets.append("claims_extracted = ?")
         params.append(claims_extracted)
@@ -843,12 +878,25 @@ def audit(
     target_id: str | None = None,
     detail: Any = "",
     reasoning_trace: str = "",
+    latency_ms: int | None = None,
+    payload_bytes: int | None = None,
+    result_summary: str = "",
+    connection_id: str = "",
 ) -> None:
     """Append one immutable audit row.
 
     `reasoning_trace` is the plain-English "why" the owner reads in their
     Profile — "blocked: the skill text tried to override the host model's
     instructions" — rather than a machine-readable detail blob.
+
+    The last four are §7.10's row, collapsed and expanded: the `180 ms`, the
+    `1.2 kB`, the `3 rules returned`, and which connection made the call —
+    which is also the link from Activity to §7.11, because "revoking a key is
+    only meaningful once you can see what it did".
+
+    `latency_ms` and `payload_bytes` are nullable on purpose. A call that was
+    refused before it ran has no duration and no payload, and `0` would read
+    as "instant and empty" on a page whose whole job is being readable.
     """
     if surface not in ("mcp", "web_omnibar", "web_ui", "system"):
         surface = "system"
@@ -856,7 +904,8 @@ def audit(
         detail = json.dumps(detail, default=str, ensure_ascii=False)[:2000]
     conn.execute(
         "INSERT INTO audit_logs (user_id, client_name, surface, action, target_id, status, "
-        "detail, reasoning_trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "detail, reasoning_trace, latency_ms, payload_bytes, result_summary, connection_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id,
             client_name,
@@ -866,6 +915,10 @@ def audit(
             status,
             detail[:2000],
             (reasoning_trace or "")[:1000],
+            latency_ms,
+            payload_bytes,
+            (result_summary or "")[:300],
+            (connection_id or "")[:64],
         ),
     )
 

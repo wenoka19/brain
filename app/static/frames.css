@@ -866,3 +866,66 @@ mark {
   color: var(--text-secondary);
   line-height: var(--leading-read);
 }
+
+/* §7.1's create panel, reached by `?create=1` from `+ Write a rule` and
+   `+ Add a skill`. It sits above the list, because the person came to add
+   something rather than to read. */
+.create-panel .card-group { padding: var(--space-4); }
+
+.create-field + .create-field { margin-top: var(--space-4); }
+
+.create-field .field-label { display: block; margin-bottom: var(--space-1); }
+
+.create-field .input { width: 100%; }
+
+.create-area {
+  height: auto;
+  padding: var(--space-2) var(--space-3);
+  line-height: var(--leading-normal);
+  resize: vertical;
+}
+
+.create-panel .btn-row { margin-top: var(--space-5); align-items: center; }
+
+/* §7.8's inline `Edit`, inside the expanded rule card. It replaces the action
+   row rather than opening a dialog: the rule is already on screen at reading
+   size, and the edit is two fields. */
+.rule-edit { margin-top: var(--space-4); }
+
+.rule-edit .field-label { display: block; margin-bottom: var(--space-1); }
+
+.rule-edit .input { width: 100%; }
+
+.rule-edit .input + .field-label { margin-top: var(--space-4); }
+
+/* §7.3's Summary card carries `Copy` and `Download` in its head. §18.4: "the
+   Summary card shows prose with no visible controls at rest" — §4.1's
+   hover-only rule, applied to a card that is not an item card. */
+.yield-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.yield-card:hover .yield-actions,
+.yield-card:focus-within .yield-actions,
+.yield-card[data-force~="hover"] .yield-actions { opacity: 1; }
+
+@media (max-width: 719px) {
+  .yield-actions { opacity: 1; }
+}
+
+/* §7.3's header menu sits at the end of the row, per §6 rule 1. */
+.source-head .menu-wrap { margin-left: auto; align-self: flex-start; }
+
+/* The header's inline rename takes the title's size so the page does not jump. */
+.title-rename {
+  height: auto;
+  width: 100%;
+  padding: 2px var(--space-2);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+}

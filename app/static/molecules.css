@@ -151,14 +151,49 @@
   opacity: 0.55;
 }
 
+/* The row that holds the toggle, the header actions and the caret. §6 rule 5
+   puts the --space-4 horizontal padding here, on the container, which is what
+   lines the icon up with every other surface's. */
+.exp-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--card-height);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* The toggle takes the rest of the row, so clicking anywhere in the title
+   area opens the card. `min-width: 0` is what lets the title truncate inside
+   a flex child rather than pushing the caret off the end. */
 .exp-head {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  width: 100%;
-  min-height: var(--card-height);
-  padding: var(--space-3) var(--space-4);
+  flex: 1 1 auto;
+  min-width: 0;
   text-align: left;
+}
+
+/* §18.8 and §7.9 put actions in the header — `↺ Restore` and `⋯`, or a
+   `Review` button. §18.6: "collapsed cards show the caret alone", so they
+   appear with the body. */
+.exp-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.exp-card[data-open="false"] .exp-actions { display: none; }
+
+/* A `Review` button is the collapsed card's one entry point (§7.9), so it is
+   the exception: it is the thing the person came to the page to press. */
+.exp-card[data-open="false"] .exp-actions:has([data-act="review"]) { display: flex; }
+
+.exp-caret-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
 }
 
 /* Collapsed shows one clamped line (§4.2). */
@@ -546,6 +581,15 @@
   color: var(--on-danger);
 }
 
+/* A step already passed. §18.8 shows only step 1 current and step 2 grey, so
+   this one follows from the same logic: once the person is on step 2, step 1
+   is neither pending nor the thing at hand — it is behind them, and reads as
+   danger at low emphasis rather than as the step they are on. */
+.step-dot[data-state="done"] {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 /* "Type DELETE to continue", with the word itself in danger. */
 .danger-word {
   color: var(--danger);
@@ -700,4 +744,14 @@
   margin-top: var(--space-3);
   font-size: var(--text-sm);
   color: var(--text-muted);
+}
+
+/* §7.4's inline `Rename`. The title is already on screen, so the field takes
+   its place rather than opening a dialog to change one line of text. It
+   inherits the title's weight and size so the row does not jump. */
+.item-rename {
+  height: auto;
+  padding: 2px var(--space-2);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
 }

@@ -302,3 +302,89 @@ of them for the person.
 **reintroducing the defect**: un-filtering `fetch` fails four of them, putting
 the forced promotion back fails one, and turning the drainer off leaves the job
 queued.
+
+---
+
+## 12. THE CONFORMANCE REVIEW — 30 October 2026
+
+Every built frame was read against its §7 section, the §6 global rules and the
+capture notes of §18. The review returned 119 findings, 24 of them blocking.
+Most of the blockers were one defect wearing eleven faces: **a control the
+design specifies, drawn on the page, with nothing behind it.** §6 rule 11 is
+explicit that this is worse than a control that was never drawn, because the
+person finds out by clicking.
+
+A caution on reading that review: it ran against a working tree that was being
+edited while it read. Every finding below was re-verified by hand against the
+current code before being acted on, and the §7.1 and §7.5/§7.6 blockers it
+reported had already been fixed by the time it reported them.
+
+### 12.1 The reading surfaces — fixed
+
+Both §7.5 and §7.6 **returned their node before their own wiring ran**:
+
+```js
+return el(`… <input id="in-page"> <button id="copy"> …`);
+wireReadBar(node);   // never reached
+```
+
+Nothing warns. The markup, the ids and the handlers were all correct; the page
+rendered; no error reached the console; every control was inert. Fixed, and
+stated as a rule in `tests/test_redesign_controls.py`: a `return` at a frame's
+own indentation ends the function, so any statement after it is dead — checked
+against every frame.
+
+### 12.2 §7.12 Archive and §9.4's table — fixed
+
+Four defects of one kind, and the deepest were not in the frame:
+
+| # | The defect | The fix |
+|---|---|---|
+| 1 | Archive rendered **no `Restore` at all** — the page whose whole job is undoing an archive could not undo one | `R-9`'s header button, with §9.4's Undo toast and no dialog |
+| 2 | **The two vocabularies did not meet.** §7.12's list emits `source`/`rule`/`skill`/`summary` — the words on the page. `op_archive_item` accepted `source`/`claim`/`skill` — the words in §5's tool signature. A rule could be archived and never restored; a summary neither | One `_ARCHIVABLE` map in the engine. §5's `Literal` is a published contract and **does not move**; `rule` resolves to `claim`, and `summary` is web-only |
+| 3 | **`Delete permanently` had no endpoint that could act on it.** It resolved every id against `sources` and refused anything not already in Trash — a source-level concept — so on §7.12's cards it could only answer `not_in_trash`, or `not_found` for a rule, skill or summary | `op_permanent_delete` takes any kind, resolves the kind from the id prefix, and requires the thing to be **set aside** (archived *or* trashed) rather than trashed specifically. `not_in_trash` → `not_set_aside` |
+| 4 | **Nothing confirmed.** §9.4's dialog molecule was fully built in CSS and invoked by no frame; `Delete library` and `Delete account` had neither a handler nor an endpoint | `confirmDialog()` — one step for a single item, two for the account-level acts. `op_delete_library` and `op_delete_account`, both person-only, both requiring the typed word **at the engine** |
+
+Two further rules came out of it:
+
+* **An agent can no longer reach `op_permanent_delete` at all.** It was
+  previously unreachable only in the sense that no MCP tool wrapped it; now the
+  surface guard refuses it. §2's "zero destructive LLM tools" is a property of
+  the engine, not of the tool list. The phase-2 test that called it from an
+  `mcp` context — while its own docstring said "nothing can reach it except a
+  human" — now asserts what it claimed.
+* **The typed word is checked twice.** A dialog is a frame's promise, and a
+  frame is one bug away from firing a POST with an empty body. An op that
+  destroys a library is not callable by accident from anywhere.
+
+### 12.3 Two bugs only a browser could show
+
+* **`[hidden]` did nothing on any atom.** `hidden` is a statement of fact and
+  any explicit `display` silently beats it. Nearly every atom sets one, so at
+  step 1 of §9.4's dialog both `Continue` and the final `Delete account` were
+  on screen at once, the second merely disabled. `.menu[hidden]`,
+  `.scrim[hidden]` and `.toast[hidden]` had each been re-asserting it by hand
+  — the tell that it belonged in the base block once.
+* **The expandable card's caret sat at the far left** of every Rules, Skills
+  and Archive card. §18.6 puts it "on the right, pointing right when closed and
+  down when open"; §6 rule 1 puts every action on the right. The header was
+  restructured so the toggle, the header actions and the caret are siblings —
+  which also removed a `<button>` nested inside a `<button>`, where a click on
+  the inner one would have opened the card as well as done its own job.
+
+### 12.4 Three operations the card menus needed
+
+`Rename`, `Re-process` and `Generate a summary` were the only §7.3/§7.4 menu
+items with nothing behind them. All three are the person's: an agent renaming
+someone's library, spending their minutes on a re-read, or writing a summary
+they had switched off are decisions §2 rules out by the same argument that
+keeps `delete` off the MCP surface.
+
+`Generate a summary` runs the summariser over the **stored** text rather than
+re-reading the source, which is the whole reason it exists on a transcript
+card: a person who had summaries switched off can still have one without
+spending the quota again.
+
+Also fixed while there: `_person_only`'s refusal said "only the person can
+decide a skill's state" to an agent whose *archive read* had been refused. Each
+refusal now names what it blocked.

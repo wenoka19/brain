@@ -993,3 +993,110 @@ directly, and the static shape of the Dockerfile. Two things only a real build
 confirms: that `setpriv` is present in `python:3.12-slim` (it is part of
 `util-linux`, which Debian marks essential, and the `su` fallback covers it if
 not), and that Railway's builder is happy with the rest of the file.
+
+---
+
+## Phase 8 — THE CONFORMANCE REVIEW, AND THE CONTROLS IT FOUND INERT
+
+Every built frame was read against its §7 section, the §6 global rules and the
+capture notes of §18. The review returned 119 findings, 24 blocking — and
+almost all of the blockers were one defect wearing eleven faces: **a control
+the design specifies, drawn on the page, with nothing behind it.** §6 rule 11
+is explicit that this is worse than a control that was never drawn, because
+the person finds out by clicking.
+
+Each finding was re-verified by hand before being acted on; the review had
+read a working tree that was being edited while it read, and several of what
+it reported had already been fixed.
+
+### The worst of them: a frame that returned before its own wiring
+
+```js
+return el(`… <input id="in-page"> <button id="copy"> …`);
+wireReadBar(node);   // never reached
+```
+
+§7.5 and §7.6 both had this. Nothing warns: the markup is right, the ids are
+right, the handlers are written and correct, the page renders, no error reaches
+the console, and every control is inert. It is now a rule in
+`tests/test_redesign_controls.py` — a `return` at a frame's own indentation
+ends the function, so any statement after it is dead — checked against every
+frame, and a reintroduced early return fails it by name.
+
+### What is now real
+
+| Frame | What it could not do | Now |
+|---|---|---|
+| §7.5 transcript | in-page search, Copy, Download, the sticky border | marks and counts live, Copy carries the timestamps, `Download ▾` offers only producible formats, the border arrives only once stuck |
+| §7.6 summary | Brief/Full, Copy, Download | switches real content — and where there is none to switch to (≤5 points, no chapters) `Full` says "That is the whole summary" rather than moving nothing |
+| §7.3 source | Copy/Download the summary, the overflow menu, and **nothing polled** | both controls, `Rename`/`Re-process`/`Archive`, and a work block that follows real state — loaded with a job still queued, it notices the queue draining from another process |
+| §7.4 transcripts | no card actions at all | `Copy`, `Download`, `⋯` with Rename / View the source / Generate a summary / Archive, hover-only at rest |
+| §7.7 sources | the `Needs you` state and `Fix this` | both pills, the remedy as a tooltip keyed on the provider's reason code, and a `Fix this` that really retries |
+| §7.8 rules | `Edit` and `Archive` were plain buttons | both wired, inline, with an Undo toast |
+| §7.9 skills | no `Review` button; `⋯` had no handler | the queue's entry point exists; Activate/Deactivate, `Export .md` and Delete all work — `POST /api/skills/:id/state` had been served since the queue was built and called by nothing |
+| §7.12 archive | **no `Restore` at all** | `R-9`'s header button, with §9.4's Undo toast |
+| §7.13 profile | `Delete library` and `Delete account` had no handler and no endpoint | both, behind §9.4's two-step dialog |
+| §7.1's create links | `?create=1` was read by no frame | a panel on both, and a web endpoint to write a rule |
+
+### Backend the design asked for
+
+* `op_rename_source`, `op_reprocess_source`, `op_generate_summary` — the three
+  menu items with nothing behind them. All person-only: an agent renaming
+  someone's library, spending their minutes on a re-read, or writing a summary
+  they had switched off are decisions §2 rules out by the same argument that
+  keeps `delete` off the MCP surface. `Generate a summary` runs the summariser
+  over the **stored** text, which is the whole reason it exists on a transcript
+  card.
+* `op_delete_library` and `op_delete_account`, both requiring the typed word
+  **at the engine** — a dialog is a frame's promise, and a frame is one bug
+  away from firing a POST with an empty body.
+* `ingestion_jobs.error_reason`, so §7.7's tooltip can state the remedy. A
+  sentence written for the person cannot be matched on, and matching on prose
+  is how a tooltip silently goes wrong the first time the wording improves.
+* `skills` list joins its source title, because §7.9's expanded body ends with
+  provenance and a read per card to draw it is a read per card too many.
+
+### Four defects found by running it, not by reading it
+
+1. **`[hidden]` did nothing on any atom.** `hidden` is a statement of fact and
+   any explicit `display` beats it; nearly every atom sets one. At step 1 of
+   §9.4's dialog both `Continue` and the final `Delete account` were on screen,
+   the second merely disabled. `.menu[hidden]`, `.scrim[hidden]` and
+   `.toast[hidden]` had each been re-asserting it by hand — the tell that it
+   belonged in the base block once.
+2. **Opening a card's menu navigated away from the list.** The trigger is a
+   `<button>` inside the card's own `<a>`, and `wireMenus` stopped the bubble
+   without cancelling the link, so §4.7's menu was drawn onto a page that was
+   already being replaced.
+3. **The loop breaker refused a person changing their mind.** Its fingerprint
+   for `set_skill_state` was the skill id alone, so switching a skill off and
+   straight back on inside 15 seconds read as one call made twice. Same for
+   `review_skill` and `rename_source`; each fingerprint now carries what makes
+   two calls different, and the guard still catches a genuine repeat.
+4. **A blocked source was stamped as archived.** `_archival` stamped anything
+   that was not `active`, so a source that had just failed to fetch carried an
+   archive date and the words `archived by you`, having been archived by
+   nobody.
+
+### Two conflicts in the plan, ruled on rather than guessed
+
+* **`R-14`** — §7.9 lists `Delete (confirms)` in a live skill's menu; §6 rule 8
+  says "only the person deletes, and only from Archive or Profile". Rule 8
+  wins, because §2's 30-day recovery buffer is a security property and a menu
+  item is not a place to spend it. The item keeps §7.9's name, sets the skill
+  aside, and the dialog says plainly where it went.
+* **`R-15`** — `Delete permanently` requires the thing to be **set aside**,
+  archived or trashed, not trashed specifically. §9.4 puts the control on an
+  archived card and Trash is a source-level concept, so the original rule meant
+  the button could only ever answer `not_in_trash` — and `not_found` for a
+  rule, skill or summary, whose ids were resolved against `sources` alone.
+
+`op_permanent_delete` also refuses an agent surface outright now. It was
+previously unreachable only in the sense that no MCP tool wrapped it; §2's
+"zero destructive LLM tools" is a property of the engine, not of the tool list.
+
+### Still to build
+
+§7.2 (Home's thread state), §7.10 Activity and §7.11 Connections. The last two
+need the approved §9.2 rows: four columns on `audit_logs`, and a `connections`
+entity accepting `?key=` in the same validation function.

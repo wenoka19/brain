@@ -502,7 +502,9 @@ async def api_review_skill(request: Request) -> Response:
     _require_csrf(request)
     body = await _body(request)
     skill_id = request.path_params["skill_id"]
-    _rate_limit(ctx, "review_skill", {"skill_id": skill_id})
+    _rate_limit(
+        ctx, "review_skill", {"skill_id": skill_id, "decision": body.get("decision")}
+    )
     return _result(E.op_review_skill(ctx, skill_id, str(body.get("decision") or "")))
 
 
@@ -512,8 +514,73 @@ async def api_skill_state(request: Request) -> Response:
     _require_csrf(request)
     body = await _body(request)
     skill_id = request.path_params["skill_id"]
-    _rate_limit(ctx, "set_skill_state", {"skill_id": skill_id})
+    # The state is what makes two of these different: without it, a person
+    # switching a skill off and straight back on inside the loop breaker's
+    # 15-second window was refused as a runaway agent.
+    _rate_limit(ctx, "set_skill_state", {"skill_id": skill_id, "state": body.get("state")})
     return _result(E.op_set_skill_state(ctx, skill_id, str(body.get("state") or "")))
+
+
+@endpoint
+async def api_write_rule(request: Request) -> Response:
+    """§7.8's `+ Write a rule`.
+
+    The same operation the MCP tool calls, over the web surface — the engine
+    records which surface it came from, which is how §7.8 can split
+    `My rules` from `From your sources` without a second column.
+    """
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    _rate_limit(ctx, "remember_this", {"claim": str(body.get("claim") or "")[:80]})
+    tags = body.get("domain_tags") or []
+    return _result(
+        E.op_remember_this(
+            ctx,
+            claim=str(body.get("claim") or ""),
+            when_it_applies=str(body.get("when_it_applies") or ""),
+            when_it_fails=str(body.get("when_it_fails") or ""),
+            metrics_and_quotes=str(body.get("metrics_and_quotes") or ""),
+            domain_tags=[str(tag) for tag in tags] if isinstance(tags, list) else [],
+        ),
+        status_on_error=400,
+    )
+
+
+@endpoint
+async def api_rename_source(request: Request) -> Response:
+    """§7.4's overflow `Rename`."""
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(
+        ctx, "rename_source", {"source_id": source_id, "title": body.get("title")}
+    )
+    return _result(
+        E.op_rename_source(ctx, source_id, str(body.get("title") or "")),
+        status_on_error=404,
+    )
+
+
+@endpoint
+async def api_reprocess_source(request: Request) -> Response:
+    """§7.3's overflow `Re-process`: read the same address again."""
+    ctx = _context(request)
+    _require_csrf(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "reprocess_source", {"source_id": source_id})
+    return _result(E.op_reprocess_source(ctx, source_id))
+
+
+@endpoint
+async def api_generate_summary(request: Request) -> Response:
+    """§7.4's overflow `Generate a summary`, from the text already stored."""
+    ctx = _context(request)
+    _require_csrf(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "generate_summary", {"source_id": source_id})
+    return _result(E.op_generate_summary(ctx, source_id))
 
 
 @endpoint
@@ -569,8 +636,12 @@ async def api_archive(request: Request) -> Response:
     _require_csrf(request)
     payload = await _body(request)
     item_type = request.path_params["item_type"]
-    if item_type not in ("source", "claim", "skill"):
-        raise ApiError(400, "bad_item_type", "item_type must be source, claim or skill.")
+    # §7.12's list emits `rule` and `summary` as well — the words on the page.
+    # The MCP tool's signature keeps its three; the engine maps both.
+    if item_type not in E._ARCHIVABLE:
+        raise ApiError(
+            400, "bad_item_type", "item_type must be source, claim (or rule), skill or summary."
+        )
     return _result(
         E.op_archive_item(
             ctx, item_type, request.path_params["item_id"], restore=bool(payload.get("restore"))
@@ -591,13 +662,52 @@ async def api_trash_item(request: Request) -> Response:
 
 @endpoint
 async def api_delete(request: Request) -> Response:
-    """The one destructive endpoint. Gated on Trash, and unreachable over MCP."""
+    """The one destructive endpoint.
+
+    Gated on the thing already being set aside, and unreachable over MCP —
+    the engine refuses an agent surface outright, not merely by having no
+    tool that wraps this.
+    """
     ctx = _context(request)
     _require_csrf(request)
-    result = E.op_permanent_delete(ctx, request.path_params["item_id"])
-    # A missing id is a 404; an item that exists but is not in Trash is a 400,
-    # because the client asked for something it is not allowed to do yet.
+    payload = await _body(request)
+    result = E.op_permanent_delete(
+        ctx,
+        request.path_params["item_id"],
+        str(payload.get("item_type") or "") or None,
+    )
+    # A missing id is a 404; an item that exists but has not been set aside is
+    # a 400, because the client asked for something it is not allowed to do yet.
     return _result(result, status_on_error=404 if result.error_reason == "not_found" else 400)
+
+
+@endpoint
+async def api_delete_library(request: Request) -> Response:
+    """§7.13's `Delete library`, gated on the typed word by the engine too."""
+    ctx = _context(request)
+    _require_csrf(request)
+    payload = await _body(request)
+    result = E.op_delete_library(ctx, typed=str(payload.get("typed") or ""))
+    return _result(result, status_on_error=403 if result.error_reason == "person_only" else 400)
+
+
+@endpoint
+async def api_delete_account(request: Request) -> Response:
+    """§7.13's `Delete account`. The session it was called with dies with it."""
+    ctx = _context(request)
+    _require_csrf(request)
+    payload = await _body(request)
+    result = E.op_delete_account(ctx, typed=str(payload.get("typed") or ""))
+    if not result.ok:
+        return _result(
+            result, status_on_error=403 if result.error_reason == "person_only" else 400
+        )
+    # The account is gone, so the cookie that named it is a cookie pointing at
+    # nothing: cleared here rather than leaving the browser to discover a 401.
+    response = _result(result)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
+    return response
 
 
 @endpoint
@@ -884,15 +994,21 @@ ROUTES = [
     Route("/api/transcripts", api_transcripts, methods=["GET"]),
     Route("/api/transcripts/{source_id}", api_transcript, methods=["GET"]),
     Route("/api/rules", api_rules, methods=["GET"]),
+    Route("/api/rule", api_write_rule, methods=["POST"]),
     Route("/api/archive", api_archive_list, methods=["GET"]),
     Route("/api/skills", api_skills, methods=["GET"]),
     Route("/api/skills/{skill_id}/review", api_review_skill, methods=["POST"]),
     Route("/api/skills/{skill_id}/state", api_skill_state, methods=["POST"]),
     Route("/api/summaries", api_summaries, methods=["GET"]),
     Route("/api/summaries/{summary_id}", api_summary, methods=["GET"]),
+    Route("/api/sources/{source_id}/rename", api_rename_source, methods=["POST"]),
+    Route("/api/sources/{source_id}/reprocess", api_reprocess_source, methods=["POST"]),
+    Route("/api/sources/{source_id}/summarise", api_generate_summary, methods=["POST"]),
     Route("/api/archive/{item_type}/{item_id}", api_archive, methods=["POST"]),
     Route("/api/trash/{item_type}/{item_id}", api_trash_item, methods=["POST"]),
     Route("/api/delete/{item_id}", api_delete, methods=["POST"]),
+    Route("/api/delete-library", api_delete_library, methods=["POST"]),
+    Route("/api/delete-account", api_delete_account, methods=["POST"]),
     Route("/api/claim/{claim_id}", api_update_claim, methods=["POST"]),
     Route("/api/skill", api_save_skill, methods=["POST"]),
     Route("/api/skill/{skill_id}/revert", api_revert_skill, methods=["POST"]),

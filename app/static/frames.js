@@ -400,6 +400,29 @@ const TYPE_ICON = {
   recording: "mic", user_note: "rules",
 };
 
+/** §7.7's `Fix this` tooltip: "whose tooltip states the remedy". Two of these
+ *  are the plan's own words — "Make it public, then retry" and "No text layer
+ *  — retype or re-scan" — and the rest follow the same shape: what the person
+ *  does, not what went wrong. "Brain did not fail; Brain needs the person."
+ *
+ *  Keyed on the provider's reason code rather than its message, because the
+ *  message is a sentence written for the person and matching on prose is how
+ *  a tooltip silently becomes wrong. */
+const REMEDY = {
+  blocked_by_platform: "Make it public, then retry",
+  blocked_url: "That address is not one Brain can reach — check it, then retry",
+  no_transcript: "No captions on this one — add them, or paste the text instead",
+  no_text_layer: "No text layer — retype or re-scan",
+  corrupt_file: "Brain could not open the file — re-export it and try again",
+  empty_content: "Nothing readable was there — paste the text instead",
+  fetch_failed: "The source did not answer — retry",
+  timeout: "It took too long to read — retry, or paste the text instead",
+  unsupported_content_type: "Brain does not read this kind of link yet — paste the text instead",
+  tool_missing: "Brain is missing a tool for this type. Nothing you can fix",
+  vision_unavailable: "Reading images is not switched on for this Brain. Nothing you can fix",
+  default: "Make it reachable, then retry",
+};
+
 /** §7.7: "Never a platform name as the type." Only on the Sources list. */
 const TYPE_WORD = {
   youtube: "Link", article: "Link", github: "Link",
@@ -565,6 +588,21 @@ FRAMES.transcripts = async function transcripts() {
           duration(row.duration_sec),
           `${Number(row.word_count || 0).toLocaleString()} words`,
         ],
+        // §7.4: "hover actions `Copy`, `Download`, `⋯`", and behind the `⋯`,
+        // Rename, View the source, Generate a summary, Archive. No Delete
+        // here — §7.4 says so outright, and §6 rule 8 says why.
+        actions:
+          cardButton({ act: "copy", id: row.id, glyph: "copy" }) +
+          cardButton({ act: "download", id: row.id, glyph: "download" }) +
+          cardMenu(row.id, [
+            { act: "rename", label: "Rename" },
+            row.canonical_url && { act: "visit", label: "View the source" },
+            // §6 rule 11: the item is offered only when it can do something.
+            // A source that already has a summary has nothing to generate.
+            !row.summary_count && { act: "summarise", label: "Generate a summary" },
+            { sep: true },
+            { act: "archive", label: "Archive" },
+          ]),
       })
     ),
   }));
@@ -572,7 +610,7 @@ FRAMES.transcripts = async function transcripts() {
   const node = listFrame({
     title: "Transcripts",
     search: "Search transcripts",
-    controlsHtml: `<button class="btn" data-variant="secondary">${icon("filter")}Newest</button>`,
+    controlsHtml: sortButton(),
     groups,
     empty: {
       text: "No transcripts yet. Give Brain a video or a recording and the full text lands here, searchable and ready to copy.",
@@ -581,8 +619,138 @@ FRAMES.transcripts = async function transcripts() {
     },
   });
   wireListSearch(node);
+  wireSort(node);
+  wireMenus(node);
+
+  const lookup = new Map(rows.map((row) => [row.id, row]));
+  const text = async (id) => {
+    const data = await api(`/api/transcripts/${encodeURIComponent(id)}`);
+    return data.turns
+      .map((turn) => (turn.t_ms !== null ? `[${stamp(turn.t_ms)}] ${turn.text}` : turn.text))
+      .join("\n\n");
+  };
+
+  wireCardActions(node, {
+    copy: async (id, button) => copyText(button, await text(id)),
+    download: async (id) =>
+      download(fileName(lookup.get(id)?.title, "txt"), await text(id)),
+    visit: (id) => window.open(lookup.get(id).canonical_url, "_blank", "noopener"),
+    rename: (id, button) => renameRow(id, button, lookup),
+    summarise: async (id, button) => {
+      try {
+        await post(`/api/sources/${encodeURIComponent(id)}/summarise`, {});
+      } catch (error) {
+        toast(error.message || "Could not write a summary.");
+        return;
+      }
+      refreshCounts();
+      toast("Summary written.", {
+        action: "Read it",
+        onAction: () => window.location.assign(href(`/sources/${id}`)),
+      });
+      button.closest(".menu")?.querySelector('[data-act="summarise"]')?.remove();
+    },
+    archive: (id, button) => archiveRow("source", id, button, node),
+  });
   return node;
 };
+
+/** §7.4's toolbar carries a `Newest` sort. One control, two orders — a button
+ *  that says `Newest` and does nothing is §6 rule 11's exact complaint. */
+function sortButton() {
+  return `<button class="btn" data-variant="secondary" data-sort="desc">${icon(
+    "filter"
+  )}Newest</button>`;
+}
+
+function wireSort(node) {
+  const button = node.querySelector("[data-sort]");
+  if (!button) return;
+  button.addEventListener("click", () => {
+    const newest = button.dataset.sort === "desc";
+    button.dataset.sort = newest ? "asc" : "desc";
+    button.innerHTML = `${icon("filter")}${newest ? "Oldest" : "Newest"}`;
+    // §6 rule 14 groups by date, so reversing the rows means reversing the
+    // groups as well as the rows inside them.
+    // `listFrame` returns the `.wrap` itself, so the frame node IS the
+    // container — querying inside it for one found nothing and the reorder
+    // threw halfway through, leaving the rows reversed and the groups not.
+    const wrap = node.matches(".wrap") ? node : node.querySelector(".wrap");
+    const groups = [...node.querySelectorAll(".date-group")].reverse();
+    for (const group of groups) {
+      const stack = group.querySelector(".stack");
+      for (const row of [...stack.children].reverse()) stack.append(row);
+      wrap.append(group);
+    }
+  });
+}
+
+/** §7.4's `Rename`, inline rather than in a dialog: the title is already on
+ *  screen, and a dialog to change one line of text is a dialog too many. */
+async function renameRow(id, button, lookup) {
+  const card = button.closest(".item-card");
+  const title = card.querySelector(".item-title");
+  const was = title.textContent;
+  const field = el(
+    `<input class="input item-rename" value="${esc(was)}" aria-label="Rename">`
+  );
+  title.replaceWith(field);
+  field.focus();
+  field.select();
+
+  // Enter and blur both finish, and Enter causes a blur — so without this the
+  // second call tried to replace a node that was already gone.
+  let closed = false;
+  const finish = async (save) => {
+    if (closed) return;
+    closed = true;
+    const wanted = field.value.trim();
+    field.replaceWith(title);
+    if (!save || !wanted || wanted === was) return;
+    try {
+      await post(`/api/sources/${encodeURIComponent(id)}/rename`, { title: wanted });
+    } catch (error) {
+      toast(error.message || "Could not rename it.");
+      return;
+    }
+    title.textContent = wanted;
+    const row = lookup?.get(id);
+    if (row) row.title = wanted;
+  };
+
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    if (event.key === "Escape") finish(false);
+  });
+  field.addEventListener("blur", () => finish(true));
+}
+
+/** Archive from a list, with §9.4's Undo toast and no dialog: archiving is
+ *  reversible, which is the whole reason §7.12 exists. */
+async function archiveRow(kind, id, button, node) {
+  const card = button.closest(".item-card, .exp-card");
+  try {
+    await post(`/api/archive/${kind}/${encodeURIComponent(id)}`, {});
+  } catch (error) {
+    toast(error.message || "Could not archive it.");
+    return;
+  }
+  card.remove();
+  hideEmptiedGroups(node);
+  refreshCounts();
+  toast("Archived.", {
+    action: "Undo",
+    onAction: async () => {
+      try {
+        await post(`/api/archive/${kind}/${encodeURIComponent(id)}`, { restore: true });
+      } catch {
+        toast("Could not put it back.");
+        return;
+      }
+      window.location.reload();
+    },
+  });
+}
 
 FRAMES.summaries = async function summaries() {
   const { summaries: rows } = await api("/api/summaries");
@@ -605,7 +773,7 @@ FRAMES.summaries = async function summaries() {
   const node = listFrame({
     title: "Summaries",
     search: "Search summaries",
-    controlsHtml: `<button class="btn" data-variant="secondary">${icon("filter")}Newest</button>`,
+    controlsHtml: sortButton(),
     groups,
     empty: {
       text: "No summaries yet. Every source Brain reads gets one, so you never have to read the whole thing twice.",
@@ -614,6 +782,7 @@ FRAMES.summaries = async function summaries() {
     },
   });
   wireListSearch(node);
+  wireSort(node);
   return node;
 };
 
@@ -662,21 +831,36 @@ FRAMES.sources = async function sources() {
           yielded.length ? { cls: "item-yield", text: yielded.join(" · ") } : null,
         ],
         pill,
-        // §7.7: a blocked row carries a `Fix this` button, and its label says
-        // the remedy rather than restating the problem.
+        // §7.7: a blocked row carries a `Fix this` button, and its tooltip
+        // states the remedy rather than restating the problem.
         actions:
-          row.status === "blocked"
-            ? `<button class="btn" data-size="sm" data-variant="secondary"
-                       data-fix="${esc(row.id)}">Fix this</button>`
-            : "",
+          (row.status === "blocked"
+            ? cardButton({
+                act: "fix",
+                id: row.id,
+                label: "Fix this",
+                title: REMEDY[row.block_reason] || REMEDY.default,
+              })
+            : "") +
+          cardMenu(row.id, [
+            { act: "rename", label: "Rename" },
+            // §7.3's menu, on the row it belongs to. Only a source with an
+            // address can be read again, so the item appears only then —
+            // §6 rule 11 rather than a menu item that answers with a refusal.
+            row.canonical_url && { act: "reprocess", label: "Re-process" },
+            { sep: true },
+            { act: "archive", label: "Archive" },
+          ]),
       });
     }),
   }));
 
+  const lookup = new Map(rows.map((row) => [row.id, row]));
+
   const node = listFrame({
     title: "Sources",
     search: "Search sources",
-    controlsHtml: `<button class="btn" data-variant="secondary">${icon("filter")}Newest</button>
+    controlsHtml: `${sortButton()}
                <a class="btn" data-variant="primary" href="/">${icon("plus")}Teach Brain</a>`,
     groups,
     empty: {
@@ -687,15 +871,45 @@ FRAMES.sources = async function sources() {
   });
 
   wireListSearch(node);
-  for (const button of node.querySelectorAll("[data-fix]")) {
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      // §6 rule 11: the button says the remedy. Retrying is the remedy once
-      // the person has made the thing reachable.
-      answer(event.currentTarget, "Make it reachable, then retry");
-    });
-  }
+  wireSort(node);
+  wireMenus(node);
+
+  /* §7.7: "`Needs you` ... carries a **Fix this** button whose tooltip states
+     the remedy". The tooltip states it; the button does the retry, which is
+     the only thing left to do once the person has made the source reachable.
+     Before `op_reprocess_source` existed this button could only say the
+     remedy and then ask the person to go and find the retry themselves. */
+  wireCardActions(node, {
+    fix: async (id, button) => {
+      try {
+        await post(`/api/sources/${encodeURIComponent(id)}/reprocess`, {});
+      } catch (error) {
+        answer(button, error.message || "Still cannot read it");
+        return;
+      }
+      const card = button.closest(".item-card");
+      card.querySelector(".pill").textContent = "Processing";
+      button.remove();
+      toast("Reading it again.", {
+        action: "Watch it",
+        onAction: () => window.location.assign(href(`/sources/${id}`)),
+      });
+    },
+    rename: (id, button) => renameRow(id, button, lookup),
+    archive: (id, button) => archiveRow("source", id, button, node),
+    reprocess: async (id, button) => {
+      try {
+        await post(`/api/sources/${encodeURIComponent(id)}/reprocess`, {});
+      } catch (error) {
+        toast(error.message || "Could not read it again.");
+        return;
+      }
+      toast("Reading it again.", {
+        action: "Watch it",
+        onAction: () => window.location.assign(href(`/sources/${id}`)),
+      });
+    },
+  });
   return node;
 };
 
@@ -1078,6 +1292,228 @@ export function download(name, text, type = "text/plain") {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/* ---------------------------------------------------------------------- */
+/* §4.9 TOAST and §4.8 / §9.4 THE CONFIRM DIALOG                           */
+/*                                                                          */
+/* Both molecules were styled and never instantiated, which is why §9.4's    */
+/* table had no enforcement anywhere: not one destructive control in the app */
+/* confirmed, and the only one §9.4 gives an Undo to had no toast to put it  */
+/* in.                                                                      */
+/* ---------------------------------------------------------------------- */
+
+/** §4.9. One at a time, dismissed by its own action or by time.
+ *
+ *  §9.4 gives `Restore` an Undo toast and no dialog: undoing an undo is
+ *  cheap, so the gate belongs after the act rather than before it.
+ */
+export function toast(message, { action, onAction, ms = 6000 } = {}) {
+  document.querySelector(".toast")?.remove();
+  const node = el(`
+    <div class="toast" role="status">
+      <span>${esc(message)}</span>
+      ${action ? `<button type="button">${esc(action)}</button>` : ""}
+    </div>`);
+  const close = () => node.remove();
+  node.querySelector("button")?.addEventListener("click", () => {
+    close();
+    onAction?.();
+  });
+  document.body.append(node);
+  setTimeout(close, ms);
+  return close;
+}
+
+/** §4.8 and §9.4's dialog. Resolves true when the person went through with
+ *  it, false on Cancel, Escape, or a click on the scrim.
+ *
+ *  `word` makes it the two-step version §9.4 requires for the library and the
+ *  account: step 1 types the word, step 2 is the identity check. With no
+ *  `word` it is the one-step confirm §9.4 gives to deleting a single archived
+ *  item and to revoking a connection.
+ *
+ *  §18.8 fixes the details the captures show: the step indicator's current
+ *  dot is `--danger` and not accent, because the dialog is coloured by what
+ *  it does; the word itself is printed in danger, semibold; and `Continue` at
+ *  step 1 of 2 is **outlined** danger, because step 1 deletes nothing. The
+ *  filled red belongs to the last confirm, which no capture shows and which
+ *  follows from that same logic.
+ */
+export function confirmDialog({ title, body, confirmLabel = "Delete", word = "", identity = "" }) {
+  return new Promise((resolve) => {
+    const twoStep = Boolean(word);
+    const scrim = el(`
+      <div class="scrim" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+        <div class="dialog">
+          ${
+            twoStep
+              ? `<div class="steps" aria-hidden="true">
+                   <span class="step-dot" data-state="current" data-step="1">1</span>
+                   <span class="steps-rule"></span>
+                   <span class="step-dot" data-step="2">2</span>
+                 </div>`
+              : ""
+          }
+          <h2 class="dialog-title">${esc(title)}</h2>
+          <p class="dialog-body">${esc(body)}</p>
+          ${
+            twoStep
+              ? `<div data-pane="1">
+                   <span class="field-label">Type <span class="danger-word">${esc(
+                     word
+                   )}</span> to continue</span>
+                   <input class="input" id="confirm-word" autocomplete="off"
+                          aria-label="Type ${esc(word)} to continue">
+                 </div>
+                 <div data-pane="2" hidden>
+                   <span class="field-label">${esc(identity || "Confirm it is you")}</span>
+                   <input class="input" id="confirm-identity" type="password"
+                          autocomplete="current-password"
+                          aria-label="${esc(identity || "Confirm it is you")}">
+                 </div>`
+              : ""
+          }
+          <div class="dialog-foot">
+            <button class="btn" data-variant="ghost" data-act="cancel">Cancel</button>
+            ${
+              twoStep
+                ? `<button class="btn" data-variant="danger" data-act="next" disabled>Continue</button>
+                   <button class="btn" data-variant="danger-solid" data-act="go" hidden disabled>${esc(
+                     confirmLabel
+                   )}</button>`
+                : `<button class="btn" data-variant="danger-solid" data-act="go">${esc(
+                    confirmLabel
+                  )}</button>`
+            }
+          </div>
+        </div>
+      </div>`);
+
+    const done = (answer) => {
+      scrim.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(answer);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") done(false);
+    };
+
+    const next = scrim.querySelector('[data-act="next"]');
+    const go = scrim.querySelector('[data-act="go"]');
+
+    if (twoStep) {
+      const field = scrim.querySelector("#confirm-word");
+      const identityField = scrim.querySelector("#confirm-identity");
+      // §9.4: "The confirm button is disabled until the field validates."
+      field.addEventListener("input", () => {
+        next.disabled = field.value.trim() !== word;
+      });
+      identityField.addEventListener("input", () => {
+        go.disabled = !identityField.value;
+      });
+      next.addEventListener("click", () => {
+        scrim.querySelector('[data-pane="1"]').hidden = true;
+        scrim.querySelector('[data-pane="2"]').hidden = false;
+        scrim.querySelector('[data-step="1"]').dataset.state = "done";
+        scrim.querySelector('[data-step="2"]').dataset.state = "current";
+        next.hidden = true;
+        go.hidden = false;
+        identityField.focus();
+      });
+    }
+
+    scrim.querySelector('[data-act="cancel"]').addEventListener("click", () => done(false));
+    go.addEventListener("click", () => {
+      if (!go.disabled) done(true);
+    });
+    // A click on the scrim itself, not on the panel, is a dismissal.
+    scrim.addEventListener("click", (event) => {
+      if (event.target === scrim) done(false);
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.append(scrim);
+    (scrim.querySelector("#confirm-word") || go).focus();
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* §4.1's HOVER ACTIONS                                                     */
+/*                                                                          */
+/* The slot and §4.7's menu were both built, styled, and instantiated by no   */
+/* caller: every `itemCard` was a bare row, so the only thing a transcript    */
+/* or a source could do was open. §7.4 names three controls on the card and   */
+/* four items behind the `⋯`.                                                */
+/*                                                                          */
+/* They are buttons inside an `<a>`, which §4.1 asks for — "the whole row     */
+/* opens the item; buttons inside call stopPropagation()". So every handler   */
+/* here cancels the anchor as well as the bubble, or acting on a row would    */
+/* navigate away from it.                                                    */
+/* ---------------------------------------------------------------------- */
+
+/** One hover action: an icon button, or a labelled one when it needs a word. */
+function cardButton({ act, id, glyph, label, title = "", variant = "secondary" }) {
+  const attrs = `data-act="${esc(act)}" data-id="${esc(id)}"${
+    title ? ` title="${esc(title)}"` : ""
+  }`;
+  return label
+    ? `<button class="btn" data-size="sm" data-variant="${esc(variant)}" ${attrs}>${
+        glyph ? icon(glyph) : ""
+      }${esc(label)}</button>`
+    : `<button class="icon-btn" aria-label="${esc(act)}" ${attrs}>${icon(glyph)}</button>`;
+}
+
+/** §4.7's overflow menu on a card. `items` are `{act, label, danger, sep}`,
+ *  and §4.7's own rule — "a separator precedes destructive items" — is why
+ *  `sep` exists rather than being inferred. */
+function cardMenu(id, items) {
+  return `
+    <span class="menu-wrap">
+      <button class="icon-btn" aria-label="More" data-menu-for="m-${esc(id)}"
+              aria-haspopup="true" aria-expanded="false">${icon("more")}</button>
+      <span class="menu" id="m-${esc(id)}" hidden role="menu">
+        ${items
+          .filter(Boolean)
+          .map((item) =>
+            item.sep
+              ? `<span class="menu-sep"></span>`
+              : `<button class="menu-item" role="menuitem"${
+                  item.danger ? ' data-variant="danger"' : ""
+                } data-act="${esc(item.act)}" data-id="${esc(id)}">${esc(item.label)}</button>`
+          )
+          .join("")}
+      </span>
+    </span>`;
+}
+
+/** Bind every `[data-act]` in a frame to one handler map.
+ *
+ *  Delegated from the frame root rather than per button: a list re-renders a
+ *  row after an action (a rename changes the title), and a per-button
+ *  listener would be lost with the element it was on.
+ */
+function wireCardActions(node, handlers) {
+  node.addEventListener("click", async (event) => {
+    const control = event.target.closest("[data-act]");
+    if (!control || !node.contains(control)) return;
+    const handler = handlers[control.dataset.act];
+    if (!handler) return;
+    // The row is a link. Acting on it must not also follow it.
+    event.preventDefault();
+    event.stopPropagation();
+    control.closest(".menu")?.setAttribute("hidden", "");
+    await handler(control.dataset.id, control);
+  });
+}
+
+/** §6 rule 13, after a row leaves rather than after a filter runs: "a section
+ *  with zero items hides itself, title included". Removing the last card in a
+ *  date group otherwise leaves its `Today` heading standing over nothing. */
+export function hideEmptiedGroups(node) {
+  for (const group of node.querySelectorAll(".date-group, .section")) {
+    const rows = [...group.querySelectorAll(".item-card, .exp-card")];
+    if (rows.length) group.hidden = !rows.some((row) => !row.hidden);
+  }
+}
+
 /** A file name from a title, safe on every filesystem. */
 export function fileName(title, extension) {
   const stem = String(title || "brain")
@@ -1134,6 +1570,11 @@ function wireMenus(node) {
 
   for (const trigger of node.querySelectorAll("[data-menu-for]")) {
     trigger.addEventListener("click", (event) => {
+      // Both, not just the bubble. §4.1 puts these buttons inside the card's
+      // own `<a>`, so stopping propagation alone left the anchor to activate:
+      // opening the menu on a transcript row navigated to the transcript, and
+      // the menu was drawn onto a page that was already being replaced.
+      event.preventDefault();
       event.stopPropagation();
       const menu = node.querySelector(`#${CSS.escape(trigger.dataset.menuFor)}`);
       const opening = menu.hidden;
@@ -1221,10 +1662,12 @@ FRAMES.source = async function source(params) {
 
   const stepsHtml = progress ? progress.steps.map(workStep).join("") : "";
   // §7.3's header: "Working on it" while it runs, "Done in 2m 14s" after.
+  // "Done in 0s" is accurate and says nothing, so under a second it is just
+  // "Done" — the same answer the header gives when the duration is unknown.
   const elapsed = blocked
     ? "Stopped"
     : progress && progress.finished
-      ? progress.elapsed_sec !== null && progress.elapsed_sec !== undefined
+      ? progress.elapsed_sec
         ? `Done in ${humanDuration(progress.elapsed_sec)}`
         : "Done"
       : "Working on it";
@@ -1273,7 +1716,7 @@ FRAMES.source = async function source(params) {
         ${
           skill.status === "proposed"
             ? `<button class="btn" data-size="sm" data-variant="primary"
-                       data-approve="${esc(skill.id)}">Approve</button>`
+                       data-act="approve" data-id="${esc(skill.id)}">Approve</button>`
             : ""
         }
       </li>`
@@ -1297,6 +1740,15 @@ FRAMES.source = async function source(params) {
             blocked ? "Needs you" : running ? "Processing" : "In memory"
           }</span>
         </div>
+        <!-- §7.3's "overflow (Rename, Re-process, Archive)". The frame had no
+             menu at all, so all three were unreachable from the one page the
+             source has. -->
+        ${cardMenu(src.id, [
+          { act: "rename", label: "Rename" },
+          src.canonical_url && { act: "reprocess", label: "Re-process" },
+          { sep: true },
+          { act: "archive", label: "Archive" },
+        ])}
       </header>
 
       ${
@@ -1324,7 +1776,12 @@ FRAMES.source = async function source(params) {
         ${
           data.summary
             ? `<article class="yield-card">
-                 <div class="yield-card-head">${slot("summaries")}<span>Summary</span></div>
+                 <div class="yield-card-head">${slot("summaries")}<span>Summary</span>
+                   <span class="yield-actions">
+                     ${cardButton({ act: "copy-summary", id: src.id, glyph: "copy" })}
+                     ${cardButton({ act: "download-summary", id: src.id, glyph: "download" })}
+                   </span>
+                 </div>
                  <p class="yield-gist">${esc(data.summary.gist)}</p>
                </article>`
             : ""
@@ -1358,30 +1815,152 @@ FRAMES.source = async function source(params) {
       </section>` : ""}
     </div>`);
 
-  wireApprovals(node);
+  wireMenus(node);
+  wireCardActions(node, {
+    approve: async (id, button) => {
+      button.disabled = true;
+      try {
+        await post(`/api/skills/${encodeURIComponent(id)}/review`, { decision: "approve" });
+      } catch (error) {
+        button.disabled = false;
+        toast(error.message || "Could not approve it.");
+        return;
+      }
+      button.replaceWith(el('<span class="pill" data-state="active">Approved</span>'));
+      refreshCounts();
+    },
+    // §7.3's "Copy summary · Download summary". The card drew the gist with
+    // no controls at all, so two of the five actions the frame names did not
+    // exist on it.
+    "copy-summary": (id, button) => copyText(button, summaryText(data)),
+    "download-summary": () =>
+      download(fileName(src.title, "md"), summaryMarkdown(data), "text/markdown"),
+    rename: (id, button) => renameSourceHeader(id, button, src),
+    reprocess: async (id) => {
+      try {
+        await post(`/api/sources/${encodeURIComponent(id)}/reprocess`, {});
+      } catch (error) {
+        toast(error.message || "Could not read it again.");
+        return;
+      }
+      window.location.reload();
+    },
+    archive: async (id) => {
+      try {
+        await post(`/api/archive/source/${encodeURIComponent(id)}`, {});
+      } catch (error) {
+        toast(error.message || "Could not archive it.");
+        return;
+      }
+      refreshCounts();
+      window.location.assign(href("/library/sources"));
+    },
+  });
+
+  if (running) watchTheWork(node, src.id);
   return node;
 };
 
-/** Approve, wherever an Approve button appears. */
-function wireApprovals(node) {
-  for (const button of node.querySelectorAll("[data-approve]")) {
-    button.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      button.disabled = true;
-      try {
-        await post(`/api/skills/${encodeURIComponent(button.dataset.approve)}/review`, {
-          decision: "approve",
-        });
-        button.replaceWith(el('<span class="pill" data-state="active">Approved</span>'));
-        refreshCounts();
-      } catch (error) {
-        button.disabled = false;
-        button.textContent = error.message.slice(0, 40);
-      }
-    });
-  }
+/** §9.1: "The UI polls or streams from those rows — the work block is a view
+ *  of real state, never a fake animation."
+ *
+ *  Nothing polled, so the block was a snapshot taken once: the running step's
+ *  spinner kept spinning after that step had finished, and `processing` never
+ *  became `done` without a reload. `GET /api/sources/:id/job` existed and was
+ *  called by nothing.
+ *
+ *  It is also what makes §7.3's own promise true — "You can leave this page.
+ *  Brain keeps working" — in the direction that matters here: come back, and
+ *  the page tells you where it got to.
+ */
+function watchTheWork(node, sourceId) {
+  const block = node.querySelector(".work");
+  if (!block) return;
+  let stop = false;
+
+  const tick = async () => {
+    if (stop || !node.isConnected) return;         // the frame was replaced
+    let progress;
+    try {
+      progress = await api(`/api/sources/${encodeURIComponent(sourceId)}/job`);
+    } catch {
+      // A failed poll is not a failed job. Try again on the next beat.
+      setTimeout(tick, 4000);
+      return;
+    }
+    block.querySelector(".work-steps").innerHTML = progress.steps.map(workStep).join("");
+    if (!progress.finished && !["failed", "blocked_by_platform"].includes(progress.status)) {
+      setTimeout(tick, 2000);
+      return;
+    }
+    // Done, one way or the other: the header pill, the elapsed time and
+    // "What came out of it" all change, so the page is drawn again rather
+    // than patched in six places.
+    stop = true;
+    refreshCounts();
+    window.location.reload();
+  };
+  setTimeout(tick, 2000);
 }
+
+/** §7.3's `Rename`, in the header where the title is. */
+async function renameSourceHeader(id, button, src) {
+  const title = button.closest(".wrap").querySelector(".read-title");
+  const was = title.textContent;
+  const field = el(`<input class="input title-rename" value="${esc(was)}" aria-label="Rename">`);
+  title.replaceWith(field);
+  field.focus();
+  field.select();
+
+  let closed = false;
+  const finish = async (save) => {
+    if (closed) return;
+    closed = true;
+    const wanted = field.value.trim();
+    field.replaceWith(title);
+    if (!save || !wanted || wanted === was) return;
+    try {
+      await post(`/api/sources/${encodeURIComponent(id)}/rename`, { title: wanted });
+    } catch (error) {
+      toast(error.message || "Could not rename it.");
+      return;
+    }
+    title.textContent = wanted;
+    src.title = wanted;
+  };
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    if (event.key === "Escape") finish(false);
+  });
+  field.addEventListener("blur", () => finish(true));
+}
+
+/** The summary as the person would paste it, and as a file.
+ *  Both are built from what the frame already has. */
+function summaryText(data) {
+  const points = (data.summary.points || []).map(
+    (point, i) => `${i + 1}. ${point.text}${point.t_ms != null ? ` [${stamp(point.t_ms)}]` : ""}`
+  );
+  return `${data.source.title}\n\n${data.summary.gist}\n\n${points.join("\n")}\n`;
+}
+
+function summaryMarkdown(data) {
+  const points = (data.summary.points || []).map(
+    (point) => `- ${point.text}${point.t_ms != null ? ` — **${stamp(point.t_ms)}**` : ""}`
+  );
+  return [
+    `# ${data.source.title}`,
+    "",
+    data.summary.gist,
+    "",
+    "## Key points",
+    "",
+    points.join("\n") || "—",
+    data.source.canonical_url ? `\n---\n\n[The source](${data.source.canonical_url})` : "",
+    "",
+  ].join("\n");
+}
+
 
 export async function post(path, body) {
   const response = await fetch(path, {
@@ -1415,20 +1994,46 @@ function csrfToken() {
 /* ---------------------------------------------------------------------- */
 
 /** §4.2's expandable card. Collapsed shows one clamped line; the caret turns.
- *  `R-6`: the group heading above it carries no count and no dash. */
-function expandable({ id, icon: glyph, title, sub, metaHtml: meta, bodyHtml, state = "" }) {
+ *  `R-6`: the group heading above it carries no count and no dash.
+ *
+ *  **The caret is the last thing in the row**, per §18.6 — "on the right,
+ *  pointing right when closed and down when open" — and §6 rule 1, which puts
+ *  every action on the right. It was the first child, which put it at the far
+ *  left of every Rules, Skills and Archive card.
+ *
+ *  `headHtml` is the slot §7.9's `Review` button and `R-9`'s `Restore` need.
+ *  It sits outside the toggle rather than inside it: a `<button>` inside a
+ *  `<button>` is invalid, and a click on the inner one would open the card as
+ *  well as do its own job.
+ */
+function expandable({
+  id,
+  icon: glyph,
+  title,
+  sub,
+  metaHtml: meta,
+  bodyHtml,
+  state = "",
+  headHtml = "",
+}) {
   return `
     <article class="exp-card" data-open="false"${state ? ` data-state="${esc(state)}"` : ""}>
-      <button class="exp-head" type="button" data-toggle="${esc(id)}" aria-expanded="false">
-        <!-- Points DOWN at rest: §4.2 rotates it -90 degrees when closed, so
-             the base must be the open position or the two states swap. -->
-        <span class="exp-caret slot">${icon("chevron-down")}</span>
-        <span class="item-type">${icon(glyph)}</span>
-        <span class="item-text">
-          <span class="item-title">${esc(title)}</span>
-          <span class="item-meta exp-summary">${meta ?? esc(sub)}</span>
-        </span>
-      </button>
+      <div class="exp-top">
+        <button class="exp-head" type="button" data-toggle="${esc(id)}" aria-expanded="false">
+          <span class="item-type">${icon(glyph)}</span>
+          <span class="item-text">
+            <span class="item-title">${esc(title)}</span>
+            <span class="item-meta exp-summary">${meta ?? esc(sub)}</span>
+          </span>
+        </button>
+        ${headHtml ? `<span class="exp-actions">${headHtml}</span>` : ""}
+        <button class="exp-caret-btn" type="button" data-toggle="${esc(id)}"
+                tabindex="-1" aria-hidden="true">
+          <!-- Points DOWN at rest: §4.2 rotates it -90 degrees when closed, so
+               the base must be the open position or the two states swap. -->
+          <span class="exp-caret slot">${icon("chevron-down")}</span>
+        </button>
+      </div>
       <div class="exp-body">${bodyHtml}</div>
     </article>`;
 }
@@ -1439,7 +2044,9 @@ function wireExpanders(node) {
       const card = head.closest(".exp-card");
       const open = card.dataset.open === "true";
       card.dataset.open = String(!open);
-      head.setAttribute("aria-expanded", String(!open));
+      // The row and the caret are two toggles for one disclosure, so the
+      // state goes on the one that announces it, not on whichever was hit.
+      card.querySelector(".exp-head").setAttribute("aria-expanded", String(!open));
     });
   }
 }
@@ -1474,11 +2081,15 @@ FRAMES.rules = async function rules() {
           }
         </div>
         <div class="btn-row">
-          <button class="btn" data-variant="secondary">Edit</button>
-          <button class="btn" data-variant="ghost">Archive</button>
+          <button class="btn" data-variant="secondary" data-act="edit"
+                  data-id="${esc(rule.id)}">Edit</button>
+          <button class="btn" data-variant="ghost" data-act="archive"
+                  data-id="${esc(rule.id)}">Archive</button>
         </div>`,
     });
   };
+
+  const lookup = new Map([...data.mine, ...data.from_your_sources].map((r) => [r.id, r]));
 
   const section = (title, note, rows) =>
     rows.length
@@ -1520,8 +2131,78 @@ FRAMES.rules = async function rules() {
 
   wireExpanders(node);
   wireListSearch(node);
+  openCreatePanel(node, "rule");
+
+  /* §7.8's two actions. They were plain buttons with no data attribute and
+     no handler, although both doors existed on the backend all along. */
+  wireCardActions(node, {
+    edit: (id, button) => editRule(id, button, lookup),
+    archive: (id, button) => archiveRow("claim", id, button, node),
+  });
   return node;
 };
+
+/** §7.8's `Edit`, in place in the expanded card.
+ *
+ *  §7.8: "A rule without its reasoning gets deleted by someone who no longer
+ *  remembers why it exists. Always store both the short form and the full
+ *  form." Both are editable here — the short form is what every list and
+ *  every agent reads, and the long one is the reason it survives. */
+async function editRule(id, button, lookup) {
+  const body = button.closest(".exp-body");
+  if (body.querySelector(".rule-edit")) return;
+  const rule = lookup.get(id);
+  const row = button.closest(".btn-row");
+
+  const form = el(`
+    <div class="rule-edit">
+      <label class="field-label" for="e-claim-${esc(id)}">The rule</label>
+      <textarea class="input create-area" id="e-claim-${esc(id)}" rows="2">${esc(
+        rule.claim
+      )}</textarea>
+      <label class="field-label" for="e-applies-${esc(id)}">When it applies</label>
+      <input class="input" id="e-applies-${esc(id)}" value="${esc(rule.when_it_applies || "")}">
+      <div class="btn-row">
+        <button class="btn" data-variant="primary" data-save>Save</button>
+        <button class="btn" data-variant="ghost" data-cancel>Cancel</button>
+      </div>
+    </div>`);
+  row.before(form);
+  row.hidden = true;
+  form.querySelector("textarea").focus();
+
+  const close = () => {
+    form.remove();
+    row.hidden = false;
+  };
+  form.querySelector("[data-cancel]").addEventListener("click", close);
+  form.querySelector("[data-save]").addEventListener("click", async (event) => {
+    const claim = form.querySelector("textarea").value.trim();
+    const applies = form.querySelector("input").value.trim();
+    if (!claim) {
+      form.querySelector("textarea").focus();
+      return;
+    }
+    event.currentTarget.disabled = true;
+    try {
+      await post(`/api/claim/${encodeURIComponent(id)}`, {
+        claim,
+        when_it_applies: applies,
+      });
+    } catch (error) {
+      event.currentTarget.disabled = false;
+      toast(error.message || "Could not save that.");
+      return;
+    }
+    rule.claim = claim;
+    rule.when_it_applies = applies;
+    const card = button.closest(".exp-card");
+    card.querySelector(".item-title").textContent = claim;
+    card.querySelector(".rule-full").textContent = claim;
+    close();
+    toast("Saved.");
+  });
+}
 
 FRAMES.skills = async function skills() {
   const data = await api("/api/skills");
@@ -1533,6 +2214,35 @@ FRAMES.skills = async function skills() {
       title: skill.name,
       sub: skill.description,
       state: kind === "proposed" ? "proposed" : kind === "inactive" ? "inactive" : "",
+      // §7.9: "proposed → a **`Review` button**. Not a pill. A state the
+      // person cannot act on is a dead end." It is the queue's one entry
+      // point, which is why it is the collapsed card's one visible action.
+      //
+      // `R-7`: an approved card carries `⋯` alone — the capture's pencil is
+      // dropped, because §7.9 also lists `Edit` in the menu and §6 rule 2
+      // forbids the same action in two places.
+      headHtml:
+        kind === "proposed"
+          ? cardButton({
+              act: "review",
+              id: skill.id,
+              label: "Review",
+              variant: "secondary",
+            })
+          : cardMenu(skill.id, [
+              { act: "edit", label: "Edit" },
+              // §7.9: "Activation lives in the menu. There is no toggle
+              // switch on a skill card."
+              kind === "active"
+                ? { act: "deactivate", label: "Deactivate" }
+                : { act: "activate", label: "Activate" },
+              { act: "export", label: "Export .md" },
+              { sep: true },
+              // `R-14`: this sets the skill aside. §6 rule 8 — "only the
+              // person deletes, and only from Archive or Profile" — and
+              // §7.9's `Delete (confirms)` cannot both hold on a live card.
+              { act: "delete", label: "Delete", danger: true },
+            ]),
       bodyHtml: `
         <span class="field-label">When to use it</span>
         <p class="rule-full">${esc(skill.trigger_when || "—")}</p>
@@ -1540,16 +2250,19 @@ FRAMES.skills = async function skills() {
         <ol class="steps-list steps-plain">${(skill.execution_steps || [])
           .map((step) => `<li>${esc(step)}</li>`)
           .join("")}</ol>
-        <div class="btn-row">
-          ${
-            kind === "proposed"
-              ? `<button class="btn" data-variant="primary" data-approve="${esc(skill.id)}">Approve</button>
-                 <button class="btn" data-variant="secondary">Edit</button>
-                 <button class="btn" data-variant="ghost" data-dismiss="${esc(skill.id)}">Dismiss</button>`
-              : `<button class="btn" data-variant="secondary">Edit</button>
-                 <button class="icon-btn" aria-label="More">${icon("more")}</button>`
-          }
-        </div>`,
+        ${provenanceChips(skill)}
+        ${
+          kind === "proposed"
+            ? `<div class="btn-row">
+                 <button class="btn" data-variant="primary" data-act="approve"
+                         data-id="${esc(skill.id)}">Approve</button>
+                 <button class="btn" data-variant="secondary" data-act="edit"
+                         data-id="${esc(skill.id)}">Edit</button>
+                 <button class="btn" data-variant="ghost" data-act="dismiss"
+                         data-id="${esc(skill.id)}">Dismiss</button>
+               </div>`
+            : ""
+        }`,
     });
 
   const section = (title, note, rows, kind) =>
@@ -1562,6 +2275,10 @@ FRAMES.skills = async function skills() {
            <div class="stack">${rows.map((row) => card(row, kind)).join("")}</div>
          </section>`
       : "";
+
+  const lookup = new Map(
+    [...data.from_your_sources, ...data.active, ...data.inactive].map((s) => [s.id, s])
+  );
 
   const total = data.from_your_sources.length + data.active.length + data.inactive.length;
   const node = el(`
@@ -1593,20 +2310,253 @@ FRAMES.skills = async function skills() {
     </div>`);
 
   wireExpanders(node);
-  wireApprovals(node);
   wireListSearch(node);
-  for (const button of node.querySelectorAll("[data-dismiss]")) {
-    button.addEventListener("click", async () => {
+  wireMenus(node);
+  openCreatePanel(node, "skill");
+
+  /* §7.9's review flow and its overflow menu, which was `⋯` with no handler:
+     `Activate`/`Deactivate`, `Export .md` and `Delete` were all unreachable,
+     and `POST /api/skills/:id/state` — which the backend already served —
+     was called by nothing in the web app, so a skill could never enter or
+     leave the `Inactive` section the frame draws. */
+  wireCardActions(node, {
+    // §7.9: "`Review` ... A state the person cannot act on is a dead end."
+    // It opens the card, which is where Approve, Edit and Dismiss live.
+    review: (id, button) => {
+      const card = button.closest(".exp-card");
+      card.dataset.open = "true";
+      card.querySelector(".exp-head").setAttribute("aria-expanded", "true");
+      card.querySelector('[data-act="approve"]')?.focus();
+    },
+    approve: async (id, button) => {
       button.disabled = true;
-      await post(`/api/skills/${encodeURIComponent(button.dataset.dismiss)}/review`, {
-        decision: "dismiss",
-      }).catch(() => {});
-      button.closest(".exp-card").remove();
+      try {
+        await post(`/api/skills/${encodeURIComponent(id)}/review`, { decision: "approve" });
+      } catch (error) {
+        button.disabled = false;
+        toast(error.message || "Could not approve it.");
+        return;
+      }
       refreshCounts();
-    });
-  }
+      toast("Approved. Every connection can reach it now.");
+      window.location.assign(href("/skills"));
+    },
+    dismiss: async (id, button) => {
+      const card = button.closest(".exp-card");
+      try {
+        await post(`/api/skills/${encodeURIComponent(id)}/review`, { decision: "dismiss" });
+      } catch (error) {
+        toast(error.message || "Could not dismiss it.");
+        return;
+      }
+      card.remove();
+      hideEmptiedGroups(node);
+      refreshCounts();
+      toast("Dismissed. It is in your Archive.", {
+        action: "Undo",
+        onAction: async () => {
+          await post(`/api/archive/skill/${encodeURIComponent(id)}`, { restore: true }).catch(
+            () => {}
+          );
+          window.location.assign(href("/skills"));
+        },
+      });
+    },
+    edit: (id) => window.location.assign(href(`/skills/${id}?edit=1`)),
+    activate: (id, button) => setSkillState(id, "active", button),
+    deactivate: (id, button) => setSkillState(id, "inactive", button),
+    // §7.9's `Export .md`. Built here from the skill the frame already holds:
+    // a round trip to fetch what is on screen is a round trip for nothing.
+    export: (id) => {
+      const skill = lookup.get(id);
+      download(fileName(skill.name, "md"), skillMarkdown(skill), "text/markdown");
+    },
+    // `R-14`. §7.9 names this `Delete`; §6 rule 8 says only Archive and
+    // Profile destroy anything. The dialog says where it goes.
+    delete: async (id, button) => {
+      const skill = lookup.get(id);
+      const yes = await confirmDialog({
+        title: `Delete “${skill.name}”?`,
+        body:
+          "It moves to your Archive, where you can put it back or delete it for " +
+          "good. Your AI cannot reach it from there.",
+        confirmLabel: "Delete",
+      });
+      if (!yes) return;
+      await archiveRow("skill", id, button, node);
+    },
+  });
   return node;
 };
+
+async function setSkillState(id, state, button) {
+  try {
+    await post(`/api/skills/${encodeURIComponent(id)}/state`, { state });
+  } catch (error) {
+    toast(error.message || "Could not change that.");
+    return;
+  }
+  refreshCounts();
+  // The card has to move between §7.9's sections, and the sections carry the
+  // notes that explain what each state means — so the page redraws rather
+  // than leaving a card sitting under a heading that now contradicts it.
+  toast(state === "active" ? "Active. Every connection can reach it." : "Inactive. Kept, out of reach.");
+  window.location.assign(href("/skills"));
+}
+
+/** §7.9's `Export .md`, in the shape a host agent reads: the trigger first,
+ *  because without it a model never reaches for the skill, then the steps. */
+function skillMarkdown(skill) {
+  const steps = (skill.execution_steps || []).map((step, i) => `${i + 1}. ${step}`).join("\n");
+  return [
+    `# ${skill.name}`,
+    "",
+    skill.description || "",
+    "",
+    "## When to use it",
+    "",
+    skill.trigger_when || "—",
+    "",
+    "## What it does",
+    "",
+    steps || "—",
+    skill.guardrails ? `\n## Guardrails\n\n${skill.guardrails}` : "",
+    skill.source_title ? `\n---\n\nFrom: ${skill.source_title}` : "",
+    "",
+  ].join("\n");
+}
+
+/* ---------------------------------------------------------------------- */
+/* §7.1's two create links, which landed nowhere                            */
+/*                                                                          */
+/* `Write a rule` and `Add a skill` link to `/rules?create=1` and            */
+/* `/skills?create=1`. No frame read the query at all, so both opened the    */
+/* list they were already on with nothing new on it — §7.1 names the result  */
+/* as "`/rules` with the create panel open".                                */
+/* ---------------------------------------------------------------------- */
+
+const CREATE_PANEL = {
+  rule: {
+    title: "Write a rule",
+    note: "A standing instruction. Every AI you connect reads it before it answers.",
+    endpoint: "/api/rule",
+    fields: [
+      { name: "claim", label: "The rule", placeholder: "Never use em dashes in anything you draft for me.", area: true },
+      { name: "when_it_applies", label: "When it applies", placeholder: "always" },
+      { name: "when_it_fails", label: "When it does not", placeholder: "Optional — when to ignore it", optional: true },
+    ],
+  },
+  skill: {
+    title: "Add a skill",
+    note: "A procedure worth reusing. The trigger matters most — without it a model never reaches for the skill.",
+    endpoint: "/api/skill",
+    fields: [
+      { name: "name", label: "Name", placeholder: "Run a cycle planning session" },
+      { name: "description", label: "What it is", placeholder: "One line, so a model can tell it apart from the others." },
+      { name: "trigger_when", label: "When to use it", placeholder: "When planning the next six weeks" },
+      { name: "steps", label: "What it does", placeholder: "One step per line.", area: true },
+    ],
+  },
+};
+
+/** Open the panel when the URL asks for it, and only then. */
+function openCreatePanel(node, kind) {
+  if (new URLSearchParams(window.location.search).get("create") !== "1") return;
+  const spec = CREATE_PANEL[kind];
+  const panel = el(`
+    <section class="section create-panel">
+      <div class="group-head">
+        <h2 class="group-title">${esc(spec.title)}</h2>
+        <p class="group-note">${esc(spec.note)}</p>
+      </div>
+      <div class="card-group">
+        ${spec.fields
+          .map(
+            (field) => `
+          <div class="create-field">
+            <label class="field-label" for="f-${esc(field.name)}">${esc(field.label)}</label>
+            ${
+              field.area
+                ? `<textarea class="input create-area" id="f-${esc(field.name)}"
+                             placeholder="${esc(field.placeholder)}" rows="3"></textarea>`
+                : `<input class="input" id="f-${esc(field.name)}"
+                          placeholder="${esc(field.placeholder)}">`
+            }
+          </div>`
+          )
+          .join("")}
+        <div class="btn-row">
+          <button class="btn" data-variant="primary" id="create-save">Save</button>
+          <a class="btn" data-variant="ghost" href="/${kind === "rule" ? "rules" : "skills"}">Cancel</a>
+          <span class="save-note" id="create-note" hidden></span>
+        </div>
+      </div>
+    </section>`);
+
+  // Above the list: the person came here to add something, not to read.
+  node.querySelector(".toolbar").after(panel);
+  panel.querySelector(".input").focus();
+
+  const note = panel.querySelector("#create-note");
+  panel.querySelector("#create-save").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const values = {};
+    for (const field of spec.fields) {
+      values[field.name] = panel.querySelector(`#f-${field.name}`).value.trim();
+    }
+    const missing = spec.fields.find((field) => !field.optional && !values[field.name]);
+    if (missing) {
+      note.hidden = false;
+      note.textContent = `${missing.label} is needed.`;
+      panel.querySelector(`#f-${missing.name}`).focus();
+      return;
+    }
+    button.disabled = true;
+    try {
+      if (kind === "skill") {
+        await post(spec.endpoint, {
+          slug: values.name,
+          name: values.name,
+          description: values.description,
+          trigger_when: values.trigger_when,
+          execution_steps: values.steps.split("\n").map((line) => line.trim()).filter(Boolean),
+        });
+      } else {
+        await post(spec.endpoint, values);
+      }
+    } catch (error) {
+      button.disabled = false;
+      note.hidden = false;
+      note.textContent = error.message || "Could not save that.";
+      return;
+    }
+    refreshCounts();
+    window.location.assign(href(kind === "rule" ? "/rules" : "/skills"));
+  });
+}
+
+/** §7.8 and §7.9 both end their expanded body with provenance. A skill that
+ *  came out of a source names it; one written here says so. */
+function provenanceChips(skill) {
+  const origin =
+    skill.origin_type === "github_import"
+      ? "Imported from GitHub"
+      : skill.origin_type === "synthesized"
+        ? "Synthesized on request"
+        : skill.source_title || "Written here";
+  return `
+    <div class="chip-row">
+      <span class="chip">${icon("sources")}${esc(origin)}</span>
+      ${
+        skill.source_id
+          ? `<a class="chip" href="/sources/${esc(skill.source_id)}">${icon(
+              "clock"
+            )}Open the source</a>`
+          : ""
+      }
+      <span class="chip">${icon("clock")}v${esc(String(skill.version || 1))}</span>
+    </div>`;
+}
 
 /* ---------------------------------------------------------------------- */
 /* §7.12 ARCHIVE                                                           */
@@ -1635,6 +2585,24 @@ FRAMES.archive = async function archive() {
           item.archived_by === "brain" ? "Brain" : "you"
         )}</span>
         <span>added ${esc(dateLabel(item.created_at).toLowerCase())}</span>`,
+      // `R-9`: `Restore` lives in the header, once. The capture put a
+      // secondary one here AND a primary one in the body; §6 rule 2 forbids
+      // that, and §7.12's own argument — "people come here to undo something
+      // they just did" — says which copy to keep.
+      headHtml: `
+        <button class="btn" data-size="sm" data-variant="secondary"
+                data-restore="${esc(item.kind)}:${esc(item.id)}">${icon("restore")}Restore</button>
+        <span class="menu-wrap">
+          <button class="icon-btn" aria-label="More" data-menu-for="arch-${esc(item.id)}"
+                  aria-haspopup="true" aria-expanded="false">${icon("more")}</button>
+          <span class="menu" id="arch-${esc(item.id)}" hidden role="menu">
+            <button class="menu-item" role="menuitem"
+                    data-restore="${esc(item.kind)}:${esc(item.id)}">Restore</button>
+            <span class="menu-sep"></span>
+            <button class="menu-item" role="menuitem" data-variant="danger"
+                    data-delete="${esc(item.kind)}:${esc(item.id)}">Delete permanently</button>
+          </span>
+        </span>`,
       bodyHtml: `
         ${item.detail ? `<p class="rule-full">${esc(item.detail)}</p>` : ""}
         ${
@@ -1642,13 +2610,7 @@ FRAMES.archive = async function archive() {
             ? `<span class="field-label">Original link</span>
                <input class="input" readonly value="${esc(item.extra)}">`
             : ""
-        }
-        <div class="btn-row">
-          <button class="btn" data-variant="secondary">Edit</button>
-          <button class="btn" data-variant="ghost" data-delete="${esc(item.id)}">
-            Delete permanently
-          </button>
-        </div>`,
+        }`,
     });
 
   // §7.12 orders by ARCHIVE date, not creation date: "people come here to
@@ -1717,6 +2679,64 @@ FRAMES.archive = async function archive() {
         // §6 rule 13: a section with zero items hides itself, title included.
         group.hidden = ![...group.querySelectorAll(".exp-card")].some((c) => !c.hidden);
       }
+    });
+  }
+
+  wireMenus(node);
+
+  /* §7.12's one job. `R-9` puts it in the header; §9.4 gives it no dialog and
+     an Undo toast instead, because undoing an undo is cheap. */
+  for (const button of node.querySelectorAll("[data-restore]")) {
+    button.addEventListener("click", async () => {
+      const [kind, id] = button.dataset.restore.split(":");
+      const card = button.closest(".exp-card");
+      try {
+        await post(`/api/archive/${kind}/${id}`, { restore: true });
+      } catch (error) {
+        toast(error.message || "Could not restore it.");
+        return;
+      }
+      card.remove();
+      hideEmptiedGroups(node);
+      refreshCounts();
+      toast("Restored.", {
+        action: "Undo",
+        onAction: async () => {
+          try {
+            await post(`/api/archive/${kind}/${id}`, {});
+          } catch {
+            toast("Could not put it back.");
+            return;
+          }
+          window.location.assign(href("/archive"));
+        },
+      });
+    });
+  }
+
+  /* §9.4: "Delete one archived item | confirm dialog". One step — the thing
+     is already set aside, and the engine refuses anything that is not. */
+  for (const button of node.querySelectorAll("[data-delete]")) {
+    button.addEventListener("click", async () => {
+      const [kind, id] = button.dataset.delete.split(":");
+      const card = button.closest(".exp-card");
+      const label = card.querySelector(".item-title").textContent.trim();
+      const yes = await confirmDialog({
+        title: `Delete this ${kind} for good?`,
+        body: `“${label}” is removed from Brain permanently. This cannot be undone.`,
+        confirmLabel: "Delete permanently",
+      });
+      if (!yes) return;
+      try {
+        await post(`/api/delete/${id}`, { item_type: kind });
+      } catch (error) {
+        toast(error.message || "Could not delete it.");
+        return;
+      }
+      card.remove();
+      hideEmptiedGroups(node);
+      refreshCounts();
+      toast("Deleted for good.");
     });
   }
   return node;
@@ -1857,12 +2877,14 @@ FRAMES.profile = async function profile() {
           ${settingRow({
             label: "Delete my library",
             help: "Removes every source and everything made from it. Your account stays.",
-            controlHtml: `<button class="btn" data-variant="danger">Delete library</button>`,
+            controlHtml: `<button class="btn" data-variant="danger"
+                                  data-wipe="library">Delete library</button>`,
           })}
           ${settingRow({
             label: "Delete my account",
             help: "Closes the account and everything in it.",
-            controlHtml: `<button class="btn" data-variant="danger">Delete account</button>`,
+            controlHtml: `<button class="btn" data-variant="danger"
+                                  data-wipe="account">Delete account</button>`,
           })}
         </div>
       </section>
@@ -1911,6 +2933,42 @@ FRAMES.profile = async function profile() {
     await post("/api/logout", {}).catch(() => {});
     window.location.assign(href("/signin"));
   });
+
+  /* §9.4: both of these are "step 1 type `DELETE`, step 2 identity check".
+     `OPEN-2` is still open on what the identity check should be — the plan
+     recommends (c), the word alone for the library and an emailed code for
+     the account — so the second step is built as §9.4 describes it and the
+     field is the placeholder the plan itself calls for. */
+  for (const button of node.querySelectorAll("[data-wipe]")) {
+    button.addEventListener("click", async () => {
+      const whole = button.dataset.wipe === "account";
+      const yes = await confirmDialog({
+        title: whole ? "Delete your account?" : "Delete your library?",
+        body: whole
+          ? "Your library, your connections and your keys are destroyed. Export first if you want to keep anything. This cannot be undone."
+          : "Every source, transcript, summary, rule and skill is destroyed. Your account and your settings stay. This cannot be undone.",
+        confirmLabel: whole ? "Delete account" : "Delete library",
+        word: "DELETE",
+        identity: "Confirm it is you",
+      });
+      if (!yes) return;
+      try {
+        await post(whole ? "/api/delete-account" : "/api/delete-library", {
+          typed: "DELETE",
+        });
+      } catch (error) {
+        toast(error.message || "Could not do that.");
+        return;
+      }
+      if (whole) {
+        window.location.assign(href("/signin"));
+        return;
+      }
+      refreshCounts();
+      toast("Your library is empty.");
+      window.location.assign(href("/profile"));
+    });
+  }
   return node;
 };
 

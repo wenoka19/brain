@@ -79,7 +79,7 @@ class TestCli:
             "Checkpoint A: the search envelope obeys the locked format",
             "omni-bar: a typed delete can only reach Trash",
             "oauth: PKCE, audience binding, rotation, revocation",
-            "trash: deletion is gated on it",
+            "deletion: gated on being set aside first",
             "tenant isolation",
         ):
             assert claim in out, claim

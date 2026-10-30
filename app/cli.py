@@ -497,11 +497,11 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
         rescued = E.op_rescue_job(ctx, queued.data["job_id"], notes)
         assert rescued.ok and rescued.data["claims"] >= 1
 
-    @check("trash: deletion is gated on it, then irreversible")
+    @check("deletion: gated on being set aside first, then irreversible")
     def _trash():
         E.op_seed_demo(ctx)
         refused = E.op_permanent_delete(ctx, E.DEMO_SOURCE_VIDEO)
-        assert not refused.ok and refused.error_reason == "not_in_trash"
+        assert not refused.ok and refused.error_reason == "not_set_aside"
         E.op_trash_item(ctx, "source", E.DEMO_SOURCE_VIDEO)
         assert E.op_permanent_delete(ctx, E.DEMO_SOURCE_VIDEO).ok
         assert tenant_db.get_source(ctx.tenant, E.DEMO_SOURCE_VIDEO) is None

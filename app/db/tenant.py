@@ -1076,15 +1076,27 @@ def set_claim_embedding(
     )
 
 
+#: The only two statuses that mean "the person set this aside".
+_SET_ASIDE = ("archived", "trash")
+
+
 def _archival(status: str, actor: str) -> tuple[str | None, str]:
-    """When and by whom, or cleared on restore.
+    """When and by whom, or cleared when it is not set aside at all.
 
     §7.12 orders the Archive by archive date and prints `archived by you` or
     `archived by Brain` beside every row — it calls that attribution the point
     of the page. Neither can be reconstructed after the fact, so both are
     recorded at the moment the status changes.
+
+    **Only for `archived` and `trash`.** The condition used to be "anything
+    but active", which quietly stamped `processing` and `blocked` too: a
+    source that had just failed to fetch carried an archive date and the words
+    `archived by you`, having been archived by nobody. Nothing read it from
+    the Archive — that page selects on the status — but a column that says
+    `archived_at` has to mean it, and §7.3's blocked row is the one place the
+    frame reads a source's own dates.
     """
-    if status == "active":
+    if status not in _SET_ASIDE:
         return None, ""
     return _now(), ("brain" if actor == "brain" else "you")
 
@@ -1471,9 +1483,14 @@ def list_skills(
         raise ValueError(f"unknown skill status: {sorted(unknown)}")
     placeholders = ",".join("?" for _ in statuses)
     rows = conn.execute(
-        f"SELECT * FROM skills WHERE status IN ({placeholders}) "
-        "ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, "
-        "updated_at DESC LIMIT ?",
+        # §7.9's expanded body ends with provenance, and a drafted skill's
+        # provenance is the source it was drafted from — so the title comes
+        # along rather than costing a read per card to draw it.
+        f"SELECT sk.*, s.title AS source_title, s.canonical_url AS source_url "
+        f"FROM skills sk LEFT JOIN sources s ON s.id = sk.source_id "
+        f"WHERE sk.status IN ({placeholders}) "
+        "ORDER BY CASE sk.status WHEN 'proposed' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, "
+        "sk.updated_at DESC LIMIT ?",
         (*statuses, limit),
     ).fetchall()
     return [hydrate_skill(row) for row in rows]
@@ -1498,6 +1515,17 @@ def set_skill_status(
         "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status != ?",
         (status, at, by, skill_id, status),
     )
+    return cur.rowcount > 0
+
+
+def rename_source(conn: sqlite3.Connection, source_id: str, title: str) -> bool:
+    """§7.4's overflow `Rename`.
+
+    One UPDATE and nothing else: the title is not denormalised anywhere, and
+    search reads it through a join, so there is no index to re-sync. If a
+    `sources_fts` is ever added, this is where its trigger has to be checked.
+    """
+    cur = conn.execute("UPDATE sources SET title = ? WHERE id = ?", (title[:500], source_id))
     return cur.rowcount > 0
 
 
