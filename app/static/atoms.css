@@ -463,6 +463,11 @@ button { background: none; border: 0; cursor: pointer; }
    §3.9 Meter
    ====================================================================== */
 .meter {
+  /* An inline box ignores `width` and `height`, so without this the meter
+     rendered as a tall thin bar down the card — the same trap `.v-rule`
+     fell into. The atom was written before anything used it, which is how
+     it shipped unnoticed. */
+  display: block;
   width: 100%;
   height: var(--meter-h);
   border-radius: var(--radius-full);
@@ -591,3 +596,11 @@ button { background: none; border: 0; cursor: pointer; }
     scroll-behavior: auto !important;
   }
 }
+
+/* §3.9 does not say what a meter does as it fills, and §3.8's pill palette
+   does: amber is "needs the person", red is destructive and "never a pill".
+   A meter at 95% is the same signal as an amber pill — something the person
+   should know about before it stops them — so the fill takes the status
+   colours rather than staying accent all the way to the wall. */
+.meter > [data-level="warn"] { background: var(--status-pending-text); }
+.meter > [data-level="high"] { background: var(--danger); }

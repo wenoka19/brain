@@ -929,3 +929,344 @@ mark {
   font-size: var(--text-title);
   font-weight: var(--weight-semibold);
 }
+
+/* ======================================================================
+   §7.10 ACTIVITY
+   ====================================================================== */
+/* §12: "960–1199 | meter grid becomes one column". Above that it is one row
+   of four, which is what makes the four figures comparable at a glance. */
+.meter-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 1199px) {
+  .meter-row { grid-template-columns: 1fr; }
+}
+
+/* §7.10: rows are "40px, one line, denser than an item card because a log is
+   scanned, not browsed". The columns are fixed where the content is fixed —
+   a time, a latency, a status — and elastic only for the two that vary, so
+   the eye can run down any one of them. */
+.call-log {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  overflow: hidden;
+}
+
+.call + .call { border-top: var(--border-width) solid var(--border-subtle); }
+
+.call-head {
+  display: grid;
+  grid-template-columns: 56px 8px 1fr auto minmax(0, 1.4fr) 64px 64px;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 40px;
+  padding: 0 var(--space-4);
+  text-align: left;
+  font-size: var(--text-sm);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.call-head:hover,
+.call-head[data-force~="hover"] { background: var(--bg-hover); }
+
+.call-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The dot is the status at a glance, before the pill is read. */
+.call-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-active-text);
+}
+
+.call-dot[data-ok="false"] { background: var(--status-pending-text); }
+
+.call-conn {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* §7.10: "tool name in `--font-mono` on `--bg-canvas`". */
+.call-tool {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.call-target {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.call-latency {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.call-body {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.call[data-open="false"] .call-body { display: none; }
+
+.call-pre {
+  margin: var(--space-1) 0 var(--space-4);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.call-returned {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--text-secondary);
+}
+
+/* §12: "720–959 | log rows drop the connection and latency columns". */
+@media (max-width: 959px) {
+  .call-head { grid-template-columns: 56px 8px auto minmax(0, 1fr) 64px; }
+  .call-conn,
+  .call-latency { display: none; }
+}
+
+/* ======================================================================
+   §7.11 CONNECTIONS
+   ====================================================================== */
+/* §7.11: the empty state is "accent-bordered, first on the page". Once there
+   is a connection it stops shouting — the person has done the thing it was
+   there to get them to do. */
+.connect-card[data-state="empty"] {
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--accent);
+}
+
+.connect-title {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--text-lead);
+  font-weight: var(--weight-semibold);
+}
+
+.connect-lede {
+  margin: 0;
+  max-width: 54ch;
+  color: var(--text-secondary);
+}
+
+.connect-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.connect-row .input { flex: 1 1 auto; min-width: 0; }
+
+/* The two tiles of §7.11. `Show me how` rides in the meta line rather than
+   as a separate control: the whole header already opens the card, and a
+   second thing to click would be §6 rule 2's duplicate. */
+.how + .how { margin-top: var(--space-3); }
+
+.step-title { font-weight: var(--weight-medium); }
+
+.step-paths {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+  color: var(--text-secondary);
+}
+
+.step-paths li + li { margin-top: var(--space-1); }
+
+.step-note {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+}
+
+/* §7.11: "The placeholder is an amber `<mark>`; it fills with the real link
+   once generated." */
+.code mark {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+}
+
+.conn-list {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  overflow: hidden;
+}
+
+.conn {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  min-height: var(--card-height);
+}
+
+.conn + .conn { border-top: var(--border-width) solid var(--border-subtle); }
+
+.conn-name {
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 719px) {
+  .connect-row { flex-wrap: wrap; }
+  .connect-row .input { flex: 1 0 100%; }
+  .conn { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .conn .item-meta { grid-column: 1 / -1; }
+}
+
+/* ======================================================================
+   §7.2 HOME — the thread state
+   ====================================================================== */
+/* "Greeting and pitch disappear. The thread fills the space and scrolls; the
+   composer pins to the bottom with a gradient mask above it." The stack stops
+   being centred, because a conversation grows downward from the top. */
+.home[data-thread="true"] {
+  justify-content: flex-start;
+  padding-top: var(--space-6);
+}
+
+.home[data-thread="true"] .home-stack {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-6);
+  /* The gradient mask §7.2 names: the thread fades under the composer rather
+     than being cut off by it, so a half-line never reads as the end. */
+  /* `currentColor`, not a literal: a mask reads only the alpha channel, so
+     the colour is irrelevant and the token layer stays unbroken. */
+  mask-image: linear-gradient(to bottom, transparent 0, currentColor var(--space-4),
+                              currentColor calc(100% - var(--space-6)), transparent 100%);
+}
+
+.turn-row {
+  display: flex;
+  margin-bottom: var(--space-4);
+}
+
+.turn-row[data-who="you"] { justify-content: flex-end; }
+
+.bubble {
+  max-width: 82%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  color: var(--text-primary);
+}
+
+/* What the person said reads as theirs. */
+.turn-row[data-who="you"] .bubble {
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+/* The work block and the result table are tables, not sentences: they take
+   the width. */
+.bubble-wide { max-width: 100%; width: 100%; }
+
+/* A suggestion chip row and the work block are not messages and should not be
+   boxed like one — the work block brings its own card. */
+.bubble-bare {
+  max-width: 100%;
+  width: 100%;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/* §7.2's layout draws the work block across the thread, not shrunk to its
+   longest step. */
+.bubble-bare > .work { width: 100%; }
+
+.bubble-error { box-shadow: inset 0 0 0 var(--border-width) var(--danger); }
+
+.thread-said { margin: var(--space-1) 0 0; }
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--weight-medium);
+  word-break: break-all;
+}
+
+.source-chip .icon { flex: 0 0 auto; }
+
+.thread-note { margin: 0; color: var(--text-secondary); }
+
+/* §7.2: the hint sits under the composer while Brain works. */
+.thread-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* §7.2: "work block collapses → `Processed in 2m 14s · 6 steps`". The header
+   is the whole block once it is done — the steps are on the source's page,
+   and six resolved rows in a thread are six lines nobody re-reads. */
+.work[data-collapsed="true"] .work-steps { display: none; }
+
+/* §7.2's result table. */
+.result-table {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+}
+
+.result-row + .result-row {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.result-table + .btn-row { margin-top: var(--space-4); }
+
+@media (max-width: 719px) {
+  /* §12: "the thread composer sits above the keyboard". */
+  .home[data-thread="true"] { padding-top: var(--space-4); }
+  .bubble { max-width: 92%; }
+}

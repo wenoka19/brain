@@ -157,6 +157,10 @@ class VerifiedToken:
     scope: str
     audience: str
     expires_at: int
+    #: §7.11's connection — the OAuth session, or the key's own row. §7.10
+    #: attributes every call to one, because "revoking a key is only
+    #: meaningful once you can see what it did".
+    connection_id: str = ""
 
 
 class TokenRejected(Exception):
@@ -215,7 +219,64 @@ def verify_access_token(token: str, *, cfg: Settings | None = None) -> VerifiedT
         scope=str(claims.get("scope") or ""),
         audience=audience,
         expires_at=int(claims["exp"]),
+        # An OAuth session IS a connection, in §7.11's sense: the list shows
+        # it as `Signed in` rather than `Key`, and §7.10's rows attribute to
+        # it the same way.
+        connection_id=record["session_id"],
     )
+
+
+def verify_connection_key(key: str, *, cfg: Settings | None = None) -> VerifiedToken:
+    """§7.11's other entry point: a `sk-brain-…` key, from the URL or a header.
+
+    "One server. Two ways to authenticate. This is verified behaviour, not a
+    choice." A chat app's connector dialog has no header field, so the key
+    rides in the query string; an editor or an agent framework cannot run a
+    browser sign-in, so it sends a bearer. §7.11 requires both, and requires
+    them to meet in one validation function — which is this and
+    `verify_access_token`, reached through `verify_credential` below.
+
+    A key carries no expiry. It is not a session: it is a credential the
+    person pastes once and revokes when they are done with it, which is why
+    §7.11 puts `Roll the key` and `Revoke` in the list rather than relying on
+    a lifetime nobody chose.
+    """
+    cfg = cfg or settings()
+    conn = control_db.control()
+    record = control_db.connection_by_key(conn, key)
+    if record is None:
+        raise TokenRejected("unknown_key", "not a key this server issued")
+    if record["revoked"]:
+        raise TokenRejected("revoked")
+    if control_db.get_user(conn, record["user_id"]) is None:
+        raise TokenRejected("unknown_user")
+
+    control_db.touch_connection(conn, record["connection_id"])
+    return VerifiedToken(
+        user_id=record["user_id"],
+        session_id=record["connection_id"],
+        client_id="",
+        client_name=record["name"],
+        scope="brain.read brain.write",
+        audience=resource_identifier(cfg),
+        # A key does not expire, and `0` would read as "expired in 1970" to
+        # anything comparing it. An hour out keeps every consumer's arithmetic
+        # honest without inventing a lifetime the person never chose.
+        expires_at=int(time.time()) + 3600,
+        connection_id=record["connection_id"],
+    )
+
+
+def verify_credential(raw: str, *, cfg: Settings | None = None) -> VerifiedToken:
+    """The one door. A `sk-brain-…` string is a key; anything else is a JWT.
+
+    The prefix decides which half runs, so a key is never put through JWT
+    decoding (where it would fail with a misleading `invalid_token`) and a JWT
+    is never looked up as a key.
+    """
+    if raw.startswith(control_db.KEY_PREFIX):
+        return verify_connection_key(raw, cfg=cfg)
+    return verify_access_token(raw, cfg=cfg)
 
 
 def issue_grant(

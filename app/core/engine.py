@@ -15,6 +15,7 @@ import re
 import functools
 import json
 import math
+import os
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -2430,6 +2431,353 @@ _AUDIT_FALLBACK = {
     "clear_demo": "Cleared the demo library.",
     "omnibar_edit": "Edited a skill from the Omni-Bar.",
 }
+
+
+# ---------------------------------------------------------------------------
+# §7.2 HOME, the thread state
+# ---------------------------------------------------------------------------
+
+
+def op_add_instruction(ctx: Context, source_id: str, text: str) -> OpResult:
+    """§7.2's mid-flight interjection: "Actually keep the hiring bits too."
+
+    §7.2's hard requirements are the whole specification here: "The composer
+    is never disabled while Brain works", "an interjection is acknowledged
+    without restarting or stopping the pipeline", and "leaving the page does
+    not cancel anything". So this appends to the instruction and cancels
+    nothing.
+
+    What it returns is what makes the acknowledgement honest. §7.2's example
+    reply is *"Noted — I'll leave them in. Still on the summary, so nothing is
+    lost."* — a sentence that is only true if the summary has not been written
+    yet. So the steps that have not yet run come back, and the frame says what
+    the note will actually reach rather than reassuring the person either way.
+    """
+    text = clean_text(text)[:600]
+    if not text:
+        return _fail("add_instruction", "empty_text", "Say what you want changed.")
+
+    job = control_db.latest_job_for_source(ctx.control, ctx.user_id, source_id)
+    if job is None:
+        return _fail("add_instruction", "not_found", "Brain is not working on that one.")
+
+    steps = control_db.job_steps(ctx.control, job["job_id"])
+    pending = [step["step"] for step in steps if step["state"] == "pending"]
+    done = [step["step"] for step in steps if step["state"] in ("done", "skipped", "failed")]
+
+    if not pending:
+        # Nothing is left to read it. Saying "noted" here would be a lie the
+        # person finds out about when the result does not change.
+        ctx.audit("add_instruction", "too_late", target_id=source_id)
+        return _fail(
+            "add_instruction",
+            "too_late",
+            "That one is finished, so this cannot change it. Add the source again "
+            "with the new instruction, or edit what came out of it.",
+        )
+
+    instruction = control_db.append_user_note(ctx.control, job["job_id"], text)
+    ctx.audit("add_instruction", "ok", target_id=source_id, detail={"pending": pending})
+    return OpResult(
+        ok=True,
+        action="add_instruction",
+        data={
+            "source_id": source_id,
+            "job_id": job["job_id"],
+            "instruction": instruction,
+            # What the note will reach, and what it is too late for.
+            "will_affect": [control_db.STEP_LABELS.get(step, step) for step in pending],
+            "already_done": [control_db.STEP_LABELS.get(step, step) for step in done],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# §7.10 ACTIVITY and §7.11 CONNECTIONS
+# ---------------------------------------------------------------------------
+
+
+def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
+    """§7.10's two sections, because they answer two questions.
+
+    **Usage** — meters read from the numbers this product actually enforces,
+    not from the capture's illustrative ones. §7.10 shows `Calls 1,284 of
+    5,000` and `Storage 2.1 GB of 10 GB`; neither cap exists here. What is
+    enforced is `quota_files`, `quota_media_minutes`, and a per-minute call
+    ceiling — so those three carry a meter, and storage is reported as a
+    figure with no bar. A meter against a number nothing checks is decoration,
+    and §6 rule 11's whole argument is that a control which cannot keep its
+    promise should say so instead.
+
+    **`OPEN-4`** is left for the founder: whether to introduce a monthly call
+    allowance and a storage cap (and then meter them), or keep the page
+    honest about having neither.
+
+    **Calls** — the MCP log. A row is a call a *connection* made, which is
+    what `connection_id` marks: the operations also write their own audit
+    rows (§2's internal trail) and those are not calls. §7.10 calls the
+    connection column "the link to §7.11", because "revoking a key is only
+    meaningful once you can see what it did".
+    """
+    refusal = _person_only(
+        ctx,
+        "activity",
+        "The activity log is the person's own view of what their agents did.",
+    )
+    if refusal:
+        return refusal
+
+    user = control_db.get_user(ctx.control, ctx.user_id) or {}
+    counts = tenant_db.counts(ctx.tenant)
+    path = ctx.cfg.tenant_db_path(ctx.user_id)
+    stored = path.stat().st_size if path.exists() else 0
+
+    calls = [
+        {
+            "id": row["id"],
+            "at": row["created_at"],
+            "connection": row["client_name"] or "Unknown",
+            "connection_id": row["connection_id"],
+            "tool": row["action"],
+            "target": row["target_id"] or "",
+            "latency_ms": row["latency_ms"],
+            "payload_bytes": row["payload_bytes"],
+            "status": row["status"],
+            "ok": row["status"] == "ok",
+            "asked_for": row["detail"],
+            "returned": row["result_summary"],
+            # §7.10: "A failure says what to do."
+            "remedy": _REMEDY_FOR.get(row["status"], ""),
+        }
+        for row in control_db.recent_calls(ctx.control, ctx.user_id, limit=limit)
+    ]
+
+    ctx.audit("activity", "ok", detail={"calls": len(calls)})
+    return OpResult(
+        ok=True,
+        action="activity",
+        data={
+            "usage": {
+                "sources": {
+                    "label": "Sources",
+                    "used": counts["sources"],
+                    "cap": ctx.cfg.quota_files,
+                    "unit": "count",
+                },
+                "minutes": {
+                    "label": "Minutes of media",
+                    "used": user.get("media_minutes_used", 0),
+                    "cap": ctx.cfg.quota_media_minutes,
+                    "unit": "minutes",
+                },
+                "calls": {
+                    "label": "Calls a minute",
+                    "used": control_db.calls_in_last_minute(ctx.control, ctx.user_id),
+                    "cap": ctx.cfg.tool_calls_per_min,
+                    "unit": "rate",
+                },
+                # No cap is enforced on storage, so it carries none. See
+                # `OPEN-4` above.
+                "storage": {"label": "Stored", "used": stored, "cap": None, "unit": "bytes"},
+            },
+            "calls": calls,
+        },
+    )
+
+
+#: §7.10: "A failure says what to do: `Token expired. Reconnect ChatGPT to
+#: resume.`" Keyed on the status the gate recorded, so the sentence cannot
+#: drift from the reason.
+_REMEDY_FOR = {
+    "token_expired": "Reconnect this app to resume.",
+    "revoked": "This connection's key was revoked. Generate a new link.",
+    "unknown_key": "That key is not one Brain issued. Generate a new link.",
+    "unknown_user": "That account no longer exists.",
+    "rate_limited": "Too many calls in a minute. It will resume on its own.",
+    "loop_detected": "The same call was repeated — Brain stopped it. Nothing to fix.",
+    "error": "Brain hit an internal error. Nothing you can fix.",
+}
+
+
+def op_list_connections(ctx: Context) -> OpResult:
+    """§7.11's list: one server, two ways in, one page.
+
+    An OAuth session and a key are both connections — "name · `Signed in` or
+    `Key`" — so they arrive as one list rather than two sections the person
+    has to reconcile.
+    """
+    refusal = _person_only(
+        ctx,
+        "list_connections",
+        "Connections are the person's own keys. An agent cannot enumerate them.",
+    )
+    if refusal:
+        return refusal
+
+    items: list[dict[str, Any]] = []
+    for row in control_db.list_connections(ctx.control, ctx.user_id):
+        items.append(
+            {
+                "id": row["connection_id"],
+                "name": row["name"],
+                "how": "Key",
+                "key_prefix": row["key_prefix"],
+                "last_call_at": row["last_call_at"],
+                "created_at": row["created_at"],
+                "revoked": bool(row["revoked"]),
+            }
+        )
+    for row in control_db.list_sessions(ctx.control, ctx.user_id):
+        items.append(
+            {
+                "id": row["session_id"],
+                "name": row["client_name"] or "An AI app",
+                "how": "Signed in",
+                "key_prefix": "",
+                "last_call_at": None,
+                "created_at": row["created_at"],
+                "revoked": bool(row["revoked"]),
+            }
+        )
+    items.sort(key=lambda item: item["created_at"], reverse=True)
+
+    live = [item for item in items if not item["revoked"]]
+    ctx.audit("list_connections", "ok", detail={"count": len(live)})
+    return OpResult(
+        ok=True,
+        action="list_connections",
+        data={
+            "connections": items,
+            # §7.11: the `Connected` section and its sentence about revocation
+            # "do not render while the list is empty — that sentence means
+            # nothing before there is anything to revoke".
+            "connected": bool(live),
+            "mcp_path": "/mcp",
+        },
+    )
+
+
+def op_create_connection(ctx: Context, name: str = "My AI") -> OpResult:
+    """§7.11's `Generate my link`.
+
+    The key comes back in plaintext exactly once, in this response. Nothing
+    stores it (§2 rule 4 — only the SHA-256 digest), so there is no second
+    chance to read it, and the frame is the only place it ever exists.
+    """
+    refusal = _person_only(
+        ctx,
+        "create_connection",
+        "Only the person issues a key to their own Brain.",
+    )
+    if refusal:
+        return refusal
+
+    row, key = control_db.create_connection(
+        ctx.control, ctx.user_id, name=clean_text(name)[:120] or "My AI"
+    )
+    ctx.audit("create_connection", "ok", target_id=row["connection_id"])
+    return OpResult(
+        ok=True,
+        action="create_connection",
+        data={
+            "connection": {
+                "id": row["connection_id"],
+                "name": row["name"],
+                "how": "Key",
+                "key_prefix": row["key_prefix"],
+                "last_call_at": None,
+                "created_at": row["created_at"],
+                "revoked": False,
+            },
+            # §7.11: "One link, pasted once, nothing else to copy."
+            "key": key,
+            "link": f"{_public_base(ctx.cfg)}/mcp?key={key}",
+        },
+    )
+
+
+def _public_base(cfg: Settings) -> str:
+    """The address the person pastes into their AI, not the one this process
+    happens to be bound to.
+
+    Imported here rather than at module scope: `app.auth` imports the engine's
+    database layer, and a top-level import would close the circle.
+    """
+    from app import auth
+
+    return (os.environ.get("BRAIN_PUBLIC_URL") or auth.issuer(cfg)).rstrip("/")
+
+
+def op_rename_connection(ctx: Context, connection_id: str, name: str) -> OpResult:
+    refusal = _person_only(ctx, "rename_connection", "Only the person names their connections.")
+    if refusal:
+        return refusal
+    name = clean_text(name)[:120]
+    if not name:
+        return _fail("rename_connection", "empty_name", "A connection needs a name.")
+    if not _owns_connection(ctx, connection_id):
+        return _fail("rename_connection", "not_found", "No such connection.")
+    control_db.rename_connection(ctx.control, connection_id, name)
+    ctx.audit("rename_connection", "ok", target_id=connection_id)
+    return OpResult(ok=True, action="rename_connection", data={"id": connection_id, "name": name})
+
+
+def op_roll_connection_key(ctx: Context, connection_id: str) -> OpResult:
+    """§7.11's `Roll the key`. The old key stops working immediately.
+
+    The connection keeps its name and its history, so §7.10's log still reads
+    continuously across the roll — which is the whole reason this is not
+    "revoke and make a new one".
+    """
+    refusal = _person_only(ctx, "roll_connection_key", "Only the person rolls their own key.")
+    if refusal:
+        return refusal
+    if not _owns_connection(ctx, connection_id):
+        return _fail("roll_connection_key", "not_found", "No such connection.")
+
+    key = control_db.roll_connection_key(ctx.control, connection_id)
+    ctx.audit("roll_connection_key", "ok", target_id=connection_id)
+    return OpResult(
+        ok=True,
+        action="roll_connection_key",
+        data={
+            "id": connection_id,
+            "key": key,
+            "link": f"{_public_base(ctx.cfg)}/mcp?key={key}",
+        },
+    )
+
+
+def op_revoke_connection(ctx: Context, connection_id: str) -> OpResult:
+    """§7.11: "One credential per connection. Revoking one leaves the others
+    working." An OAuth session is revoked through its own door."""
+    refusal = _person_only(ctx, "revoke_connection", "Only the person revokes their own keys.")
+    if refusal:
+        return refusal
+
+    if _owns_connection(ctx, connection_id):
+        control_db.revoke_connection(ctx.control, connection_id)
+    elif any(
+        row["session_id"] == connection_id
+        for row in control_db.list_sessions(ctx.control, ctx.user_id)
+    ):
+        control_db.revoke_session(ctx.control, connection_id)
+    else:
+        return _fail("revoke_connection", "not_found", "No such connection.")
+
+    ctx.audit("revoke_connection", "ok", target_id=connection_id)
+    return OpResult(ok=True, action="revoke_connection", data={"id": connection_id})
+
+
+def _owns_connection(ctx: Context, connection_id: str) -> bool:
+    """Tenant isolation, at the one place a connection id arrives from input.
+
+    `get_connection` takes an id and would happily return another person's
+    row; §2's "tenant SQLite paths are resolved strictly from the verified
+    `user_id`" is the same rule, and this is its equivalent here.
+    """
+    record = control_db.get_connection(ctx.control, connection_id)
+    return bool(record and record["user_id"] == ctx.user_id)
 
 
 def op_audit_log(ctx: Context, *, limit: int = 40, include_reads: bool = False) -> OpResult:

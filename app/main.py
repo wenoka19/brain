@@ -14,7 +14,8 @@ import asyncio
 import contextlib
 import logging
 import os
-from urllib.parse import urlsplit
+import re
+from urllib.parse import parse_qs, urlencode, urlsplit
 from typing import AsyncIterator
 
 from fastapi import FastAPI
@@ -174,6 +175,114 @@ class StreamPassthroughMiddleware(BaseHTTPMiddleware):
             for header, value in STREAM_HEADERS.items():
                 response.headers[header] = value
         return response
+
+
+class RedactKeyFilter(logging.Filter):
+    """Keep §7.11's URL key out of the access log.
+
+    This is the cost of the design §7.11 chose, and the design is right about
+    why: a chat app's connector dialog has no header field, so the key has to
+    ride in the URL for the product to be usable without a terminal. But a
+    credential in a query string is a credential in every access log, and
+    `UrlKeyMiddleware` cannot help — uvicorn writes its line from the raw
+    request at the protocol layer, *before* any ASGI middleware runs, so by
+    the time the scope is rewritten the secret has already been printed.
+
+    So it is redacted here instead, on the record. The path still says
+    `?key=…`, which is what a log is for — you can see a key was used, and
+    §7.10 tells you which connection used it — without the log being a list
+    of working credentials.
+
+    Installed on `uvicorn.access` and on the root logger, because how this
+    process is started (uvicorn CLI, gunicorn, a platform's own runner)
+    decides which one formats the line.
+    """
+
+    #: `key=` up to the next delimiter, in a request line or a bare URL.
+    _KEY = re.compile(r"(key=)([^&\s\"']+)")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            args = record.args
+            if isinstance(args, tuple):
+                record.args = tuple(
+                    self._KEY.sub(r"\1[redacted]", item) if isinstance(item, str) else item
+                    for item in args
+                )
+            elif isinstance(args, dict):
+                record.args = {
+                    name: self._KEY.sub(r"\1[redacted]", item) if isinstance(item, str) else item
+                    for name, item in args.items()
+                }
+        if isinstance(record.msg, str) and "key=" in record.msg:
+            record.msg = self._KEY.sub(r"\1[redacted]", record.msg)
+        return True
+
+
+def install_key_redaction() -> None:
+    """Idempotent, and called before the app can serve a request."""
+    for name in ("uvicorn.access", "gunicorn.access", ""):
+        logger = logging.getLogger(name)
+        if not any(isinstance(existing, RedactKeyFilter) for existing in logger.filters):
+            logger.addFilter(RedactKeyFilter())
+        # A filter on a logger does not run for records that reach it through
+        # a handler attached higher up, so the handlers get it too.
+        for handler in logger.handlers:
+            if not any(isinstance(existing, RedactKeyFilter) for existing in handler.filters):
+                handler.addFilter(RedactKeyFilter())
+
+
+class UrlKeyMiddleware:
+    """§7.11's first entry point: `…/mcp?key=sk-brain-…`.
+
+    "Chat apps accept only OAuth or no auth in their custom connector dialog.
+    There is no header field." So the key travels in the URL, and this lifts
+    it into the `Authorization` header that the transport's own verifier
+    reads — which is what keeps §7.11's "two entry points, one validation
+    function" literally true: nothing downstream of here knows which door the
+    credential came through.
+
+    Written as pure ASGI rather than `BaseHTTPMiddleware` because the header
+    has to be in place before the transport's auth middleware runs, and
+    because `BaseHTTPMiddleware` buffers — which is the one thing
+    `StreamPassthroughMiddleware` above exists to prevent.
+
+    A real `Authorization` header always wins: a client that sends one is not
+    guessing, and silently preferring a query parameter over it would make a
+    pasted stale link override a correctly configured header.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        query = scope.get("query_string") or b""
+        if b"key=" in query and not _has_authorization(scope):
+            key = parse_qs(query.decode("latin-1")).get("key", [""])[0].strip()
+            if key.startswith(control_db.KEY_PREFIX):
+                scope = dict(scope)
+                scope["headers"] = [
+                    *[(k, v) for k, v in scope["headers"] if k.lower() != b"authorization"],
+                    (b"authorization", f"Bearer {key}".encode("latin-1")),
+                ]
+                # The key must not survive into anything that logs a path.
+                # Access logs, error reports and `request.url` all read these.
+                scope["query_string"] = urlencode(
+                    [
+                        (name, value)
+                        for name, values in parse_qs(query.decode("latin-1")).items()
+                        for value in values
+                        if name != "key"
+                    ]
+                ).encode("latin-1")
+        await self.app(scope, receive, send)
+
+
+def _has_authorization(scope) -> bool:
+    return any(name.lower() == b"authorization" for name, _ in scope.get("headers") or [])
 
 
 def allowed_origins(cfg: Settings | None = None) -> list[str]:
@@ -384,11 +493,15 @@ def transport_security(cfg: Settings | None = None) -> TransportSecuritySettings
 def create_app(cfg: Settings | None = None) -> FastAPI:
     cfg = cfg or settings()
     cfg.ensure_dirs()
+    # Before anything can serve a request carrying §7.11's URL key.
+    install_key_redaction()
     streamable = mcp_server(cfg).streamable_http_app(
         streamable_http_path="/mcp",
         transport_security=transport_security(cfg),
     )
-    mounted = OriginPolicyMiddleware(streamable, allowed_origins(cfg))
+    # §7.11's URL key is lifted into the header first, so the Origin policy
+    # and the transport's own verifier both see an ordinary bearer request.
+    mounted = UrlKeyMiddleware(OriginPolicyMiddleware(streamable, allowed_origins(cfg)))
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

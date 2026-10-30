@@ -17,6 +17,7 @@ they say when to reach for the tool and what it will *not* do.
 from __future__ import annotations
 
 import inspect
+import time
 from typing import Any, Literal, Optional
 
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -59,7 +60,12 @@ class BrainTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
-            verified = auth.verify_access_token(token)
+            # §7.11's one validation function: a `sk-brain-…` key or a JWT,
+            # whichever this connection uses. By the time a request reaches
+            # here a URL key has already been lifted into the header, so
+            # neither this nor anything downstream knows which door it came
+            # through.
+            verified = auth.verify_credential(token)
         except auth.TokenRejected:
             return None
         return AccessToken(
@@ -69,7 +75,11 @@ class BrainTokenVerifier(TokenVerifier):
             expires_at=verified.expires_at,
             resource=verified.audience,
             subject=verified.user_id,
-            claims={"sid": verified.session_id, "client_name": verified.client_name},
+            claims={
+                "sid": verified.session_id,
+                "client_name": verified.client_name,
+                "connection_id": verified.connection_id,
+            },
         )
 
 
@@ -77,13 +87,21 @@ class NotAuthenticated(Exception):
     pass
 
 
-def current_identity() -> tuple[str, str]:
-    """`(user_id, client_name)` for the in-flight request."""
+def current_identity() -> tuple[str, str, str]:
+    """`(user_id, client_name, connection_id)` for the in-flight request.
+
+    The connection id is what makes §7.10's log a log of *calls*: "the
+    connection column is the link to §7.11", because revoking a key is only
+    meaningful once you can see what it did. For an OAuth client it is the
+    session; for a key it is the connection that key belongs to.
+    """
     access = get_access_token()
     if access is None or not access.subject:
         raise NotAuthenticated("No authenticated user on this request.")
-    client_name = str((access.claims or {}).get("client_name") or "mcp_client")
-    return access.subject, client_name
+    claims = access.claims or {}
+    client_name = str(claims.get("client_name") or "mcp_client")
+    connection_id = str(claims.get("connection_id") or claims.get("sid") or "")
+    return access.subject, client_name, connection_id
 
 
 # ===========================================================================
@@ -100,7 +118,7 @@ def _run_tool(
 ) -> str:
     cfg = cfg or settings()
     try:
-        user_id, client_name = current_identity()
+        user_id, client_name, connection_id = current_identity()
     except NotAuthenticated:
         return (
             "⚠️ **Not connected** — this request carried no valid `brain` access token.\n"
@@ -108,23 +126,40 @@ def _run_tool(
             "their client's connector settings. Do not retry."
         )
 
-    decision = ratelimit.limiter().check(
-        user_id, tool_name, arguments, is_ingestion=is_ingestion
-    )
-    if not decision.allowed:
+    # §7.10's row is written here, at the one gate every tool call passes
+    # through, because this is the only place that knows all of it: the
+    # arguments going in, how long it took, and how much came back. The
+    # operations keep writing their own rows — that is §2's internal trail —
+    # and a row with a `connection_id` is a call a connection made.
+    started = time.perf_counter()
+
+    def log(status: str, *, summary: str = "", payload: int | None = None) -> None:
         control_db.audit(
             control_db.control(),
             user_id=user_id,
             action=tool_name,
-            status=decision.reason,
+            status=status,
             surface="mcp",
             client_name=client_name,
+            connection_id=connection_id,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            payload_bytes=payload,
+            result_summary=summary,
+            # §7.10's expansion opens with `Asked for`.
+            detail=arguments,
         )
+
+    decision = ratelimit.limiter().check(
+        user_id, tool_name, arguments, is_ingestion=is_ingestion
+    )
+    if not decision.allowed:
+        log(decision.reason, summary="Refused before it ran.")
         return F.circuit_breaker(decision)
 
     try:
         ctx = E.build_context(user_id, client_name=client_name, surface="mcp", cfg=cfg)
     except ValueError:
+        log("unknown_user", summary="That token's account no longer exists.")
         return (
             "⚠️ **Account not found** — this token's user no longer exists.\n"
             f"{F.HINT} Tell the user to reconnect `brain` in their client's connector "
@@ -135,13 +170,63 @@ def _run_tool(
         result = operation(ctx)
     except Exception as exc:  # a tool must never return a stack trace to an LLM
         ctx.audit(tool_name, "error", detail={"error": type(exc).__name__})
+        log("error", summary=f"Internal error ({type(exc).__name__}).")
         return (
             f"⚠️ **{tool_name} failed** — an internal error occurred "
             f"({type(exc).__name__}).\n"
             f"{F.HINT} Do not retry this call. Tell the user brain hit an internal error "
             "and continue with what you already have."
         )
-    return renderer(result)
+
+    rendered = renderer(result)
+    log(
+        "ok" if getattr(result, "ok", True) else (getattr(result, "error_reason", "") or "failed"),
+        summary=_what_came_back(tool_name, result),
+        # What the agent actually received, which is what §7.10's `Payload`
+        # means to the person reading the log.
+        payload=len(rendered.encode("utf-8")),
+    )
+    return rendered
+
+
+def _what_came_back(tool_name: str, result: Any) -> str:
+    """§7.10's one-line `Returned` — "3 rules returned", not a JSON blob.
+
+    Derived from the result rather than stored by every operation: the log is
+    a reading surface, and what belongs on it is a sentence.
+    """
+    if not getattr(result, "ok", True):
+        return getattr(result, "error_message", "") or "Refused."
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return ""
+
+    def count(*keys: str) -> int:
+        return sum(len(data[key]) for key in keys if isinstance(data.get(key), list))
+
+    if tool_name == "search":
+        claims, skills = count("claims"), count("skills")
+        parts = []
+        if claims:
+            parts.append(f"{claims} rule{'s' if claims != 1 else ''}")
+        if skills:
+            parts.append(f"{skills} skill{'s' if skills != 1 else ''}")
+        return f"{' and '.join(parts)} returned" if parts else "Nothing matched"
+    if tool_name == "fetch":
+        return "One record returned"
+    if tool_name == "ingest_source":
+        return "Queued" if data.get("job_id") else "Already in the library"
+    if tool_name == "get_ingest_status":
+        return f"{count('jobs')} job{'s' if count('jobs') != 1 else ''} reported"
+    if tool_name == "remember_this":
+        return "Rule saved"
+    if tool_name == "get_or_synthesize_skill":
+        return "Saved skill returned" if data.get("origin") == "saved" else "Draft synthesized"
+    if tool_name == "save_skill":
+        return "Skill saved"
+    if tool_name == "archive_item":
+        return "Set aside" if data.get("changed") else "Already set aside"
+    return ""
 
 
 # ===========================================================================

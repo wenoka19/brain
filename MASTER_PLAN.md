@@ -1147,8 +1147,8 @@ A fixed bottom composer adds `env(safe-area-inset-bottom)` to its own padding.
 |---|---|---|
 | ~~OPEN-1~~ | **CLOSED 29 Oct 2026 by two rulings.** Dark is specified and built. **Warm sunset is dropped** — this app has two themes (`R-10`). The palette was derived, not picked: the light theme's opacity ladder inverted over the dark surfaces this repository already shipped and audited in phase 7, then measured against §14.4 before being written down — 19 checks, zero failures | closed |
 | OPEN-2 | Identity check for deletion: emailed code, password, or neither | §9.4 |
-| OPEN-3 | Does Home keep a thread history in the sidebar, or does each thread resolve into its source? | §7.2 |
-| OPEN-4 | Plan limits — the numbers in §7.10 are placeholders | Activity, billing |
+| ~~OPEN-3~~ | **CLOSED 30 Oct 2026 by §7.2's own text.** Its last hard requirement already answers it: *"Reopening Home later returns to the empty state. The thread is reachable from the source it produced."* So each thread resolves into its source, there is no history in the sidebar, and the thread is not persisted anywhere — the source's own page is the record | closed |
+| OPEN-4 | Plan limits — the numbers in §7.10 are placeholders. **Built as the real ones**: §7.10's `Calls 1,284 of 5,000` and `2.1 GB of 10 GB` meter caps this product does not enforce, so the page meters `quota_files`, `quota_media_minutes` and the per-minute call ceiling, and reports storage as a figure with no bar. Introduce the two caps and they get bars; leave them and the page stays honest | Activity, billing |
 | OPEN-5 | Audio retention is stated as 30 days on the transcript page; confirm | legal copy |
 | ~~OPEN-6~~ | **RULED 29 Oct 2026.** §2.2's values could not satisfy §14.4. Four tokens raised to the smallest values that clear the bar, two left below it deliberately. See `R-5` | closed |
 
@@ -1657,9 +1657,9 @@ Everything in `STACK_AUDIT.md` §9.2 is **approved** and is being built.
 |---|---|---|
 | 1 — tokens | §2 | **built**, two themes, `tokens.css`, 122 tests |
 | 2 — atoms | §3 | **built**, all thirteen, `atoms.css` |
-| 3 — molecules | §4 | **built**, ten plus three the frames need, `molecules.css` |
+| 3 — molecules | §4 | **built**, ten plus four the frames need, `molecules.css` |
 | 4 — template and router | §5, §12 | **built**, fourteen routes, `shell.html` + `frames.js` + `frames.css` |
-| 4 — frames | §7 | §7.1 built; the other thirteen hold their route and say so |
+| 4 — frames | §7 | **all fourteen built**, every control wired, every one rendered in a browser |
 
 The surface is mounted at **`/next`** while the shipped control plane still
 owns `/`. It is gated exactly like `/preview`: on in tests, on with

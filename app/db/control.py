@@ -126,6 +126,26 @@ CREATE TABLE IF NOT EXISTS oauth_auth_codes (
     created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- §7.11. "One server. Two ways to authenticate. This is verified behaviour,
+-- not a choice." A chat app's connector dialog has no header field, so the
+-- key rides in the URL; an editor or an agent framework cannot run a browser
+-- sign-in, so it sends a bearer. Both arrive at one validation function.
+--
+-- Only the SHA-256 digest is stored (§2 rule 4), so a stolen database yields
+-- no working key. `key_prefix` is the first few characters, kept so the list
+-- can show which key a row is without being able to reconstruct it.
+CREATE TABLE IF NOT EXISTS connections (
+    connection_id TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name          TEXT NOT NULL DEFAULT 'My AI',
+    key_hash      TEXT UNIQUE NOT NULL,
+    key_prefix    TEXT NOT NULL DEFAULT '',
+    last_call_at  DATETIME,
+    revoked       INTEGER NOT NULL DEFAULT 0,
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_connections_user ON connections(user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id       TEXT PRIMARY KEY,
     client_name     TEXT NOT NULL DEFAULT 'mcp_client',
@@ -598,6 +618,116 @@ def list_sessions(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# §7.11 connections — the key half
+# ---------------------------------------------------------------------------
+#: §7.11's own example: `https://brain.app/mcp?key=sk-brain-7Qd2xV9mTb4f2a`.
+KEY_PREFIX = "sk-brain-"
+
+
+def new_connection_key() -> str:
+    """A key with enough entropy that guessing is not a strategy.
+
+    `token_urlsafe(24)` is 192 bits. The prefix is there so that a key found
+    in a log or a pasted URL is recognisable as this product's — which is what
+    makes a leaked one reportable.
+    """
+    return f"{KEY_PREFIX}{secrets.token_urlsafe(24)}"
+
+
+def create_connection(
+    conn: sqlite3.Connection, user_id: str, *, name: str = "My AI"
+) -> tuple[dict[str, Any], str]:
+    """Return the row and **the key in plaintext, once**.
+
+    The caller shows it to the person and forgets it. Nothing stores it: only
+    the digest is written, so there is no second chance to read it and no way
+    for a stolen database to yield a working key.
+    """
+    key = new_connection_key()
+    connection_id = new_id("con")
+    conn.execute(
+        "INSERT INTO connections (connection_id, user_id, name, key_hash, key_prefix) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (connection_id, user_id, (name or "My AI")[:120], hash_token(key), key[:16]),
+    )
+    return get_connection(conn, connection_id), key  # type: ignore[return-value]
+
+
+def get_connection(conn: sqlite3.Connection, connection_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM connections WHERE connection_id = ?", (connection_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def connection_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
+    """Resolve a presented key to its connection, by digest.
+
+    The lookup is on the hash, so the plaintext is never compared against
+    anything stored and never has to be.
+    """
+    if not key:
+        return None
+    row = conn.execute(
+        "SELECT * FROM connections WHERE key_hash = ?", (hash_token(key),)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_connections(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM connections WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def touch_connection(conn: sqlite3.Connection, connection_id: str) -> None:
+    """§7.11's `last call …` column, and §7.10's reason for existing: "revoking
+    a key is only meaningful once you can see what it did"."""
+    conn.execute(
+        "UPDATE connections SET last_call_at = CURRENT_TIMESTAMP WHERE connection_id = ?",
+        (connection_id,),
+    )
+
+
+def rename_connection(conn: sqlite3.Connection, connection_id: str, name: str) -> bool:
+    cur = conn.execute(
+        "UPDATE connections SET name = ? WHERE connection_id = ?",
+        ((name or "")[:120], connection_id),
+    )
+    return cur.rowcount > 0
+
+
+def roll_connection_key(conn: sqlite3.Connection, connection_id: str) -> str | None:
+    """§7.11's `Roll the key`: the same connection, a new credential.
+
+    The old digest is overwritten, so the previous key stops working the
+    instant this returns — which is the point. The connection keeps its name
+    and its history, so §7.10's log still reads continuously across the roll.
+    """
+    if get_connection(conn, connection_id) is None:
+        return None
+    key = new_connection_key()
+    conn.execute(
+        "UPDATE connections SET key_hash = ?, key_prefix = ?, revoked = 0 "
+        "WHERE connection_id = ?",
+        (hash_token(key), key[:16], connection_id),
+    )
+    return key
+
+
+def revoke_connection(conn: sqlite3.Connection, connection_id: str) -> bool:
+    """§7.11: "One credential per connection. Revoking one leaves the others
+    working." """
+    cur = conn.execute(
+        "UPDATE connections SET revoked = 1 WHERE connection_id = ? AND revoked = 0",
+        (connection_id,),
+    )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
 # ingestion jobs
 # ---------------------------------------------------------------------------
 #: The pipeline, as the person sees it (§9.1). Fixed, ordered, and the same six
@@ -665,6 +795,29 @@ def create_job(
     # to show at all.
     seed_job_steps(conn, job_id)
     return get_job(conn, job_id)  # type: ignore[return-value]
+
+
+def append_user_note(conn: sqlite3.Connection, job_id: str, text: str) -> str:
+    """§7.2's interjection, added to the instruction the pipeline reads.
+
+    "An interjection is acknowledged without restarting or stopping the
+    pipeline." Nothing is cancelled and no step is rewound: the note is
+    appended, and every step that has not yet read the instruction will read
+    the new one. Which steps those are is what makes the acknowledgement
+    honest rather than reassuring — see `op_add_instruction`.
+
+    Returns the instruction as it now stands.
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        return ""
+    joined = " ".join(part for part in (job["user_note"], text.strip()) if part)[:2000]
+    conn.execute(
+        "UPDATE ingestion_jobs SET user_note = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE job_id = ?",
+        (joined, job_id),
+    )
+    return joined
 
 
 def get_job(conn: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
@@ -921,6 +1074,40 @@ def audit(
             (connection_id or "")[:64],
         ),
     )
+
+
+def recent_calls(
+    conn: sqlite3.Connection, user_id: str, *, limit: int = 60
+) -> list[dict[str, Any]]:
+    """§7.10's `Calls` — the MCP log, and only it.
+
+    A row with a `connection_id` is a call a connection made. The operations
+    write their own rows too (§2's internal trail: every tool call is logged
+    with its action, target and status), and those are steps inside a call
+    rather than calls — listing them would make one `search` read as five
+    lines and the log unreadable, which is the opposite of §7.10's purpose.
+    """
+    rows = conn.execute(
+        "SELECT * FROM audit_logs WHERE user_id = ? AND connection_id != '' "
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, max(1, min(limit, 200))),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def calls_in_last_minute(conn: sqlite3.Connection, user_id: str) -> int:
+    """§7.10's `Calls a minute` meter, against the ceiling the limiter keeps.
+
+    Counted from the log rather than from the limiter's own window: the
+    limiter is per-process in-memory state, and the page has to be right
+    behind more than one uvicorn worker.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM audit_logs WHERE user_id = ? AND connection_id != '' "
+        "AND created_at >= datetime('now', '-60 seconds')",
+        (user_id,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def recent_audit(conn: sqlite3.Connection, user_id: str, limit: int = 20) -> list[dict[str, Any]]:

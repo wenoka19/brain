@@ -355,13 +355,52 @@ class TestWebApiSurface:
         assert claim["deep_link"]
         assert claim["tensions"] and claim["tensions"][0]["other_anchor_quote"]
 
-    def test_search_is_rate_limited_like_the_mcp_surface(self, signed_in, cfg):
+    def test_the_web_is_bounded_too_but_by_its_own_ceiling(self, signed_in, cfg):
+        """It used to spend the **agent's** budget, and that was a defect.
+
+        §2's `max 30 tool calls/min` has a subject: an agent in a runaway
+        loop. A browser is not that and does not spend it the same way —
+        every frame reads `/api/counts` plus its own list, so clicking
+        through the app for a minute could lock the person out of their own
+        library, with a message written for an LLM ("pause for 3s before
+        calling brain again"). Caught by a screenshot of the Connections
+        page, which rendered that sentence as the page.
+
+        The web now has its own window. It is still a window.
+        """
         signed_in.post("/api/demo/seed", json={})
-        statuses = {
-            signed_in.get(f"/api/search?q=batch+{index}").status_code
-            for index in range(cfg.tool_calls_per_min + 4)
-        }
-        assert 429 in statuses
+        assert cfg.web_requests_per_min > cfg.tool_calls_per_min
+
+        # Well past the agent's ceiling, and still served.
+        for index in range(cfg.tool_calls_per_min + 10):
+            assert signed_in.get(f"/api/search?q=batch+{index}").status_code == 200
+
+    def test_the_refusal_is_written_for_a_person(self, signed_in, cfg, monkeypatch):
+        """The limiter's own sentences are written for a host LLM, which is
+        right on `/mcp` and nonsense on a page someone is looking at.
+
+        The ceiling is lowered for this test rather than driven to the real
+        one: 240 HTTP round trips to read one sentence is a slow test and
+        proves nothing the fifth request does not.
+        """
+        from app.security import ratelimit
+
+        # `Settings` is frozen, so the limiter is replaced rather than the
+        # number it reads.
+        monkeypatch.setattr(
+            ratelimit, "_limiter", ratelimit.RateLimiter(web_requests_per_min=3)
+        )
+
+        said = ""
+        for index in range(6):
+            response = signed_in.get(f"/api/search?q=flood+{index}")
+            if response.status_code == 429:
+                said = response.json()["message"]
+                break
+        assert said, "the ceiling was never reached"
+        assert "calling brain" not in said
+        assert "tell the user" not in said
+        assert said == "That was a lot of requests at once. Give it a few seconds and try again."
 
     def test_the_omnibar_plans_and_runs_in_two_separate_calls(self, signed_in):
         signed_in.post("/api/demo/seed", json={})

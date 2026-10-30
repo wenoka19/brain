@@ -102,6 +102,11 @@ class Settings:
     # ---- anti-abuse -------------------------------------------------------
     tool_calls_per_min: int = 30
     ingestions_per_min: int = 10
+    #: The web surface's own ceiling. §2's 30/min is for agents; a browser
+    #: spends two reads per navigation, so sharing that budget turned normal
+    #: use of the product into a 429. Still a ceiling — four a second, which
+    #: no person clicking produces and a script would exceed at once.
+    web_requests_per_min: int = 240
     duplicate_call_window_sec: float = 15.0
 
     # ---- ingestion caps ---------------------------------------------------

@@ -1100,3 +1100,71 @@ previously unreachable only in the sense that no MCP tool wrapped it; §2's
 §7.2 (Home's thread state), §7.10 Activity and §7.11 Connections. The last two
 need the approved §9.2 rows: four columns on `audit_logs`, and a `connections`
 entity accepting `?key=` in the same validation function.
+
+---
+
+## Phase 9 — THE LAST THREE FRAMES
+
+§7.2, §7.10 and §7.11 — and the two rows of `STACK_AUDIT.md` §9.2 they
+needed, which were the last unbuilt items on the approved list.
+
+### §7.10 Activity
+
+Four columns on `audit_logs`, written at `_run_tool` because that is the one
+place that knows a call's arguments, its duration and its size. A row with a
+`connection_id` is a call a connection made; the operations' own rows are the
+internal trail §2 requires and are not calls.
+
+The meters read what the product enforces rather than what the capture shows.
+`Calls 1,284 of 5,000` and `2.1 GB of 10 GB` are caps that do not exist here;
+`quota_files`, `quota_media_minutes` and the per-minute ceiling do. `OPEN-4`
+is the founder's call: add the two caps, or keep the page honest.
+
+### §7.11 Connections
+
+The key goes in the URL, because a chat app's connector dialog has no header
+field — §7.11 calls this verified behaviour rather than a choice. Both doors
+meet at one validation function. Only the SHA-256 digest is stored; the
+plaintext exists in the response that minted it and nowhere else.
+
+**The cost of that design, paid explicitly:** a credential in a query string
+is a credential in every access log. The ASGI middleware strips it from the
+scope, but uvicorn writes its line from the raw request *before* any
+middleware runs — so a logging filter redacts the value. The path still reads
+`?key=[redacted]`: you can see a key was used, and §7.10 says which
+connection used it, without the log being a list of working credentials.
+
+### §7.2 Home, the thread
+
+The composer is never disabled, an interjection reaches the job without
+restarting it, and the acknowledgement says what the note will actually
+reach — §7.2's own reply, *"Still on the summary, so nothing is lost"*, is
+true only while the summary is ahead. Once no step is pending the engine
+refuses rather than reassuring.
+
+### Four defects only a render showed
+
+1. **Every meter rendered as a vertical bar.** `.meter` is a `<span>` and
+   §3.9's atom set no `display`. The atom was written before anything used
+   it — the same trap `.v-rule` fell into, the second time it has cost a
+   render.
+2. **The web spent the agent's rate-limit budget.** §2's `30 tool calls/min`
+   is about an agent in a runaway loop; a browser reads `/api/counts` plus a
+   list per navigation. Clicking through the app for a minute returned a 429
+   rendered as the page, in a sentence written for an LLM. The web now has
+   its own window and its own sentences; the agent's ceiling is unchanged
+   and asserted.
+3. **An interjection also triggered submit's "paste a link" error**, so Brain
+   acknowledged a message and rejected it in the same breath.
+4. **A frame's root is not inside itself.** `querySelector` searches
+   descendants, and `listFrame` returns the `.wrap` while Home returns the
+   `.home`. Two debugging rounds before it became `self_or_within()`.
+
+### Where the build is
+
+All fourteen frames of §7 are built, every control is wired, and each one has
+been rendered in a browser rather than inspected as source. Ten probes under
+`tests/browser/` hold the half no static test can reach — including one that
+loads a page with a job still queued and drains the queue from another
+process, and one that makes real MCP calls with a key in the URL and reads
+the row they produce.

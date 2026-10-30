@@ -388,3 +388,99 @@ spending the quota again.
 Also fixed while there: `_person_only`'s refusal said "only the person can
 decide a skill's state" to an agent whose *archive read* had been refused. Each
 refusal now names what it blocked.
+
+---
+
+## 13. THE LAST THREE FRAMES — 30 October 2026
+
+§7.2, §7.10 and §7.11, and the two §9.2 rows they needed.
+
+### 13.1 §7.10 — four columns, written where a call is known
+
+`audit_logs` gained `latency_ms`, `payload_bytes`, `result_summary` and
+`connection_id`. They are written at `_run_tool` — the one gate every tool
+call passes through — because that is the only place that knows all of it:
+the arguments going in, how long it took, and how much came back.
+
+The operations keep writing their own rows; that is §2's internal trail. **A
+row with a `connection_id` is a call a connection made**, and that is what
+§7.10's log lists. Listing both would make one `search` read as five lines,
+which is the opposite of a log you can scan.
+
+Two values are nullable on purpose. A call refused before it ran has no
+duration and no payload, and `0` would read as "instant and empty" on a page
+whose whole job is being readable.
+
+**The meters do not match the capture, deliberately.** §7.10 shows
+`Calls 1,284 of 5,000` and `Storage 2.1 GB of 10 GB`; this product enforces
+neither. What it enforces is `quota_files`, `quota_media_minutes` and a
+per-minute call ceiling, so those three carry a bar and storage is a figure
+with none. `OPEN-4` puts the question to the founder: introduce the two caps
+and meter them, or keep the page honest about not having them.
+
+### 13.2 §7.11 — a credential that is not a session
+
+"One server. Two ways to authenticate. This is verified behaviour, not a
+choice." A chat app's connector dialog has no header field, so the key rides
+in the URL; an editor or an agent framework cannot run a browser sign-in, so
+it sends a bearer. §7.11 requires both and requires them to meet in one
+validation function — `verify_credential`, which dispatches on the
+`sk-brain-` prefix so a key is never put through JWT decoding (where it would
+fail as a misleading `invalid_token`) and a JWT is never looked up as a key.
+
+Three security properties, each with a test:
+
+1. **The key is never stored.** Only its SHA-256 digest (§2 rule 4). The
+   plaintext exists in the response that created it and nowhere else, which
+   is why the frame says so when a reload leaves the field empty.
+2. **The key never reaches a log.** `UrlKeyMiddleware` strips it from the
+   ASGI scope — but that cannot reach uvicorn's access line, which is written
+   from the raw request at the protocol layer *before* any middleware runs.
+   This is the real cost of §7.11's design, and the design is right about
+   why it pays it; so a logging filter redacts the value instead. The path
+   still reads `?key=[redacted]`, which is what a log is for, without the log
+   being a list of working credentials.
+3. **One credential per connection.** Revoking one leaves the others working;
+   rolling one invalidates only its own key and keeps the connection's name
+   and history, so §7.10's log reads continuously across the roll.
+
+A real `Authorization` header always wins over a query parameter: a client
+that sends one is not guessing, and preferring the URL would let a stale
+pasted link override a correctly configured header.
+
+### 13.3 §7.2 — the composer that is never taken away
+
+§7.2's hard requirements were the specification, and three of four were
+broken by the frame that existed. The composer was disabled for the length of
+the submit request; there was no way to say anything at all once a source was
+submitted, because the frame navigated to the source's page where there is no
+composer; and `?create=1`-style dead ends aside, nothing acknowledged an
+interjection because nothing could receive one.
+
+`op_add_instruction` appends to the job's instruction and cancels nothing. It
+returns **which steps have not yet run**, because §7.2's example reply —
+*"Noted — I'll leave them in. Still on the summary, so nothing is lost"* — is
+only true while the summary is still ahead. Once no step is pending it
+refuses outright: "noted" on a finished job is a reassurance the person finds
+out about when the result does not change.
+
+### 13.4 Four defects only a render showed
+
+1. **Every meter was a vertical bar.** `.meter` is a `<span>` and §3.9's atom
+   set no `display`, so an inline box ignored its width and height. The atom
+   had been written before anything used it — the same trap `.v-rule` fell
+   into, now the second time it has cost a render.
+2. **The web spent the agent's rate-limit budget.** §2's `max 30 tool
+   calls/min` has a subject: an agent in a runaway loop. A browser reads
+   `/api/counts` plus a list on every navigation, so clicking through the app
+   for a minute returned a 429 — rendered as the page, in a sentence written
+   for an LLM: *"Pause for 3s before calling brain again, and tell the user
+   what you already have."* The web now has its own window and its own
+   sentences; §2's ceiling for agents is unchanged and asserted.
+3. **The interjection also triggered submit's "paste a link" error**, so
+   Brain acknowledged a message and rejected it in the same breath.
+4. **A frame's root is not inside itself.** `listFrame` returns the `.wrap`
+   and Home returns the `.home`, and both were looked up with
+   `querySelector` from the frame node — which searches descendants only.
+   Both returned null and threw on the next property access. It cost two
+   debugging rounds before it became `self_or_within()`.

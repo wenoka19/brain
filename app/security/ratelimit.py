@@ -22,6 +22,13 @@ from app.config import settings
 
 TOOL_BUCKET = "tool_calls"
 INGEST_BUCKET = "ingestions"
+#: §2's ceiling is "max 30 tool calls/min" and its subject is an agent in a
+#: runaway loop. A browser is not that, and it does not spend its budget the
+#: same way: every frame reads `/api/counts` plus its own list, so clicking
+#: through the app for a minute could lock the person out of their own
+#: library with a message written for an LLM. The web gets its own window,
+#: which leaves §2's guarantee for the MCP surface exactly where it was.
+WEB_BUCKET = "web_requests"
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,7 @@ class RateLimiter:
         clock: Callable[[], float] = time.monotonic,
         tool_calls_per_min: int | None = None,
         ingestions_per_min: int | None = None,
+        web_requests_per_min: int | None = None,
         duplicate_window_sec: float | None = None,
     ) -> None:
         cfg = settings()
@@ -61,6 +69,7 @@ class RateLimiter:
         self._limits = {
             TOOL_BUCKET: tool_calls_per_min or cfg.tool_calls_per_min,
             INGEST_BUCKET: ingestions_per_min or cfg.ingestions_per_min,
+            WEB_BUCKET: web_requests_per_min or cfg.web_requests_per_min,
         }
         self._dup_window = (
             cfg.duplicate_call_window_sec
@@ -133,6 +142,7 @@ class RateLimiter:
         *,
         is_ingestion: bool = False,
         loop_guard: bool = True,
+        bucket: str = TOOL_BUCKET,
     ) -> Decision:
         """Screen one tool call. Returns the first failing protection.
 
@@ -143,13 +153,18 @@ class RateLimiter:
         into errors. The sliding window still applies — that is the ceiling
         that actually bounds abuse — and every write keeps the guard, because
         a double-submitted POST is precisely what it is for.
+
+        `bucket` picks which sliding window this call spends from. The web
+        surface passes `WEB_BUCKET` so that a person navigating their own
+        pages cannot exhaust the ceiling §2 sets for agents — and so that an
+        agent cannot exhaust theirs.
         """
         with self._lock:
             if loop_guard:
                 loop = self._check_loop(user_id, tool_name, arguments)
                 if not loop.allowed:
                     return loop
-            decision = self._consume(user_id, TOOL_BUCKET)
+            decision = self._consume(user_id, bucket)
             if not decision.allowed:
                 return decision
             if is_ingestion:

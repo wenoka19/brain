@@ -135,10 +135,44 @@ def _rate_limit(
     than inferred, so which reads dropped the guard is visible in one grep.
     """
     decision = ratelimit.limiter().check(
-        ctx.user_id, f"web:{name}", arguments, is_ingestion=ingestion, loop_guard=not repeatable
+        ctx.user_id,
+        f"web:{name}",
+        arguments,
+        is_ingestion=ingestion,
+        loop_guard=not repeatable,
+        # §2's 30/min is the ceiling for an agent in a runaway loop. A person
+        # clicking through their own library is not that, and shared the
+        # budget until this existed.
+        bucket=ratelimit.WEB_BUCKET,
     )
     if not decision.allowed:
-        raise ApiError(429, decision.reason, decision.message)
+        raise ApiError(429, decision.reason, _for_a_person(decision))
+
+
+#: The limiter's sentences are written for a host LLM — "pause for 3s before
+#: calling brain again, and tell the user what you already have". Correct on
+#: the MCP surface, and nonsense on a page a person is looking at.
+_RATE_LIMIT_SAID = {
+    "web_requests_rate_limited": (
+        "That was a lot of requests at once. Give it a few seconds and try again."
+    ),
+    "ingestions_rate_limited": (
+        "That is a lot of sources at once. The ones already queued are safe — "
+        "add the next in a minute."
+    ),
+    "duplicate_call_circuit_breaker": (
+        "That just happened. Give it a moment rather than sending it twice."
+    ),
+}
+
+
+def _for_a_person(decision) -> str:
+    said = _RATE_LIMIT_SAID.get(decision.reason)
+    if said:
+        return said
+    # An unmapped reason is better said plainly than passed through: whatever
+    # it is, it was written for a model.
+    return "Brain is busy. Give it a few seconds and try again."
 
 
 def endpoint(handler: Callable) -> Callable:
@@ -813,6 +847,65 @@ async def api_profile(request: Request) -> Response:
 
 
 @endpoint
+async def api_add_instruction(request: Request) -> Response:
+    """§7.2's interjection. Appends to the instruction; cancels nothing."""
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    source_id = request.path_params["source_id"]
+    text = str(body.get("text") or "")
+    _rate_limit(ctx, "add_instruction", {"source_id": source_id, "text": text[:60]})
+    return _result(E.op_add_instruction(ctx, source_id, text), status_on_error=400)
+
+
+@endpoint
+async def api_activity(request: Request) -> Response:
+    """§7.10's two sections in one read — meters and the call log."""
+    ctx = _context(request)
+    _rate_limit(ctx, "activity", {}, repeatable=True)
+    return _result(E.op_activity(ctx))
+
+
+@endpoint
+async def api_connections(request: Request) -> Response:
+    """§7.11's list. One server, two ways in, one page."""
+    ctx = _context(request)
+    _rate_limit(ctx, "list_connections", {}, repeatable=True)
+    return _result(E.op_list_connections(ctx))
+
+
+@endpoint
+async def api_create_connection(request: Request) -> Response:
+    """§7.11's `Generate my link`. The key is in this response and nowhere
+    else — only its digest is stored."""
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    _rate_limit(ctx, "create_connection", {"name": str(body.get("name") or "")})
+    return _result(E.op_create_connection(ctx, str(body.get("name") or "My AI")))
+
+
+@endpoint
+async def api_connection_action(request: Request) -> Response:
+    """§7.11's `⋯` — Rename, Roll the key, Revoke."""
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    connection_id = request.path_params["connection_id"]
+    action = request.path_params["action"]
+    if action not in ("rename", "roll", "revoke"):
+        raise ApiError(400, "bad_action", "action must be rename, roll or revoke.")
+    _rate_limit(ctx, f"connection_{action}", {"connection_id": connection_id})
+    if action == "rename":
+        result = E.op_rename_connection(ctx, connection_id, str(body.get("name") or ""))
+    elif action == "roll":
+        result = E.op_roll_connection_key(ctx, connection_id)
+    else:
+        result = E.op_revoke_connection(ctx, connection_id)
+    return _result(result, status_on_error=404)
+
+
+@endpoint
 async def api_audit_logs(request: Request) -> Response:
     """Read-only. The owner's own rows only — `_context` resolves the tenant."""
     ctx = _context(request)
@@ -1015,6 +1108,11 @@ ROUTES = [
     Route("/api/synthesize", api_synthesize, methods=["POST"]),
     Route("/api/profile", api_profile, methods=["GET", "POST"]),
     Route("/api/sync-watermark", api_sync_watermark, methods=["GET"]),
+    Route("/api/sources/{source_id}/instruct", api_add_instruction, methods=["POST"]),
+    Route("/api/activity", api_activity, methods=["GET"]),
+    Route("/api/connections", api_connections, methods=["GET"]),
+    Route("/api/connections", api_create_connection, methods=["POST"]),
+    Route("/api/connections/{connection_id}/{action}", api_connection_action, methods=["POST"]),
     Route("/api/audit-logs", api_audit_logs, methods=["GET"]),
     Route("/api/sessions/{session_id}/revoke", api_revoke_session, methods=["POST"]),
     Route("/api/demo/{action}", api_demo, methods=["POST"]),

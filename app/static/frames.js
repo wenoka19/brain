@@ -239,7 +239,9 @@ FRAMES.home = async function home(_params, ctx) {
   const input = node.querySelector("#omni-input");
   const picker = node.querySelector("#omni-file");
   const status = node.querySelector("#omni-status");
-  typewriter(input);
+  // Kept, because §7.2 replaces the placeholder with `Reply to Brain…` and a
+  // typewriter still cycling would overwrite it a second later.
+  const cycling = typewriter(input);
 
   function say(message, tone = "") {
     status.textContent = message;
@@ -261,16 +263,23 @@ FRAMES.home = async function home(_params, ctx) {
     if (!raw) return;
     const match = raw.match(URL_RE);
     if (!match) {
-      say("Paste a link, or drop a file — Brain reads sources, not questions, for now.");
+      // Once §7.2's thread is open, a line without a link is an interjection
+      // and the thread's own handler answers it. Saying "paste a link" here
+      // as well put a contradiction under the composer: Brain had just
+      // acknowledged the very message this was rejecting.
+      if (!node.querySelector("#thread")) {
+        say("Paste a link, or drop a file — Brain reads sources, not questions, for now.");
+      }
       return;
     }
     const note = raw.replace(match[0], "").trim();
-    input.disabled = true;
+    // §7.2's first hard requirement: "The composer is **never disabled**
+    // while Brain works." It was disabled for the length of the request —
+    // brief, but the same promise, and the thread below depends on it.
     say("Queued. Brain is reading it.");
     try {
       const queued = await post("/api/ingest", { url: match[0], user_note: note });
       input.value = "";
-      input.disabled = false;
       refreshCounts();
       if (queued.duplicate) {
         // Navigating silently to the old one looks like it worked and then
@@ -279,12 +288,20 @@ FRAMES.home = async function home(_params, ctx) {
         setTimeout(() => window.location.assign(href(`/sources/${queued.source_id}`)), 900);
         return;
       }
-      // §7.1: submit turns Home into the thread. Until §7.2 exists, the
-      // source's own page is where the work is visible — and it is the page
-      // §7.2 ends on anyway.
-      window.location.assign(href(`/sources/${queued.source_id}`));
+      // §7.2: submit turns Home into the thread, in place. Navigating to the
+      // source's page instead would be a page where the composer is gone —
+      // and §7.2's purpose is that "ingestion is a conversation, not a
+      // progress bar. The person must be able to interrupt while Brain
+      // works."
+      say("");
+      openThread(node, {
+        sourceId: queued.source_id,
+        jobId: queued.job_id,
+        label: match[0],
+        instruction: note,
+        cycling,
+      });
     } catch (error) {
-      input.disabled = false;
       say(error.message, "error");
     }
   }
@@ -320,8 +337,17 @@ FRAMES.home = async function home(_params, ctx) {
         last = payload;
       }
       refreshCounts();
-      if (last?.source_id) window.location.assign(href(`/sources/${last.source_id}`));
-      else say("Queued. Brain is reading it.");
+      if (last?.source_id) {
+        say("");
+        openThread(node, {
+          sourceId: last.source_id,
+          jobId: last.job_id,
+          label: chosen.length === 1 ? chosen[0].name : `${chosen.length} files`,
+          instruction: input.value.trim(),
+          cycling,
+        });
+        input.value = "";
+      } else say("Queued. Brain is reading it.");
     } catch (error) {
       say(error.message, "error");
     }
@@ -388,6 +414,241 @@ export function failed(error) {
     window.location.reload();
   });
   return node;
+}
+
+/* ---------------------------------------------------------------------- */
+/* §7.2 HOME — the thread state                                            */
+/*                                                                          */
+/* "Ingestion is a conversation, not a progress bar. The person must be      */
+/* able to interrupt while Brain works."                                    */
+/*                                                                          */
+/* The thread lives in this page only. §7.2's own last requirement says so:  */
+/* "Reopening Home later returns to the empty state. The thread is           */
+/* reachable from the source it produced." So there is nothing to persist    */
+/* and nothing to restore — the source's own page is the record.             */
+/* ---------------------------------------------------------------------- */
+
+function threadLine(who, html, { cls = "" } = {}) {
+  return `<div class="turn-row" data-who="${esc(who)}"><div class="bubble ${esc(
+    cls
+  )}">${html}</div></div>`;
+}
+
+/** §7.2's result table: three rows, each a pill. */
+function resultTable(data) {
+  const rows = [
+    data.summary && { label: "Summary", state: "active", pill: "Ready" },
+    data.rules.length && {
+      label: `${data.rules.length} rule${data.rules.length > 1 ? "s" : ""}`,
+      state: "active",
+      pill: "Added",
+    },
+    data.skills.length && {
+      label: `${data.skills.length} skill${data.skills.length > 1 ? "s" : ""}`,
+      // §7.2's table: amber when they are waiting on the person.
+      state: data.skills.some((s) => s.status === "proposed") ? "pending" : "active",
+      pill: data.skills.some((s) => s.status === "proposed") ? "Need review" : "Ready",
+    },
+  ].filter(Boolean);
+  if (!rows.length) {
+    // §6 rule 11 rather than an empty table: a source can yield nothing, and
+    // the thread has to be able to say so.
+    return `<p class="thread-note">Nothing came out of this one. The transcript is
+      still there if you want to read it.</p>`;
+  }
+  return `<div class="result-table">${rows
+    .map(
+      (row) => `
+      <div class="result-row">
+        <span>${esc(row.label)}</span>
+        <span class="pill" data-state="${esc(row.state)}">${esc(row.pill)}</span>
+      </div>`
+    )
+    .join("")}</div>`;
+}
+
+/** Turn Home into §7.2's thread, in place.
+ *
+ *  `node` is the Home frame. The greeting, the pitch and the action links go;
+ *  the thread takes the space and the composer stays exactly where it was,
+ *  which is what makes the interruption possible at all.
+ */
+function openThread(node, { sourceId, jobId, label, instruction, cycling }) {
+  const home = self_or_within(node, ".home");
+  home.dataset.thread = "true";
+  node.querySelector(".home-greeting").remove();
+  node.querySelector(".home-pitch").remove();
+  node.querySelector(".home-actions")?.remove();
+
+  const thread = el('<div class="thread" id="thread" role="log" aria-live="polite"></div>');
+  node.querySelector(".omnibar").before(thread);
+
+  const input = node.querySelector("#omni-input");
+  // Stopped first: the typewriter owns the placeholder, and §7.2's is an
+  // instruction that has to hold still.
+  cycling?.stop();
+  input.placeholder = "Reply to Brain…";
+
+  const add = (html, who = "brain", options) => {
+    thread.insertAdjacentHTML("beforeend", threadLine(who, html, options));
+    thread.scrollTop = thread.scrollHeight;
+    return thread.lastElementChild;
+  };
+
+  add(
+    `<span class="source-chip">${icon("sources")}<span>${esc(label)}</span></span>${
+      instruction ? `<p class="thread-said">${esc(instruction)}</p>` : ""
+    }`,
+    "you"
+  );
+  add(
+    instruction
+      ? `On it. I'll read the whole thing and keep what matches what you asked for.`
+      : `On it. I'll read the whole thing and keep what matters.`
+  );
+
+  const work = add(
+    `<div class="work" id="thread-work">
+       <div class="work-head"><span>Working on it</span>
+         <span class="pill" data-state="archived">6 steps</span></div>
+       <ul class="work-steps"></ul>
+     </div>`,
+    "brain",
+    // The work block draws its own card, so the bubble must not draw a
+    // second one around it.
+    { cls: "bubble-bare" }
+  );
+
+  // One line, not three: a template literal keeps its own indentation, and
+  // the hint rendered with it baked in.
+  const hint = el(
+    '<p class="thread-hint" id="thread-hint">Brain is working. You can keep typing,' +
+      ' or leave — Activity will show when it lands.</p>'
+  );
+  node.querySelector(".omnibar").after(hint);
+
+  // §7.2: an interjection goes to the job, and the reply says what it will
+  // actually reach. The composer is never taken away to do it.
+  const interject = async (text) => {
+    add(`<p class="thread-said">${esc(text)}</p>`, "you");
+    try {
+      const sent = await post(`/api/sources/${encodeURIComponent(sourceId)}/instruct`, { text });
+      const reach = sent.will_affect || [];
+      add(
+        `Noted — I'll take that in. ${
+          reach.length
+            ? `Still on ${esc(reach[0].toLowerCase())}, so nothing is lost.`
+            : "It applies from here."
+        }`
+      );
+    } catch (error) {
+      // §6 rule 11: a reassurance Brain cannot keep is worse than the truth.
+      add(esc(error.message || "I could not take that in."), "brain", { cls: "bubble-error" });
+    }
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    const text = input.value.trim();
+    // A second link is a second source, which the frame's own submit handles.
+    if (!text || /\bhttps?:\/\/\S+/i.test(text)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    input.value = "";
+    interject(text);
+  });
+
+  watchThread({ node, sourceId, work, hint, add });
+}
+
+/** The work block in the thread, from real step rows — the same `/job` read
+ *  §7.3 polls, because it is the same block. */
+function watchThread({ node, sourceId, work, hint, add }) {
+  const steps = work.querySelector(".work-steps");
+  const header = work.querySelector(".work-head span");
+
+  const tick = async () => {
+    if (!node.isConnected) return;
+    let progress;
+    try {
+      progress = await api(`/api/sources/${encodeURIComponent(sourceId)}/job`);
+    } catch {
+      setTimeout(tick, 4000);
+      return;
+    }
+    steps.innerHTML = progress.steps.map(workStep).join("");
+
+    const dead = ["failed", "blocked_by_platform"].includes(progress.status);
+    if (!progress.finished && !dead) {
+      setTimeout(tick, 1500);
+      return;
+    }
+
+    // §7.2: "work block collapses → `Processed in 2m 14s · 6 steps`".
+    work.querySelector(".work").dataset.collapsed = "true";
+    header.textContent = dead
+      ? "Stopped"
+      : progress.elapsed_sec
+        ? `Processed in ${humanDuration(progress.elapsed_sec)} · ${progress.steps.length} steps`
+        // Under a second. "Processed in 0s" is accurate and says nothing.
+        : `Processed · ${progress.steps.length} steps`;
+    hint.remove();
+
+    if (dead) {
+      add(
+        `${esc(progress.error_message || "I could not read that one.")}
+         <div class="btn-row">
+           <a class="btn" data-variant="secondary" href="/sources/${esc(
+             sourceId
+           )}">See what happened</a>
+         </div>`,
+        "brain",
+        { cls: "bubble-error" }
+      );
+      return;
+    }
+
+    const data = await api(`/api/sources/${encodeURIComponent(sourceId)}`);
+    const needsReview = data.skills.filter((skill) => skill.status === "proposed").length;
+    add(
+      `${resultTable(data)}
+       <div class="btn-row">
+         <a class="btn" data-variant="secondary" href="/sources/${esc(
+           sourceId
+         )}">Open the source</a>
+         ${
+           needsReview
+             ? `<a class="btn" data-variant="primary" href="/skills">Review the skills</a>`
+             : ""
+         }
+       </div>`,
+      "brain",
+      { cls: "bubble-wide" }
+    );
+
+    // §7.2's two suggestion chips. Both are things this source makes possible
+    // right now, not generic prompts.
+    add(
+      `<div class="chip-row">
+         ${
+           data.has_transcript
+             ? `<a class="chip" href="/transcripts/${esc(sourceId)}">${icon(
+                 "transcripts"
+               )}Read the transcript</a>`
+             : ""
+         }
+         ${
+           data.rules.length
+             ? `<a class="chip" href="/rules">${icon("rules")}See the rules it added</a>`
+             : `<a class="chip" href="/">${icon("plus")}Teach Brain something else</a>`
+         }
+       </div>`,
+      "brain",
+      { cls: "bubble-bare" }
+    );
+    refreshCounts();
+  };
+  setTimeout(tick, 600);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -675,7 +936,7 @@ function wireSort(node) {
     // `listFrame` returns the `.wrap` itself, so the frame node IS the
     // container — querying inside it for one found nothing and the reorder
     // threw halfway through, leaving the rows reversed and the groups not.
-    const wrap = node.matches(".wrap") ? node : node.querySelector(".wrap");
+    const wrap = self_or_within(node, ".wrap");
     const groups = [...node.querySelectorAll(".date-group")].reverse();
     for (const group of groups) {
       const stack = group.querySelector(".stack");
@@ -1502,6 +1763,18 @@ function wireCardActions(node, handlers) {
     control.closest(".menu")?.setAttribute("hidden", "");
     await handler(control.dataset.id, control);
   });
+}
+
+/** The element itself, or the one inside it — whichever matches.
+ *
+ *  A frame's root often IS the thing a later lookup wants: `listFrame`
+ *  returns the `.wrap`, and Home returns the `.home`. `querySelector` only
+ *  searches descendants, so both lookups returned null and the code that
+ *  followed threw on the next property access. It cost two debugging rounds
+ *  before it cost a third, so it is a function now.
+ */
+export function self_or_within(node, selector) {
+  return node.matches?.(selector) ? node : node.querySelector(selector);
 }
 
 /** §6 rule 13, after a row leaves rather than after a filter runs: "a section
@@ -2563,6 +2836,487 @@ function provenanceChips(skill) {
 /* ---------------------------------------------------------------------- */
 
 const ARCHIVE_ICON = { source: "sources", rule: "rules", skill: "skills", summary: "summaries" };
+
+/* ---------------------------------------------------------------------- */
+/* §7.10 ACTIVITY                                                          */
+/*                                                                          */
+/* "Two sections, because they answer two questions." Usage is how much is   */
+/* left; Calls is what the agents actually did. The rows are 40px and one    */
+/* line — "denser than an item card because a log is scanned, not browsed".  */
+/* ---------------------------------------------------------------------- */
+
+/** Bytes as the person would say them. */
+function sizeLabel(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} kB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
+}
+
+/** §4.6's meter card. A bar only where there is a cap to measure against:
+ *  §7.10's capture meters calls and storage, and this product enforces a
+ *  ceiling on neither — a bar against a number nothing checks is decoration,
+ *  and `OPEN-3` puts the question to the founder rather than inventing one. */
+function meterCard(meter) {
+  const { used, cap, label, unit } = meter;
+  const shown = unit === "bytes" ? sizeLabel(used) : Number(used).toLocaleString();
+  const of =
+    cap === null || cap === undefined
+      ? ""
+      : ` of ${unit === "bytes" ? sizeLabel(cap) : Number(cap).toLocaleString()}`;
+  const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : null;
+  return `
+    <article class="meter-card">
+      <span class="meter-label">${esc(label)}</span>
+      <p class="meter-figure">${esc(shown)}${of ? `<small>${esc(of)}</small>` : ""}</p>
+      ${
+        pct === null
+          ? `<p class="meter-note">No limit on this one.</p>`
+          : `<span class="meter" role="img"
+                   aria-label="${esc(String(pct))} percent of ${esc(label)} used">
+               <span data-level="${pct >= 90 ? "high" : pct >= 70 ? "warn" : "ok"}"
+                     style="width:${pct}%"></span>
+             </span>
+             <p class="meter-note">${esc(
+               unit === "rate" ? "Resets every minute." : `${100 - pct}% left.`
+             )}</p>`
+      }
+    </article>`;
+}
+
+FRAMES.activity = async function activity() {
+  const data = await api("/api/activity");
+  // Named `…Html` and built before the template, which is the convention the
+  // escaping guard enforces: a hole into markup has to be visibly trusted at
+  // the point it is interpolated, not trusted because of what it calls.
+  const metersHtml = ["sources", "minutes", "calls", "storage"]
+    .map((key) => meterCard(data.usage[key]))
+    .join("");
+
+  const row = (call) => `
+    <div class="call" data-open="false">
+      <button class="call-head" type="button" data-toggle="${esc(String(call.id))}"
+              aria-expanded="false">
+        <span class="call-time">${esc(clockLabel(call.at))}</span>
+        <span class="call-dot" data-ok="${call.ok}"></span>
+        <span class="call-conn">${esc(call.connection)}</span>
+        <code class="call-tool">${esc(call.tool)}</code>
+        <span class="call-target">${esc(call.target || call.asked_for_short || "")}</span>
+        <span class="call-latency">${esc(latencyLabel(call.latency_ms))}</span>
+        <span class="pill" data-state="${call.ok ? "active" : "pending"}">${
+          call.ok ? "OK" : "Failed"
+        }</span>
+      </button>
+      <div class="call-body">
+        <span class="field-label">Asked for</span>
+        <pre class="call-pre">${esc(call.asked_for || "—")}</pre>
+        <span class="field-label">Returned</span>
+        <p class="call-returned">${esc(call.returned || "—")}</p>
+        <div class="chip-row">
+          <span class="chip">${icon("doc")}${esc(
+            call.payload_bytes === null || call.payload_bytes === undefined
+              ? "No payload"
+              : sizeLabel(call.payload_bytes)
+          )}</span>
+          ${
+            call.connection_id
+              ? `<a class="chip" href="/connections">${icon("connections")}${esc(
+                  call.connection
+                )}</a>`
+              : ""
+          }
+        </div>
+        ${
+          call.remedy
+            ? `<p class="work-hint" data-tone="error">${esc(call.remedy)}</p>`
+            : ""
+        }
+      </div>
+    </div>`;
+
+  const node = el(`
+    <div class="wrap">
+      <h1 class="page-title">Activity</h1>
+
+      <section class="section">
+        <h2 class="section-title">Usage</h2>
+        <p class="section-note">What you have used, against what Brain enforces.</p>
+        <div class="meter-row">
+          ${metersHtml}
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Calls</h2>
+        <p class="section-note">Every call your AI made. Click one to see what it
+           asked for and what came back.</p>
+        ${
+          data.calls.length
+            ? `<div class="call-log">${data.calls.map(row).join("")}</div>`
+            : `<div class="empty">
+                 <p>Nothing has called Brain yet. Connect an AI and every call it
+                    makes lands here, with what it asked for and what came back.</p>
+                 <a class="btn" data-variant="primary" href="/connections">Connect an AI</a>
+               </div>`
+        }
+      </section>
+    </div>`);
+
+  // §7.10: "Click expands: `Asked for`, `Returned`, `Payload`, `Connection`."
+  for (const head of node.querySelectorAll(".call-head")) {
+    head.addEventListener("click", () => {
+      const call = head.closest(".call");
+      const open = call.dataset.open === "true";
+      call.dataset.open = String(!open);
+      head.setAttribute("aria-expanded", String(!open));
+    });
+  }
+  return node;
+};
+
+/* ---------------------------------------------------------------------- */
+/* §7.11 CONNECTIONS                                                       */
+/*                                                                          */
+/* "One server. Two ways to authenticate. This is verified behaviour, not a  */
+/* choice." The key goes in the URL because a chat app's connector dialog    */
+/* has no header field — so there is one link, pasted once, and nothing      */
+/* else to copy.                                                            */
+/*                                                                          */
+/* The empty state is the frame. §7.11 calls it "the most important empty    */
+/* state in the app", and the `Connected` section with its sentence about    */
+/* revocation does not render until there is something to revoke.            */
+/* ---------------------------------------------------------------------- */
+
+/** §7.11's agent instruction. Not JSON — an instruction, because what an
+ *  agent needs is to be told where to put it, and the placeholder is an
+ *  amber `<mark>` until the link exists. */
+function agentBlock(link) {
+  const target = link
+    ? esc(link)
+    : `<mark>PASTE_YOUR_GENERATED_LINK_HERE</mark>`;
+  return `Add this MCP server to this project.
+
+  name:      brain
+  url:       ${target}
+  transport: streamable HTTP
+
+The key is already inside the URL, so it needs no auth
+header and no environment variable. Put it wherever this
+project configures MCP servers, then list the tools to
+confirm it answers.`;
+}
+
+FRAMES.connections = async function connections() {
+  const data = await api("/api/connections");
+  const live = data.connections.filter((item) => !item.revoked);
+  // Generated in this session only. §7.11's link carries the key, and the
+  // key exists in the response that minted it and nowhere else — so a page
+  // reload cannot show it again, and the frame says so rather than printing
+  // a link that is missing its key.
+  let link = "";
+
+  const row = (item) => `
+    <div class="conn" data-id="${esc(item.id)}">
+      <span class="conn-name">${esc(item.name)}</span>
+      <span class="item-meta">${metaHtml([
+        item.how,
+        item.key_prefix ? `${item.key_prefix}…` : null,
+        item.last_call_at ? `last call ${dateLabel(item.last_call_at).toLowerCase()}` : "never used",
+        `added ${dateLabel(item.created_at).toLowerCase()}`,
+      ])}</span>
+      <span class="pill" data-state="${item.revoked ? "archived" : "active"}">${
+        item.revoked ? "Revoked" : "Live"
+      }</span>
+      ${
+        item.revoked
+          ? ""
+          : cardMenu(item.id, [
+              { act: "rename", label: "Rename" },
+              item.how === "Key" ? { act: "roll", label: "Roll the key" } : null,
+              { sep: true },
+              { act: "revoke", label: "Revoke", danger: true },
+            ])
+      }
+    </div>`;
+
+  const node = el(`
+    <div class="wrap">
+      <h1 class="page-title">Connections</h1>
+
+      <section class="section connect-card" data-state="${esc(live.length ? "live" : "empty")}">
+        ${
+          live.length
+            ? `<h2 class="section-title">Add another</h2>
+               <p class="section-note">A second AI gets its own link, so revoking one
+                  leaves the rest working.</p>`
+            : `<span class="pill" data-state="pending">Not connected</span>
+               <h2 class="connect-title">Brain is not reachable by anything yet</h2>
+               <p class="connect-lede">Generate your link, then paste it once into the
+                  AI you use. That link is the whole setup — it carries your key, so
+                  there is nothing else to copy.</p>`
+        }
+        <div class="connect-row">
+          <input class="input" id="link" readonly
+                 placeholder="${
+                   live.length
+                     ? "A link is shown once, when it is made. Roll a key below for a new one."
+                     : "Your link appears here"
+                 }"
+                 aria-label="Your connection link">
+          <button class="btn" data-variant="primary" id="generate">Generate my link</button>
+          <button class="btn" data-variant="secondary" id="copy-link">${icon("copy")}Copy</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">How to paste it in</h2>
+        <p class="section-note">Two kinds of place to put it. Open the one you use.</p>
+
+        <article class="exp-card how" data-open="false">
+          <div class="exp-top">
+            <button class="exp-head" type="button" data-how="ai" aria-expanded="false">
+              <span class="item-type">${icon("ai")}</span>
+              <span class="item-text">
+                <span class="item-title">An AI app</span>
+                <span class="item-meta">Claude, ChatGPT, or anything with a connector
+                  setting · Show me how</span>
+              </span>
+            </button>
+            <button class="exp-caret-btn" type="button" data-how="ai"
+                    tabindex="-1" aria-hidden="true">
+              <span class="exp-caret slot">${icon("chevron-down")}</span>
+            </button>
+          </div>
+          <div class="exp-body">
+            <ol class="steps-list">
+              <li>
+                <span class="step-title">Open the connector settings in your AI.</span>
+                <ul class="step-paths">
+                  <li><b>Claude</b> — Settings → Connectors → <b>Add custom connector</b></li>
+                  <li><b>ChatGPT</b> — Settings → Apps &amp; Connectors → <b>Advanced</b>.
+                      If no custom option appears, turn on developer mode under
+                      Settings → Security and login.</li>
+                  <li><b>Others</b> — look for <b>MCP</b>, <b>Connectors</b> or
+                      <b>Custom server</b></li>
+                </ul>
+              </li>
+              <li>
+                <span class="step-title">Paste your link and name it Brain.</span>
+                <p class="step-note">Leave every other field alone.</p>
+              </li>
+              <li>
+                <span class="step-title">Brain is live.</span>
+                <p class="step-note">Ask it “what rules do I have about planning?”.</p>
+              </li>
+            </ol>
+          </div>
+        </article>
+
+        <article class="exp-card how" data-open="false">
+          <div class="exp-top">
+            <button class="exp-head" type="button" data-how="agent" aria-expanded="false">
+              <span class="item-type">${icon("agent")}</span>
+              <span class="item-text">
+                <span class="item-title">An agent or an editor</span>
+                <span class="item-meta">Cursor, Claude Code, Codex, n8n, LangGraph,
+                  CrewAI · Show me how</span>
+              </span>
+            </button>
+            <button class="exp-caret-btn" type="button" data-how="agent"
+                    tabindex="-1" aria-hidden="true">
+              <span class="exp-caret slot">${icon("chevron-down")}</span>
+            </button>
+          </div>
+          <div class="exp-body">
+            <ol class="steps-list">
+              <li>
+                <span class="step-title">Hand your agent this instruction.</span>
+                <pre class="code" id="agent-block">${agentBlock("")}</pre>
+                <button class="btn" data-variant="secondary" id="copy-agent">${icon(
+                  "copy"
+                )}Copy</button>
+              </li>
+              <li>
+                <span class="step-title">Ask it to list Brain's tools.</span>
+                <p class="step-note">Eight, starting with <code>search</code>. If they
+                   come back, it is connected.</p>
+              </li>
+            </ol>
+          </div>
+        </article>
+      </section>
+
+      ${
+        live.length
+          ? `<section class="section">
+               <h2 class="section-title">Connected</h2>
+               <p class="section-note">One credential per connection. Revoking one
+                  leaves the others working.</p>
+               <div class="conn-list">${data.connections.map(row).join("")}</div>
+             </section>`
+          : ""
+      }
+    </div>`);
+
+  const field = node.querySelector("#link");
+  const agentPre = node.querySelector("#agent-block");
+
+  const show = (generated) => {
+    link = generated;
+    field.value = generated;
+    agentPre.innerHTML = agentBlock(generated);
+    node.querySelector("#generate").innerHTML = "Generate another";
+  };
+
+  node.querySelector("#generate").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const made = await post("/api/connections", { name: "My AI" });
+      show(made.link);
+      toast("Your link is ready. Paste it into your AI.");
+    } catch (error) {
+      toast(error.message || "Could not generate a link.");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  // §6 rule 11, named in §7.11 word for word: "Clicking Copy before
+  // generating answers `Generate your link first` in amber for 2s. The button
+  // always reads `Copy`."
+  node.querySelector("#copy-link").addEventListener("click", (event) => {
+    if (!link) {
+      answer(event.currentTarget, "Generate your link first");
+      return;
+    }
+    copyText(event.currentTarget, link);
+  });
+  node.querySelector("#copy-agent").addEventListener("click", (event) => {
+    if (!link) {
+      answer(event.currentTarget, "Generate your link first");
+      return;
+    }
+    copyText(event.currentTarget, agentPre.textContent);
+  });
+
+  // §7.11: "Two tiles, visibly clickable — a chevron that rotates on open".
+  for (const trigger of node.querySelectorAll("[data-how]")) {
+    trigger.addEventListener("click", () => {
+      const card = trigger.closest(".exp-card");
+      const open = card.dataset.open === "true";
+      card.dataset.open = String(!open);
+      card.querySelector(".exp-head").setAttribute("aria-expanded", String(!open));
+    });
+  }
+
+  wireMenus(node);
+  wireCardActions(node, {
+    rename: (id, button) => renameConnection(id, button),
+    roll: async (id, button) => {
+      const yes = await confirmDialog({
+        title: "Roll this key?",
+        body:
+          "The link you pasted stops working immediately, and you paste the new one " +
+          "in its place. The connection keeps its name and its history.",
+        confirmLabel: "Roll the key",
+      });
+      if (!yes) return;
+      try {
+        const rolled = await post(`/api/connections/${encodeURIComponent(id)}/roll`, {});
+        show(rolled.link);
+        toast("Rolled. Paste the new link into that AI.");
+        node.querySelector("#link").scrollIntoView({ block: "center" });
+      } catch (error) {
+        toast(error.message || "Could not roll that key.");
+      }
+    },
+    // §9.4: "Revoke a connection | confirm dialog".
+    revoke: async (id, button) => {
+      const card = button.closest(".conn");
+      const name = card.querySelector(".conn-name").textContent.trim();
+      const yes = await confirmDialog({
+        title: `Revoke ${name}?`,
+        body:
+          "That AI stops reaching Brain at once. Your other connections keep working, " +
+          "and what it already did stays in Activity.",
+        confirmLabel: "Revoke",
+      });
+      if (!yes) return;
+      try {
+        await post(`/api/connections/${encodeURIComponent(id)}/revoke`, {});
+      } catch (error) {
+        toast(error.message || "Could not revoke it.");
+        return;
+      }
+      window.location.assign(href("/connections"));
+    },
+  });
+  return node;
+};
+
+async function renameConnection(id, button) {
+  const card = button.closest(".conn");
+  const name = card.querySelector(".conn-name");
+  const was = name.textContent.trim();
+  const field = el(`<input class="input item-rename" value="${esc(was)}" aria-label="Rename">`);
+  name.replaceWith(field);
+  field.focus();
+  field.select();
+
+  let closed = false;
+  const finish = async (save) => {
+    if (closed) return;
+    closed = true;
+    const wanted = field.value.trim();
+    field.replaceWith(name);
+    if (!save || !wanted || wanted === was) return;
+    try {
+      await post(`/api/connections/${encodeURIComponent(id)}/rename`, { name: wanted });
+    } catch (error) {
+      toast(error.message || "Could not rename it.");
+      return;
+    }
+    name.textContent = wanted;
+  };
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    if (event.key === "Escape") finish(false);
+  });
+  field.addEventListener("blur", () => finish(true));
+}
+
+/** §7.10 prints `180 ms`. Two values need saying rather than printing:
+ *  a call that never ran has no duration at all, and one that finished
+ *  inside a millisecond is not instant — `0 ms` claims a precision the
+ *  measurement does not have. */
+function latencyLabel(ms) {
+  if (ms === null || ms === undefined) return "—";
+  return ms === 0 ? "<1 ms" : `${ms} ms`;
+}
+
+/** §7.10's rows lead with a clock time, not a date: the log is read as
+ *  "what happened today", and §6 rule 14's date grouping is for lists of
+ *  things rather than for a stream of calls. */
+function clockLabel(stamp) {
+  const when = new Date(String(stamp).replace(" ", "T") + "Z");
+  if (Number.isNaN(when.getTime())) return "";
+  const today = new Date();
+  const sameDay =
+    when.getFullYear() === today.getFullYear() &&
+    when.getMonth() === today.getMonth() &&
+    when.getDate() === today.getDate();
+  // §7.10's rows read `14:02`. `h23` rather than the locale's own cycle,
+  // because the column is 56px and fixed — `02:37 AM` does not fit it, and a
+  // log is scanned down a column rather than read a line at a time.
+  const clock = when.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  return sameDay ? clock : `${dateLabel(stamp)} ${clock}`;
+}
 
 FRAMES.archive = async function archive() {
   const data = await api("/api/archive");
