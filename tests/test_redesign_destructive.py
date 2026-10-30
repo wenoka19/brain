@@ -320,27 +320,61 @@ class TestTheFrameSource:
             before = source[max(0, match.start() - 1200) : match.start()]
             assert "confirmDialog({" in before, "a delete with no dialog before it"
 
-    def test_the_two_step_dialog_is_the_one_9_4_describes(self):
+    def test_the_dialog_is_one_layer(self):
+        """`R-16`, closing `OPEN-2`.
+
+        §9.4 specified "step 1 type DELETE, step 2 identity check", and left
+        what that check should be open. It could not be anything honest:
+        brain has no password (`app/webapi.py` — "V1 sign-in: an email
+        establishes the tenant. No password, by design") and no mail sender
+        anywhere in the repo. So step 2 shipped as a field that accepted any
+        character and was never sent to the server.
+
+        And the front door has no lock: anyone who can open this dialog can
+        already read, archive and export the whole library. A second gate on
+        one interior door protected nothing while looking as though it did —
+        §6 rule 11's argument, applied to a security control.
+
+        The founder settled it: one confirmation layer.
+        """
         source = FRAMES_JS.read_text()
         dialog = source[source.index("export function confirmDialog"):]
         dialog = dialog[: dialog.index("/** §6 rule 13")]
-        # §9.4: "The confirm button is disabled until the field validates."
-        assert "next.disabled = field.value.trim() !== word" in dialog
-        # §18.8: step 1's Continue is OUTLINED danger — step 1 deletes nothing.
-        assert 'data-variant="danger" data-act="next" disabled' in dialog
-        assert 'data-variant="danger-solid" data-act="go" hidden disabled' in dialog
-        # A Back control, an Escape and a scrim click all mean no.
+
+        # §9.4's surviving half: "the confirm button is disabled until the
+        # field validates" — and it is the confirm itself now, not a Continue.
+        assert "go.disabled = field.value.trim() !== word" in dialog
+        assert 'data-variant="danger-solid" data-act="go"' in dialog
+
+        # Nothing of the second step is left.
+        for gone in ("data-act=\"next\"", "confirm-identity", "data-pane", "step-dot"):
+            assert gone not in dialog, gone
+
+        # Escape and a scrim click still mean no.
         assert 'event.key === "Escape"' in dialog
         assert "event.target === scrim" in dialog
 
-    def test_the_step_indicator_is_danger_and_not_accent(self):
-        """§18.8: "the current step is red, not accent — the dialog is coloured
-        by what it does"."""
+    def test_the_typed_word_is_still_checked_by_the_engine(self):
+        """The half that was always real. Dropping a layer must not drop the
+        guard that does not depend on the page being correct."""
+        engine = (Path(__file__).resolve().parents[1] / "app/core/engine.py").read_text()
+        assert 'DELETE_WORD = "DELETE"' in engine
+        assert "def _typed_the_word(" in engine
+        for op in ("op_delete_library", "op_delete_account"):
+            block = engine[engine.index(f"def {op}(") :]
+            block = block[: block.index("\n\ndef ")]
+            assert "_typed_the_word(" in block, op
+
+    def test_the_step_indicator_molecule_is_gone(self):
+        """A molecule no frame instantiates is exactly what this project
+        spent a day removing. §9.4's indicator had two steps to show and now
+        has none, so it is deleted rather than left defined."""
         css = MOLECULES.read_text()
-        current = css[css.index('.step-dot[data-state="current"]'):]
-        current = current[: current.index("}")]
-        assert "var(--danger)" in current
-        assert "accent" not in current
+        for gone in (".steps {", ".steps-rule", ".step-dot"):
+            # The removal note names them; no rule may declare them.
+            assert f"\n{gone}" not in css, gone
+        # The one §18.8 detail that survives: the word is danger, semibold.
+        assert ".danger-word {" in css
 
     def test_the_caret_is_the_last_thing_in_the_row(self):
         """§18.6: "on the right, pointing right when closed and down when

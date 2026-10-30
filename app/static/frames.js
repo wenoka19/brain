@@ -1587,64 +1587,49 @@ export function toast(message, { action, onAction, ms = 6000 } = {}) {
 /** §4.8 and §9.4's dialog. Resolves true when the person went through with
  *  it, false on Cancel, Escape, or a click on the scrim.
  *
- *  `word` makes it the two-step version §9.4 requires for the library and the
- *  account: step 1 types the word, step 2 is the identity check. With no
- *  `word` it is the one-step confirm §9.4 gives to deleting a single archived
- *  item and to revoking a connection.
+ *  `word` adds the typed confirmation §9.4 asks for on the library and the
+ *  account — one layer, not two (`R-16`). With no `word` it is the plain
+ *  confirm §9.4 gives to deleting a single archived item and to revoking a
+ *  connection.
  *
- *  §18.8 fixes the details the captures show: the step indicator's current
- *  dot is `--danger` and not accent, because the dialog is coloured by what
- *  it does; the word itself is printed in danger, semibold; and `Continue` at
- *  step 1 of 2 is **outlined** danger, because step 1 deletes nothing. The
- *  filled red belongs to the last confirm, which no capture shows and which
- *  follows from that same logic.
+ *  **The second step is gone, by the founder's decision.** §9.4 specified
+ *  "step 1 type DELETE, step 2 identity check", and `OPEN-2` left what that
+ *  check should be undecided. It could not be anything: brain has no
+ *  password and no mail sender, so the step was a field that accepted any
+ *  character and was never sent to the server. Worse, the front door has no
+ *  lock at all — anyone who can open this dialog can already read, archive
+ *  and export the whole library — so a second gate on one door protected
+ *  nothing while looking as though it did. §6 rule 11's argument, applied to
+ *  a security control rather than a button.
+ *
+ *  What survives is the half that was always real: the typed word is checked
+ *  **at the engine** as well as here, so neither this dialog nor a bug in it
+ *  is what stands between the person and an irreversible act.
+ *
+ *  §18.8's detail that still holds: the word is printed in danger, semibold.
  */
-export function confirmDialog({ title, body, confirmLabel = "Delete", word = "", identity = "" }) {
+export function confirmDialog({ title, body, confirmLabel = "Delete", word = "" }) {
   return new Promise((resolve) => {
-    const twoStep = Boolean(word);
+    const typed = Boolean(word);
     const scrim = el(`
       <div class="scrim" role="dialog" aria-modal="true" aria-label="${esc(title)}">
         <div class="dialog">
-          ${
-            twoStep
-              ? `<div class="steps" aria-hidden="true">
-                   <span class="step-dot" data-state="current" data-step="1">1</span>
-                   <span class="steps-rule"></span>
-                   <span class="step-dot" data-step="2">2</span>
-                 </div>`
-              : ""
-          }
           <h2 class="dialog-title">${esc(title)}</h2>
           <p class="dialog-body">${esc(body)}</p>
           ${
-            twoStep
-              ? `<div data-pane="1">
-                   <span class="field-label">Type <span class="danger-word">${esc(
-                     word
-                   )}</span> to continue</span>
-                   <input class="input" id="confirm-word" autocomplete="off"
-                          aria-label="Type ${esc(word)} to continue">
-                 </div>
-                 <div data-pane="2" hidden>
-                   <span class="field-label">${esc(identity || "Confirm it is you")}</span>
-                   <input class="input" id="confirm-identity" type="password"
-                          autocomplete="current-password"
-                          aria-label="${esc(identity || "Confirm it is you")}">
-                 </div>`
+            typed
+              ? `<span class="field-label">Type <span class="danger-word">${esc(
+                   word
+                 )}</span> to confirm</span>
+                 <input class="input" id="confirm-word" autocomplete="off"
+                        aria-label="Type ${esc(word)} to confirm">`
               : ""
           }
           <div class="dialog-foot">
             <button class="btn" data-variant="ghost" data-act="cancel">Cancel</button>
-            ${
-              twoStep
-                ? `<button class="btn" data-variant="danger" data-act="next" disabled>Continue</button>
-                   <button class="btn" data-variant="danger-solid" data-act="go" hidden disabled>${esc(
-                     confirmLabel
-                   )}</button>`
-                : `<button class="btn" data-variant="danger-solid" data-act="go">${esc(
-                    confirmLabel
-                  )}</button>`
-            }
+            <button class="btn" data-variant="danger-solid" data-act="go"${
+              typed ? " disabled" : ""
+            }>${esc(confirmLabel)}</button>
           </div>
         </div>
       </div>`);
@@ -1658,27 +1643,19 @@ export function confirmDialog({ title, body, confirmLabel = "Delete", word = "",
       if (event.key === "Escape") done(false);
     };
 
-    const next = scrim.querySelector('[data-act="next"]');
     const go = scrim.querySelector('[data-act="go"]');
 
-    if (twoStep) {
+    if (typed) {
       const field = scrim.querySelector("#confirm-word");
-      const identityField = scrim.querySelector("#confirm-identity");
       // §9.4: "The confirm button is disabled until the field validates."
       field.addEventListener("input", () => {
-        next.disabled = field.value.trim() !== word;
+        go.disabled = field.value.trim() !== word;
       });
-      identityField.addEventListener("input", () => {
-        go.disabled = !identityField.value;
-      });
-      next.addEventListener("click", () => {
-        scrim.querySelector('[data-pane="1"]').hidden = true;
-        scrim.querySelector('[data-pane="2"]').hidden = false;
-        scrim.querySelector('[data-step="1"]').dataset.state = "done";
-        scrim.querySelector('[data-step="2"]').dataset.state = "current";
-        next.hidden = true;
-        go.hidden = false;
-        identityField.focus();
+      // Enter from the field is the same as pressing the button, once it is
+      // live — otherwise typing the word and hitting Enter does nothing and
+      // reads as the dialog being stuck.
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !go.disabled) done(true);
       });
     }
 
@@ -3688,11 +3665,10 @@ FRAMES.profile = async function profile() {
     window.location.assign(href("/signin"));
   });
 
-  /* §9.4: both of these are "step 1 type `DELETE`, step 2 identity check".
-     `OPEN-2` is still open on what the identity check should be — the plan
-     recommends (c), the word alone for the library and an emailed code for
-     the account — so the second step is built as §9.4 describes it and the
-     field is the placeholder the plan itself calls for. */
+  /* `R-16`, closing `OPEN-2`: one confirmation layer, and it is the typed
+     word. The second step the plan asked for could not be built honestly —
+     there is no password and no mail sender — and a field that accepts
+     anything and is never checked is worse than no field. */
   for (const button of node.querySelectorAll("[data-wipe]")) {
     button.addEventListener("click", async () => {
       const whole = button.dataset.wipe === "account";
@@ -3703,7 +3679,6 @@ FRAMES.profile = async function profile() {
           : "Every source, transcript, summary, rule and skill is destroyed. Your account and your settings stay. This cannot be undone.",
         confirmLabel: whole ? "Delete account" : "Delete library",
         word: "DELETE",
-        identity: "Confirm it is you",
       });
       if (!yes) return;
       try {

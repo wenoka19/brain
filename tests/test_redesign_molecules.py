@@ -185,12 +185,18 @@ class TestTheDetailsThatCarryMeaning:
         assert ".menu-sep" in source()
         assert "--danger" in decls_for('.menu-item[data-variant="danger"]')
 
-    def test_the_dialog_step_indicator_is_coloured_by_what_it_does(self):
-        """§18.8: the current step is danger, not accent. The dialog is
-        coloured by its consequence."""
-        current = decls_for('.step-dot[data-state="current"]')
-        assert "var(--danger)" in current
-        assert "var(--accent)" not in current
+    def test_the_dialog_is_coloured_by_what_it_does(self):
+        """§18.8's rule, kept after `R-16` removed the thing it described.
+
+        The step indicator is gone — one confirmation layer has no steps to
+        indicate — but the principle it carried is still the dialog's: it is
+        coloured by its consequence, not by the accent. What is left to carry
+        it is the typed word.
+        """
+        word = decls_for(".danger-word")
+        assert "var(--danger)" in word
+        assert "var(--accent)" not in word
+        assert "weight-semibold" in word
 
     def test_the_caret_rotates_minus_ninety_when_closed(self):
         """§4.2."""

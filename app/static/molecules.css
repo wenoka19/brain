@@ -548,49 +548,15 @@
   gap: var(--space-2);
 }
 
-/* §9.4's indicator. The current step is DANGER, not accent (§18.8): the dialog
-   is coloured by what it does. */
-.steps {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-5);
-}
+/* §9.4's two-step indicator is **not built**, by `R-16`. The plan specified
+   "step 1 type DELETE, step 2 identity check" and `OPEN-2` left the check
+   undecided; the founder settled it as one layer, so there are no steps to
+   indicate. `.steps`, `.steps-rule` and `.step-dot` are removed rather than
+   left defined — a molecule no frame instantiates is the thing this project
+   spent a day deleting everywhere else.
 
-.steps-rule {
-  flex: 1 1 auto;
-  height: var(--border-width);
-  background: var(--border-subtle);
-}
-
-.step-dot {
-  display: grid;
-  place-items: center;
-  width: var(--space-6);
-  height: var(--space-6);
-  flex: 0 0 auto;
-  border-radius: var(--radius-full);
-  background: var(--bg-code);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-}
-
-.step-dot[data-state="current"] {
-  background: var(--danger);
-  color: var(--on-danger);
-}
-
-/* A step already passed. §18.8 shows only step 1 current and step 2 grey, so
-   this one follows from the same logic: once the person is on step 2, step 1
-   is neither pending nor the thing at hand — it is behind them, and reads as
-   danger at low emphasis rather than as the step they are on. */
-.step-dot[data-state="done"] {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-/* "Type DELETE to continue", with the word itself in danger. */
+   The one detail of §18.8 that survives is this: the word is printed in
+   danger, semibold. */
 .danger-word {
   color: var(--danger);
   font-weight: var(--weight-semibold);
