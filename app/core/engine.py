@@ -1356,6 +1356,95 @@ def op_set_skill_state(ctx: Context, skill_id: str, state: str) -> OpResult:
     )
 
 
+def op_list_sources(ctx: Context, *, limit: int = 100) -> OpResult:
+    """§7.7's list, type-first, with the yield in green."""
+    rows = tenant_db.list_sources(ctx.tenant, limit=limit)
+    ctx.audit("list_sources", "ok", detail={"count": len(rows)})
+    return OpResult(ok=True, action="list_sources", data={"sources": rows})
+
+
+def op_list_transcripts(ctx: Context, *, limit: int = 100) -> OpResult:
+    """§7.4. A transcript is a source whose text was captured."""
+    rows = tenant_db.list_transcripts(ctx.tenant, limit=limit)
+    ctx.audit("list_transcripts", "ok", detail={"count": len(rows)})
+    return OpResult(ok=True, action="list_transcripts", data={"transcripts": rows})
+
+
+def op_get_transcript(ctx: Context, source_id: str) -> OpResult:
+    """§7.5's reading surface.
+
+    The cues come back as the body, grouped into turns, because the frame is a
+    two-column grid of timestamp and text. `R-1` struck speakers, so a turn
+    carries its moment and its words and nothing else.
+    """
+    record = tenant_db.get_transcript(ctx.tenant, (source_id or "").strip())
+    if record is None or _visible(ctx, record["source"]) is None:
+        return _fail("get_transcript", "not_found", "No transcript is on record for that id.")
+
+    source = record["source"]
+    turns = []
+    for cue in record["cues"]:
+        text = str(cue.get("text") or "").strip()
+        if not text:
+            continue
+        start = cue.get("start")
+        turns.append(
+            {
+                "text": text,
+                "t_ms": int(float(start) * 1000) if start is not None else None,
+                "label": cue.get("section") or "",
+                "deep_link": (
+                    deep_link(source.get("canonical_url", ""), "timestamp", str(int(float(start))))
+                    if start is not None else ""
+                ),
+            }
+        )
+    if not turns:
+        # A document has no cues. The body is still readable, as one turn.
+        turns = [{"text": record["full_text"], "t_ms": None, "label": "", "deep_link": ""}]
+
+    ctx.audit("get_transcript", "ok", target_id=source["id"])
+    return OpResult(
+        ok=True,
+        action="get_transcript",
+        data={
+            "source": source,
+            "word_count": record["word_count"],
+            "turns": turns,
+            "full_text": record["full_text"],
+            "has_summary": tenant_db.get_summary(ctx.tenant, source_id=source["id"]) is not None,
+        },
+    )
+
+
+def op_list_rules(ctx: Context, *, limit: int = 200) -> OpResult:
+    """§7.8's two groups.
+
+    `My rules` are the ones written here or carried from the person's own AI
+    chats; `From your sources` are the ones Brain extracted. Provenance is the
+    point of the page, so every row carries where it came from.
+    """
+    rows = tenant_db.list_rules(ctx.tenant, limit=limit)
+    mine, extracted = [], []
+    for row in rows:
+        source = tenant_db.get_source(ctx.tenant, row["source_id"]) or {}
+        row["provenance"] = {
+            "title": source.get("title", ""),
+            "locator": row.get("locator_value", ""),
+            "deep_link": deep_link(
+                source.get("canonical_url", ""), row.get("locator_type", ""), row.get("locator_value", "")
+            ),
+        }
+        (mine if row.pop("written_by_hand", False) else extracted).append(row)
+
+    ctx.audit("list_rules", "ok", detail={"count": len(rows)})
+    return OpResult(
+        ok=True,
+        action="list_rules",
+        data={"mine": mine, "from_your_sources": extracted},
+    )
+
+
 def op_list_summaries(ctx: Context, *, limit: int = 50) -> OpResult:
     """§7.6's list. Archived summaries never appear, on any surface: the
     Archive has its own view of them."""

@@ -1222,10 +1222,10 @@ Status values: `shipped-as-plan` · `shipped-divergent` · `partial` · `not-bui
 | 7.1 | `/` | Home — empty state | **built** | ✓ | Shipped app opens on `Everything` (card list), no greeting/typewriter frame |
 | 7.2 | `/` | Home — thread state | not-built | **✓** | Shipped ingestion is a job stepper in a pane, not a conversation thread |
 | 7.3 | `/sources/:id` | Source detail | partial | **✓ ×3** | Inspector pane shows a source's claims; no 6-step work block, no route |
-| 7.4 | `/library/transcripts` | Transcripts list | not-built | **✓** | `source_content.full_text` exists; never surfaced as a transcript |
-| 7.5 | `/transcripts/:id` | Transcript reader | not-built | **✓** | No timestamp-gutter reader, no in-page search, no export |
-| 7.6 | `/library/summaries`, `/summaries/:id` | Summaries | not-built | **✓ ×2** | No `summary` entity in the engine at all |
-| 7.7 | `/library/sources` | Sources list | partial | **✓** | Sources appear inside `Everything`; no type-first meta, no yield column |
+| 7.4 | `/library/transcripts` | Transcripts list | **built** | ✓ | `source_content.full_text` exists; never surfaced as a transcript |
+| 7.5 | `/transcripts/:id` | Transcript reader | **built** | ✓ | No timestamp-gutter reader, no in-page search, no export |
+| 7.6 | `/library/summaries`, `/summaries/:id` | Summaries | **built** | ✓ ×2 | No `summary` entity in the engine at all |
+| 7.7 | `/library/sources` | Sources list | **built** | ✓ | Sources appear inside `Everything`; no type-first meta, no yield column |
 | 7.8 | `/rules` | Rules | partial | **✓ ×2** | `Library` shows epistemic claims — richer than a rule, different card |
 | 7.9 | `/skills` | My skills | partial | **✓ ×3** | `Skills` view exists; no proposed/active/inactive tri-section, no Review flow |
 | 7.10 | `/activity` | Activity | partial | **✓ ×2** | `audit_logs` + Profile block 4 show calls; no usage meters, no row expansion |

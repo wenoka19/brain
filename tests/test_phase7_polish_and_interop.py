@@ -72,9 +72,18 @@ class TestEntryDoor:
         payload = client.post("/api/login", json={"email": "brand-new@example.com"}).json()
         assert payload["seeded"] is True
         counts = client.get("/api/cards").json()["library_counts"]
-        assert counts == {
-            "sources": 2, "claims": 2, "skills": 1, "tensions": 1, "archived_claims": 0
-        }
+        # Asserted per key rather than as a whole dict: §5 added the five the
+        # navigation needs, and an equality check against a growing shape
+        # fails on every addition without ever naming what actually broke.
+        assert counts["sources"] == 2
+        assert counts["claims"] == 2
+        assert counts["skills"] == 1
+        assert counts["tensions"] == 1
+        assert counts["archived_claims"] == 0
+        # The demo library is three editable items, so the nav has nothing
+        # waiting and nothing set aside.
+        assert counts["needs_review"] == 0
+        assert counts["archive"] == 0
 
     def test_signing_back_in_does_not_duplicate_the_demo(self, client):
         client.post("/api/login", json={"email": "returning@example.com"})

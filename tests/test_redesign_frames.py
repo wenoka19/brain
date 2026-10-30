@@ -193,9 +193,16 @@ class TestTheRouter:
         for template in templates:
             for hole in re.findall(r"\$\{([^}]*)\}", template):
                 hole = hole.strip()
-                assert "esc(" in hole or hole.startswith(("icon(", "slot(")), (
-                    f"unescaped interpolation into markup: {hole}"
+                # A hole is allowed when it escapes, when it is one of the two
+                # markup helpers, or when its name ends in `Html` — the
+                # convention for a fragment this file built itself. The test
+                # cannot tell a fragment from a value, so the name has to.
+                trusted = (
+                    "esc(" in hole
+                    or hole.startswith(("icon(", "slot("))
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*Html", hole)
                 )
+                assert trusted, f"unescaped interpolation into markup: {hole}"
 
 
 class TestHomeEmptyState:

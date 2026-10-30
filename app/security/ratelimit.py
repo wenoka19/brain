@@ -132,12 +132,23 @@ class RateLimiter:
         arguments: dict[str, Any] | None = None,
         *,
         is_ingestion: bool = False,
+        loop_guard: bool = True,
     ) -> Decision:
-        """Screen one tool call. Returns the first failing protection."""
+        """Screen one tool call. Returns the first failing protection.
+
+        `loop_guard=False` turns off the duplicate check for this call only.
+        It exists for an idempotent read from the person's own browser: Back,
+        a reload, two tabs and a second visit to the same list are navigation,
+        not a runaway agent, and refusing them turns the product's own pages
+        into errors. The sliding window still applies — that is the ceiling
+        that actually bounds abuse — and every write keeps the guard, because
+        a double-submitted POST is precisely what it is for.
+        """
         with self._lock:
-            loop = self._check_loop(user_id, tool_name, arguments)
-            if not loop.allowed:
-                return loop
+            if loop_guard:
+                loop = self._check_loop(user_id, tool_name, arguments)
+                if not loop.allowed:
+                    return loop
             decision = self._consume(user_id, TOOL_BUCKET)
             if not decision.allowed:
                 return decision

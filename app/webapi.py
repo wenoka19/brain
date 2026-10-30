@@ -118,8 +118,25 @@ def _require_csrf(request: Request) -> None:
         raise ApiError(403, "csrf_failed", "This request could not be verified. Reload the page.")
 
 
-def _rate_limit(ctx: E.Context, name: str, arguments: dict[str, Any], *, ingestion: bool = False) -> None:
-    decision = ratelimit.limiter().check(ctx.user_id, f"web:{name}", arguments, is_ingestion=ingestion)
+def _rate_limit(
+    ctx: E.Context,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    ingestion: bool = False,
+    repeatable: bool = False,
+) -> None:
+    """Screen one web call.
+
+    `repeatable=True` is for an idempotent GET. The loop breaker refuses the
+    same call with the same arguments inside 15 seconds — right for an agent
+    stuck in a retry, wrong for a browser, where Back, a reload and a second
+    visit to the same list all do exactly that. It is set per call site rather
+    than inferred, so which reads dropped the guard is visible in one grep.
+    """
+    decision = ratelimit.limiter().check(
+        ctx.user_id, f"web:{name}", arguments, is_ingestion=ingestion, loop_guard=not repeatable
+    )
     if not decision.allowed:
         raise ApiError(429, decision.reason, decision.message)
 
@@ -408,10 +425,50 @@ async def api_job_run(request: Request) -> Response:
 
 
 @endpoint
+async def api_counts(request: Request) -> Response:
+    """§5: "Counts live in the navigation and nowhere else." One read, so the
+    sidebar does not fetch six lists to draw six numbers."""
+    ctx = _context(request)
+    _rate_limit(ctx, "counts", {}, repeatable=True)
+    from app.db import tenant as tenant_db
+
+    return _json({"ok": True, "counts": tenant_db.counts(ctx.tenant)})
+
+
+@endpoint
+async def api_sources(request: Request) -> Response:
+    ctx = _context(request)
+    _rate_limit(ctx, "list_sources", {}, repeatable=True)
+    return _result(E.op_list_sources(ctx))
+
+
+@endpoint
+async def api_transcripts(request: Request) -> Response:
+    ctx = _context(request)
+    _rate_limit(ctx, "list_transcripts", {}, repeatable=True)
+    return _result(E.op_list_transcripts(ctx))
+
+
+@endpoint
+async def api_transcript(request: Request) -> Response:
+    ctx = _context(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "get_transcript", {"source_id": source_id}, repeatable=True)
+    return _result(E.op_get_transcript(ctx, source_id), status_on_error=404)
+
+
+@endpoint
+async def api_rules(request: Request) -> Response:
+    ctx = _context(request)
+    _rate_limit(ctx, "list_rules", {}, repeatable=True)
+    return _result(E.op_list_rules(ctx))
+
+
+@endpoint
 async def api_skills(request: Request) -> Response:
     """§7.9's three sections and the review count."""
     ctx = _context(request)
-    _rate_limit(ctx, "list_skills", {})
+    _rate_limit(ctx, "list_skills", {}, repeatable=True)
     return _result(E.op_list_skills(ctx))
 
 
@@ -439,7 +496,7 @@ async def api_skill_state(request: Request) -> Response:
 async def api_summaries(request: Request) -> Response:
     """§7.6's list."""
     ctx = _context(request)
-    _rate_limit(ctx, "list_summaries", {})
+    _rate_limit(ctx, "list_summaries", {}, repeatable=True)
     return _result(E.op_list_summaries(ctx))
 
 
@@ -447,7 +504,7 @@ async def api_summaries(request: Request) -> Response:
 async def api_summary(request: Request) -> Response:
     ctx = _context(request)
     summary_id = request.path_params["summary_id"]
-    _rate_limit(ctx, "get_summary", {"summary_id": summary_id})
+    _rate_limit(ctx, "get_summary", {"summary_id": summary_id}, repeatable=True)
     return _result(E.op_get_summary(ctx, summary_id=summary_id), status_on_error=404)
 
 
@@ -456,7 +513,7 @@ async def api_source_summary(request: Request) -> Response:
     """The same summary reached from §7.3's source detail."""
     ctx = _context(request)
     source_id = request.path_params["source_id"]
-    _rate_limit(ctx, "get_summary", {"source_id": source_id})
+    _rate_limit(ctx, "get_summary", {"source_id": source_id}, repeatable=True)
     return _result(E.op_get_summary(ctx, source_id=source_id), status_on_error=404)
 
 
@@ -465,7 +522,7 @@ async def api_source_progress(request: Request) -> Response:
     """§9.5 `GET /api/sources/:id/job` — step states, for the work block."""
     ctx = _context(request)
     source_id = request.path_params["source_id"]
-    _rate_limit(ctx, "source_progress", {"source_id": source_id})
+    _rate_limit(ctx, "source_progress", {"source_id": source_id}, repeatable=True)
     return _result(E.op_source_progress(ctx, source_id), status_on_error=404)
 
 
@@ -787,6 +844,11 @@ ROUTES = [
     Route("/api/jobs/{job_id}/rescue", api_job_rescue, methods=["POST"]),
     Route("/api/sources/{source_id}/job", api_source_progress, methods=["GET"]),
     Route("/api/sources/{source_id}/summary", api_source_summary, methods=["GET"]),
+    Route("/api/counts", api_counts, methods=["GET"]),
+    Route("/api/sources", api_sources, methods=["GET"]),
+    Route("/api/transcripts", api_transcripts, methods=["GET"]),
+    Route("/api/transcripts/{source_id}", api_transcript, methods=["GET"]),
+    Route("/api/rules", api_rules, methods=["GET"]),
     Route("/api/skills", api_skills, methods=["GET"]),
     Route("/api/skills/{skill_id}/review", api_review_skill, methods=["POST"]),
     Route("/api/skills/{skill_id}/state", api_skill_state, methods=["POST"]),

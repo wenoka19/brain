@@ -319,3 +319,191 @@
   .home-stack { margin-top: 0; }
   .home-greeting { font-size: var(--text-stat); }
 }
+
+/* ======================================================================
+   §7.5 and §7.6 — the reading surfaces
+   ====================================================================== */
+.back {
+  margin-bottom: var(--space-4);
+}
+
+/* The caret points back, so it is the forward one turned around. */
+.back-caret {
+  transform: rotate(180deg);
+}
+
+.read-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
+}
+
+.read-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.read-meta > * + *::before {
+  content: "·";
+  margin-right: var(--space-2);
+}
+
+/* The action bar of §7.5. It gains its bottom border only once stuck, which
+   is what `position: sticky` plus the scroll-state class is for. */
+.read-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: var(--space-6) 0 var(--space-4);
+  padding: var(--space-2) 0;
+  background: var(--bg-canvas);
+}
+
+.read-bar[data-stuck="true"] {
+  border-bottom: var(--border-width) solid var(--border-subtle);
+}
+
+.read-bar-spacer { flex: 1 1 auto; }
+
+/* §7.6's Brief / Full. The active segment is an accent-filled pill, which is
+   why its label is `--on-accent` and not white. */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-code);
+  flex: 0 0 auto;
+}
+
+.segment {
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.segment:hover,
+.segment[data-force~="hover"] { color: var(--text-primary); }
+
+.segment[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* §7.5's body: timestamps in a 64px gutter, text at reading size.
+   `R-1` struck speakers, so a turn is a moment and its words. */
+.transcript-body {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+
+.turn {
+  display: contents;
+}
+
+.turn-time {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 3px;
+}
+
+.turn-time a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.turn-time a:hover,
+.turn-time a[data-force~="hover"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.turn-text {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+}
+
+/* The instruction that produced a summary (§7.6). */
+.note-box {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.note-text {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.gist {
+  margin: 0 0 var(--space-8);
+  font-size: var(--text-lead);
+  line-height: var(--leading-read);
+}
+
+/* §7.6: "Every point carries its timestamp, right-aligned, clickable through
+   to the transcript. This is what makes a generated summary trustworthy." */
+.points {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+.point {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+}
+
+.point + .point {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.point-text {
+  flex: 1 1 auto;
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+}
+
+.point-time {
+  flex: 0 0 auto;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 4px;
+}
+
+.point-time a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.point-time a:hover,
+.point-time a[data-force~="hover"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 719px) {
+  .transcript-body { grid-template-columns: 48px 1fr; }
+}

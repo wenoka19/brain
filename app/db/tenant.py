@@ -60,7 +60,8 @@ CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status, created_at DESC
 CREATE TABLE IF NOT EXISTS source_content (
     source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
     full_text TEXT NOT NULL,
-    cues_json TEXT NOT NULL DEFAULT '[]'
+    cues_json TEXT NOT NULL DEFAULT '[]',
+    word_count INTEGER NOT NULL DEFAULT 0
 );
 
 -- `MASTER_PLAN.md` §7.6 and §8. One summary per source, rewritten rather than
@@ -433,6 +434,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 02:24" — so a draft carries where it came from.
     ("skills", "source_id", "ALTER TABLE skills ADD COLUMN source_id TEXT"),
     ("skills", "source_locator", "ALTER TABLE skills ADD COLUMN source_locator TEXT NOT NULL DEFAULT ''"),
+    # §7.4 and §7.5 both print a word count. Computing it per render means
+    # reading every transcript in full to draw a list of twenty-four rows.
+    ("source_content", "word_count", "ALTER TABLE source_content ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -598,6 +602,15 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         applied.append(f"{table}.{column}")
     if _rebuild_skills_for_the_wider_status(conn):
         applied.append("skills.status(proposed|inactive)")
+    # Backfill the counts the column was added for; a row written before it
+    # existed would otherwise read "0 words" forever.
+    backfilled = conn.execute(
+        "UPDATE source_content SET word_count = "
+        "  LENGTH(TRIM(full_text)) - LENGTH(REPLACE(TRIM(full_text), ' ', '')) + 1 "
+        "WHERE word_count = 0 AND TRIM(full_text) != ''"
+    ).rowcount
+    if backfilled:
+        applied.append(f"source_content.word_count({backfilled} rows)")
     return applied
 
 
@@ -730,12 +743,117 @@ def find_source_by_url(conn: sqlite3.Connection, canonical_url: str) -> dict[str
 def set_source_content(
     conn: sqlite3.Connection, source_id: str, full_text: str, cues: list[dict[str, Any]]
 ) -> None:
+    # Counted once, on write. §7.4 lists two dozen transcripts and prints a
+    # word count on each; recomputing would mean reading every transcript in
+    # full to draw the list.
     conn.execute(
-        "INSERT INTO source_content (source_id, full_text, cues_json) VALUES (?, ?, ?) "
+        "INSERT INTO source_content (source_id, full_text, cues_json, word_count) "
+        "VALUES (?, ?, ?, ?) "
         "ON CONFLICT(source_id) DO UPDATE SET full_text = excluded.full_text, "
-        "cues_json = excluded.cues_json",
-        (source_id, full_text, json.dumps(cues, ensure_ascii=False)),
+        "cues_json = excluded.cues_json, word_count = excluded.word_count",
+        (source_id, full_text, json.dumps(cues, ensure_ascii=False), len(full_text.split())),
     )
+
+
+def list_sources(
+    conn: sqlite3.Connection, *, limit: int = 100, active_only: bool = True
+) -> list[dict[str, Any]]:
+    """§7.7's list, with the yield that closes each meta line.
+
+    "A source with nothing green produced nothing. This is the most useful
+    column on the page" — so the counts are part of the read, not a second
+    round trip per row.
+
+    Proposed skills count toward the yield: the source did produce them, and
+    §7.7 reports what came out rather than what has been approved.
+    """
+    sql = """
+        SELECT s.*,
+               (SELECT COUNT(*) FROM epistemic_claims c
+                 WHERE c.source_id = s.id AND c.status = 'active') AS rule_count,
+               (SELECT COUNT(*) FROM skills k
+                 WHERE k.source_id = s.id AND k.status IN ('active','proposed')) AS skill_count,
+               (SELECT COUNT(*) FROM summaries su
+                 WHERE su.source_id = s.id AND su.status = 'active') AS summary_count,
+               (SELECT word_count FROM source_content sc WHERE sc.source_id = s.id) AS word_count
+        FROM sources s
+    """
+    # `user_note` is not a source the person gave Brain — it is the container
+    # a hand-written rule hangs from (§7.8's "Written here"). §7.7 lists
+    # Link, Document and Image, and a pseudo-source would be a row nobody can
+    # open, with no type, no yield and nothing to fix.
+    where = ["s.source_type != 'user_note'"]
+    if active_only:
+        where.append("s.status = 'active'")
+    sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY s.created_at DESC LIMIT ?"
+    return [dict(row) for row in conn.execute(sql, (limit,)).fetchall()]
+
+
+def list_transcripts(
+    conn: sqlite3.Connection, *, limit: int = 100
+) -> list[dict[str, Any]]:
+    """§7.4. A transcript is a source that has readable content.
+
+    It is not an entity of its own — that was the plan's model, not this one
+    (`STACK_AUDIT.md` §4) — so the list is the sources whose text was
+    captured, which is exactly what the frame shows.
+    """
+    rows = conn.execute(
+        """
+        SELECT s.*, sc.word_count,
+               (SELECT COUNT(*) FROM summaries su
+                 WHERE su.source_id = s.id AND su.status = 'active') AS summary_count
+        FROM sources s JOIN source_content sc ON sc.source_id = s.id
+        WHERE s.status = 'active' AND s.source_type != 'user_note'
+              AND TRIM(sc.full_text) != ''
+        ORDER BY s.created_at DESC LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_transcript(conn: sqlite3.Connection, source_id: str) -> dict[str, Any] | None:
+    """§7.5's reading surface: the source, its text, and its cues."""
+    source = get_source(conn, source_id)
+    if source is None:
+        return None
+    content = get_source_content(conn, source_id)
+    if content is None:
+        return None
+    return {
+        "source": source,
+        "full_text": content["full_text"],
+        "cues": content["cues"],
+        "word_count": content.get("word_count") or len(content["full_text"].split()),
+    }
+
+
+def list_rules(
+    conn: sqlite3.Connection, *, limit: int = 200, active_only: bool = True
+) -> list[dict[str, Any]]:
+    """§7.8's two groups, in one read.
+
+    A rule written by the person lives under the synthetic `user_note` source;
+    everything else came out of something they saved. That is the whole
+    distinction between `My rules` and `From your sources`, and it is already
+    in the data rather than needing a new column.
+    """
+    sql = """
+        SELECT c.*, s.title AS source_title, s.source_type, s.canonical_url
+        FROM epistemic_claims c JOIN sources s ON s.id = c.source_id
+    """
+    if active_only:
+        sql += " WHERE c.status = 'active'"
+    sql += " ORDER BY c.created_at DESC LIMIT ?"
+    rows = conn.execute(sql, (limit,)).fetchall()
+    out = []
+    for row in rows:
+        record = hydrate_claim(row)
+        record["written_by_hand"] = row["source_type"] == "user_note"
+        out.append(record)
+    return out
 
 
 def get_source_content(conn: sqlite3.Connection, source_id: str) -> dict[str, Any] | None:
@@ -1304,9 +1422,30 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
         return int(conn.execute(sql).fetchone()[0])
 
     return {
-        "sources": one("SELECT COUNT(*) FROM sources WHERE status = 'active'"),
-        "claims": one("SELECT COUNT(*) FROM epistemic_claims WHERE status = 'active'"),
+        # §5's navigation, where counts live and nowhere else. `sources`
+        # excludes the `user_note` container, because §7.7 does not list it.
+        "sources": one(
+            "SELECT COUNT(*) FROM sources WHERE status = 'active' AND source_type != 'user_note'"
+        ),
+        "transcripts": one(
+            "SELECT COUNT(*) FROM sources s JOIN source_content sc ON sc.source_id = s.id "
+            "WHERE s.status = 'active' AND s.source_type != 'user_note' "
+            "AND TRIM(sc.full_text) != ''"
+        ),
+        "summaries": one("SELECT COUNT(*) FROM summaries WHERE status = 'active'"),
+        "rules": one("SELECT COUNT(*) FROM epistemic_claims WHERE status = 'active'"),
+        # The amber pill shows the queue; the plain count shows the library
+        # (§18.5). Both are returned and the frame picks.
         "skills": one("SELECT COUNT(*) FROM skills WHERE status = 'active'"),
+        "needs_review": one("SELECT COUNT(*) FROM skills WHERE status = 'proposed'"),
+        "archive": one(
+            "SELECT (SELECT COUNT(*) FROM epistemic_claims WHERE status = 'archived') "
+            "     + (SELECT COUNT(*) FROM skills WHERE status = 'archived') "
+            "     + (SELECT COUNT(*) FROM sources WHERE status = 'archived') "
+            "     + (SELECT COUNT(*) FROM summaries WHERE status = 'archived')"
+        ),
+        # Kept: existing callers read these.
+        "claims": one("SELECT COUNT(*) FROM epistemic_claims WHERE status = 'active'"),
         "tensions": one("SELECT COUNT(*) FROM tension_links"),
         "archived_claims": one("SELECT COUNT(*) FROM epistemic_claims WHERE status = 'archived'"),
     }
