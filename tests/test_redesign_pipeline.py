@@ -102,22 +102,21 @@ class TestTheLedgerIsTheSixSteps:
         assert transcribe["state"] == "skipped"
         assert "no audio" in transcribe["detail"]
 
-    def test_an_unbuilt_step_admits_it(self, cfg, user):
-        """`draft_skills` has no producer yet, and is recorded as skipped with
-        the reason — not quietly dropped, and never shown as done.
+    def test_no_step_is_a_placeholder_any_more(self, cfg, user):
+        """All six have a producer now, and this is the assertion that says so.
 
-        `summarise` was here too until step 3 landed. The test narrowing is the
-        point: a step moves off this list by growing a producer, and until then
-        it says so to the person's face.
+        It began life the other way round: while `summarise` and
+        `draft_skills` had no producer, they were recorded as `skipped` with
+        "not built yet" — said to the person's face rather than dropped from
+        the list. Each one moved off that list by growing a real producer, and
+        the test narrowed with them until nothing was left on it. This is the
+        end state, and it fails the day a placeholder comes back.
         """
         job_id, _ = ingest(user, cfg)
-        by_step = {s["step"]: s for s in steps_of(job_id)}
-        assert by_step["draft_skills"]["state"] == "skipped"
-        assert by_step["draft_skills"]["detail"] == "not built yet"
-
-        # Step 3 has a producer now, and must not regress into a caption.
-        assert by_step["summarise"]["state"] == "done"
-        assert by_step["summarise"]["detail"] != "not built yet"
+        for step in steps_of(job_id):
+            assert step["detail"] != "not built yet", step["label"]
+            assert step["state"] in ("done", "skipped"), step["label"]
+            assert step["detail"], f"{step['label']} finished saying nothing"
 
 
 class TestAFailedJobLeavesNothingSpinning:

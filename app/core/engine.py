@@ -892,6 +892,53 @@ def op_archive_item(ctx: Context, item_type: ItemType, item_id: str, *, restore:
 # ===========================================================================
 # the ingestion pipeline + synchronous runner
 # ===========================================================================
+#: A claim earns a skill only if it reads like a procedure. `exact_steps` is
+#: the extractor's own judgement that the source described how to do something
+#: rather than that something is true — so this does not re-decide it, it
+#: reuses it. Two steps is the floor: one step is an instruction, not a skill.
+SKILL_DRAFT_MIN_STEPS = 2
+
+
+def _draft_skills_from_claims(
+    tdb: Any, source: dict[str, Any], claims: Sequence[dict[str, Any]], *, cfg: Settings
+) -> list[dict[str, Any]]:
+    """Turn the procedural claims of one source into skills awaiting review.
+
+    Deliberately conservative. §7.9's queue is a thing a person has to empty by
+    hand, and a pipeline that drafts six skills per video turns the review gate
+    into a chore people click through — which is how a security control stops
+    being one.
+    """
+    drafted: list[dict[str, Any]] = []
+    for claim in claims:
+        steps = claim.get("exact_steps") or []
+        if len(steps) < SKILL_DRAFT_MIN_STEPS:
+            continue
+
+        slug = tenant_db.slugify(claim["claim"][:60]) or f"skill-{claim['id'][-8:]}"
+        if tenant_db.get_skill_by_slug(tdb, slug):
+            # A source re-processed, or two sources that said the same thing.
+            # Never silently overwrite a skill the person may have approved.
+            continue
+
+        record = tenant_db.upsert_skill(
+            tdb,
+            slug=slug,
+            name=claim["claim"][:120],
+            description=claim.get("when_it_applies") or claim["claim"][:160],
+            trigger_when=claim.get("when_it_applies") or "",
+            execution_steps=steps,
+            guardrails=claim.get("when_it_fails") or "",
+            linked_claim_ids=[claim["id"]],
+            origin_type="distilled",
+            status="proposed",
+            source_id=source["id"],
+            source_locator=claim.get("locator_value") or "",
+        )
+        drafted.append(record)
+    return drafted
+
+
 def _step_detail_read(job: dict[str, Any], content: Any) -> str:
     """What step 1 reveals beside its name once it is done.
 
@@ -1159,11 +1206,24 @@ def _ingest_content(job, content, *, cfg, finish):
     )
 
     # ---- step 5: drafting skills ------------------------------------------
-    control_db.finish_step(
-        control, job_id, "draft_skills",
-        detail="not built yet",
-        state="skipped",
-    )
+    # §9.1: "skill rows, `status=proposed`". §10.10 says why that word matters:
+    # "Summaries, rules and skills derived from a source are proposals, never
+    # auto-executed. This is why skills require approval — it is a security
+    # control, not a UX nicety." A drafted skill is unreachable over MCP until
+    # a person approves it, which is enforced by its status and not by tone.
+    control_db.start_step(control, job_id, "draft_skills")
+    drafted = _draft_skills_from_claims(tdb, source, stored, cfg=cfg)
+    if drafted:
+        control_db.finish_step(
+            control, job_id, "draft_skills",
+            detail=f"{len(drafted)} drafted, waiting for your review",
+        )
+    else:
+        control_db.finish_step(
+            control, job_id, "draft_skills",
+            detail="no procedure in this source was worth keeping",
+            state="skipped",
+        )
 
     # ---- step 6: updating memory ------------------------------------------
     # The embeddings were written alongside each claim above and the FTS index
@@ -1184,6 +1244,116 @@ def _ingest_content(job, content, *, cfg, finish):
     outcome["rejected"] = extraction.rejected
     outcome["title"] = source["title"]
     return outcome
+
+
+#: Deciding a skill's fate is a person's act, by §10.10's own argument:
+#: approval is "a security control, not a UX nicety". An agent that could
+#: approve its own drafts would be a gate that opens itself.
+_PERSON_ONLY = ("web_ui", "web_omnibar", "system")
+
+
+def _person_only(ctx: Context, action: str) -> OpResult | None:
+    if ctx.surface in _PERSON_ONLY:
+        return None
+    ctx.audit(action, "refused_surface", detail={"surface": ctx.surface})
+    return _fail(
+        action,
+        "person_only",
+        "Only the person can decide a skill's state. Approve it in Brain's web app.",
+    )
+
+
+def op_list_skills(ctx: Context) -> OpResult:
+    """§7.9's three sections, plus the number the sidebar's amber pill shows."""
+    rows = tenant_db.list_skills(ctx.tenant)
+    sections = {"proposed": [], "active": [], "inactive": []}
+    for row in rows:
+        sections.setdefault(row["status"], []).append(row)
+
+    ctx.audit("list_skills", "ok", detail={"count": len(rows)})
+    return OpResult(
+        ok=True,
+        action="list_skills",
+        data={
+            "from_your_sources": sections["proposed"],
+            "active": sections["active"],
+            "inactive": sections["inactive"],
+            "needs_review": tenant_db.count_skills_needing_review(ctx.tenant),
+        },
+    )
+
+
+def op_review_skill(ctx: Context, skill_id: str, decision: str) -> OpResult:
+    """§7.9's review flow: Approve moves it to Active, Dismiss archives it.
+
+    `Dismiss` archives rather than deletes — §6 rule 8: "Nothing is deleted by
+    an agent… only the person deletes, and only from Archive." A dismissed
+    draft is recoverable from there like everything else.
+    """
+    refusal = _person_only(ctx, "review_skill")
+    if refusal:
+        return refusal
+    if decision not in ("approve", "dismiss"):
+        return _fail("review_skill", "bad_decision", "decision must be approve or dismiss.")
+
+    skill = tenant_db.get_skill(ctx.tenant, skill_id) or tenant_db.get_skill_by_slug(
+        ctx.tenant, skill_id
+    )
+    if skill is None:
+        return _fail("review_skill", "not_found", f"No skill has the id `{skill_id}`.")
+    if skill["status"] != "proposed":
+        return _fail(
+            "review_skill",
+            "not_in_review",
+            f"`{skill['name']}` is not waiting for review — it is {skill['status']}.",
+        )
+
+    target = "active" if decision == "approve" else "archived"
+    tenant_db.set_skill_status(ctx.tenant, skill["id"], target, actor="you")
+    ctx.audit("review_skill", decision, target_id=skill["id"])
+    return OpResult(
+        ok=True,
+        action="review_skill",
+        data={
+            "skill": tenant_db.get_skill(ctx.tenant, skill["id"]),
+            "decision": decision,
+            "needs_review": tenant_db.count_skills_needing_review(ctx.tenant),
+        },
+    )
+
+
+def op_set_skill_state(ctx: Context, skill_id: str, state: str) -> OpResult:
+    """§7.9's overflow menu: Activate or Deactivate.
+
+    Never reaches `proposed`: a skill cannot be pushed back into the review
+    queue, because approval already happened and un-approving is not a thing
+    the frame offers.
+    """
+    refusal = _person_only(ctx, "set_skill_state")
+    if refusal:
+        return refusal
+    if state not in ("active", "inactive"):
+        return _fail("set_skill_state", "bad_state", "state must be active or inactive.")
+
+    skill = tenant_db.get_skill(ctx.tenant, skill_id) or tenant_db.get_skill_by_slug(
+        ctx.tenant, skill_id
+    )
+    if skill is None:
+        return _fail("set_skill_state", "not_found", f"No skill has the id `{skill_id}`.")
+    if skill["status"] == "proposed":
+        return _fail(
+            "set_skill_state",
+            "needs_review_first",
+            f"`{skill['name']}` is still waiting for your review.",
+        )
+
+    tenant_db.set_skill_status(ctx.tenant, skill["id"], state, actor="you")
+    ctx.audit("set_skill_state", state, target_id=skill["id"])
+    return OpResult(
+        ok=True,
+        action="set_skill_state",
+        data={"skill": tenant_db.get_skill(ctx.tenant, skill["id"])},
+    )
 
 
 def op_list_summaries(ctx: Context, *, limit: int = 50) -> OpResult:

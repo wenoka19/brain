@@ -408,6 +408,34 @@ async def api_job_run(request: Request) -> Response:
 
 
 @endpoint
+async def api_skills(request: Request) -> Response:
+    """§7.9's three sections and the review count."""
+    ctx = _context(request)
+    _rate_limit(ctx, "list_skills", {})
+    return _result(E.op_list_skills(ctx))
+
+
+@endpoint
+async def api_review_skill(request: Request) -> Response:
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    skill_id = request.path_params["skill_id"]
+    _rate_limit(ctx, "review_skill", {"skill_id": skill_id})
+    return _result(E.op_review_skill(ctx, skill_id, str(body.get("decision") or "")))
+
+
+@endpoint
+async def api_skill_state(request: Request) -> Response:
+    ctx = _context(request)
+    _require_csrf(request)
+    body = await _body(request)
+    skill_id = request.path_params["skill_id"]
+    _rate_limit(ctx, "set_skill_state", {"skill_id": skill_id})
+    return _result(E.op_set_skill_state(ctx, skill_id, str(body.get("state") or "")))
+
+
+@endpoint
 async def api_summaries(request: Request) -> Response:
     """§7.6's list."""
     ctx = _context(request)
@@ -759,6 +787,9 @@ ROUTES = [
     Route("/api/jobs/{job_id}/rescue", api_job_rescue, methods=["POST"]),
     Route("/api/sources/{source_id}/job", api_source_progress, methods=["GET"]),
     Route("/api/sources/{source_id}/summary", api_source_summary, methods=["GET"]),
+    Route("/api/skills", api_skills, methods=["GET"]),
+    Route("/api/skills/{skill_id}/review", api_review_skill, methods=["POST"]),
+    Route("/api/skills/{skill_id}/state", api_skill_state, methods=["POST"]),
     Route("/api/summaries", api_summaries, methods=["GET"]),
     Route("/api/summaries/{summary_id}", api_summary, methods=["GET"]),
     Route("/api/archive/{item_type}/{item_id}", api_archive, methods=["POST"]),

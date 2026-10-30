@@ -15,7 +15,9 @@ Design notes
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 import sqlite3
 import struct
 import threading
@@ -145,8 +147,14 @@ CREATE TABLE IF NOT EXISTS skills (
     origin_type          TEXT NOT NULL DEFAULT 'distilled'
                          CHECK (origin_type IN ('distilled','github_import','synthesized')),
     version              INTEGER NOT NULL DEFAULT 1,
+    source_id            TEXT REFERENCES sources(id) ON DELETE SET NULL,
+    source_locator       TEXT NOT NULL DEFAULT '',
+    -- §7.9's four sections. `proposed` is the review queue: a skill Brain
+    -- drafted from a source, which §10.10 says must not be reachable until a
+    -- person approves it -- "this is why skills require approval; it is a
+    -- security control, not a UX nicety". `inactive` is kept but unreachable.
     status               TEXT NOT NULL DEFAULT 'active'
-                         CHECK (status IN ('active','archived')),
+                         CHECK (status IN ('proposed','active','inactive','archived')),
     created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -421,7 +429,162 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("epistemic_claims", "archived_by", "ALTER TABLE epistemic_claims ADD COLUMN archived_by TEXT NOT NULL DEFAULT ''"),
     ("skills", "archived_at", "ALTER TABLE skills ADD COLUMN archived_at DATETIME"),
     ("skills", "archived_by", "ALTER TABLE skills ADD COLUMN archived_by TEXT NOT NULL DEFAULT ''"),
+    # §7.9 shows a drafted skill's provenance — "How Linear builds software ·
+    # 02:24" — so a draft carries where it came from.
+    ("skills", "source_id", "ALTER TABLE skills ADD COLUMN source_id TEXT"),
+    ("skills", "source_locator", "ALTER TABLE skills ADD COLUMN source_locator TEXT NOT NULL DEFAULT ''"),
 )
+
+
+#: The rebuild target. Written out rather than derived from `SCHEMA` by string
+#: surgery: a rebuild that silently drifts from the real table is worse than a
+#: duplicated literal, and `test_redesign_skills.py` asserts the two agree
+#: column for column.
+SCHEMA_SKILLS_REBUILD = """
+CREATE TABLE skills_rebuild (
+    rowid                INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                   TEXT UNIQUE NOT NULL,
+    slug                 TEXT UNIQUE NOT NULL,
+    name                 TEXT NOT NULL,
+    description          TEXT NOT NULL,
+    trigger_when         TEXT NOT NULL,
+    execution_steps_json TEXT NOT NULL,
+    guardrails           TEXT NOT NULL DEFAULT '',
+    output_template      TEXT NOT NULL DEFAULT '',
+    linked_claim_ids     TEXT NOT NULL DEFAULT '[]',
+    origin_type          TEXT NOT NULL DEFAULT 'distilled'
+                         CHECK (origin_type IN ('distilled','github_import','synthesized')),
+    version              INTEGER NOT NULL DEFAULT 1,
+    source_id            TEXT REFERENCES sources(id) ON DELETE SET NULL,
+    source_locator       TEXT NOT NULL DEFAULT '',
+    status               TEXT NOT NULL DEFAULT 'active'
+                         CHECK (status IN ('proposed','active','inactive','archived')),
+    archived_at          DATETIME,
+    archived_by          TEXT NOT NULL DEFAULT '',
+    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+SKILL_STATUSES = ("proposed", "active", "inactive", "archived")
+
+#: The one status an MCP client may ever see. §9.2: "Never exposed: anything
+#: archived, any inactive skill, any proposed skill."
+SKILL_REACHABLE = "active"
+
+
+def _statements(script: str) -> list[str]:
+    """Split a schema script into statements that can run inside a transaction.
+
+    `sqlite3.executescript()` issues a `COMMIT` before it runs — documented,
+    and fatal here: it ends the transaction the rebuild depends on, and the
+    later `COMMIT` then fails with "no transaction is active". Every statement
+    in `TRIGGERS` is a `CREATE TRIGGER ... BEGIN ... END;` block, so the split
+    is on `END;` and a plain `;` inside a trigger body is left alone.
+    """
+    out: list[str] = []
+    for chunk in re.split(r"\bEND\s*;", script):
+        text = re.sub(r"--[^\n]*", "", chunk).strip()
+        if not text:
+            continue
+        out.append(f"{text}\nEND" if "BEGIN" in text.upper() else text)
+    return out
+
+
+def _rebuild_skills_for_the_wider_status(conn: sqlite3.Connection) -> bool:
+    """Replace the two-state CHECK on `skills.status` with the four-state one.
+
+    SQLite cannot alter a CHECK, so this is the documented table rebuild. Three
+    things make it delicate here, and each is why a step below exists:
+
+    * `skills_fts` and `skills_vec` are keyed on `skills.rowid`, so rowids are
+      carried across explicitly. Letting AUTOINCREMENT reassign them would
+      silently point every index entry at the wrong skill.
+    * The five triggers live with the table and go with it; `TRIGGERS` is
+      re-run afterwards, and it is `CREATE TRIGGER IF NOT EXISTS` throughout.
+    * `skill_versions` references `skills(id)`, so foreign keys are off for the
+      swap and `foreign_key_check` runs before it is allowed to commit.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skills'"
+    ).fetchone()
+    if row is None:
+        return False
+
+    # Detect on the CONSTRAINT, not on the word. `sqlite_master.sql` keeps the
+    # comments, and this table's own comment explains what `proposed` means —
+    # so searching the raw text for that word reports the migration as already
+    # applied on a database that has never seen it. Found by running the
+    # migration against a database built on the old schema, which is the only
+    # test of a rebuild that means anything.
+    sql = re.sub(r"--[^\n]*", "", row["sql"] or "")
+    constraint = re.search(r"status[^)]*CHECK\s*\(\s*status\s+IN\s*\(([^)]*)\)", sql)
+    allowed = constraint.group(1) if constraint else ""
+    if "proposed" in allowed:
+        return False
+
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(skills)").fetchall()]
+    carried = ", ".join(c for c in columns if c != "rowid")
+
+    # Flush whatever the ALTER migrations above left open: Python's sqlite3
+    # opens an implicit transaction for them, and `BEGIN IMMEDIATE` inside one
+    # is an error. `PRAGMA foreign_keys` is also a no-op inside a transaction,
+    # which would have quietly left foreign keys ON through the swap.
+    conn.commit()
+
+    # Python's sqlite3 runs DDL outside the transaction it manages, so an
+    # explicit `BEGIN` here is committed out from under us by the first
+    # `DROP TRIGGER` — and the `ROLLBACK` in the handler then fails and masks
+    # whatever actually went wrong. Autocommit for the duration, and the
+    # transaction is ours alone.
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(SCHEMA_SKILLS_REBUILD)
+        conn.execute(
+            f"INSERT INTO skills_rebuild (rowid, {carried}) "
+            f"SELECT rowid, {carried} FROM skills"
+        )
+        # Triggers on OTHER tables that reference `skills` must go first.
+        # `skill_vectors_ai` and its siblings live on `skill_vectors` and read
+        # `skills` in their body: they survive the DROP, and then `ALTER ...
+        # RENAME` — which validates every trigger in the schema — fails on
+        # them. The ones on `skills` itself are dropped with the table.
+        # `TRIGGERS` recreates all of them below, being
+        # `CREATE TRIGGER IF NOT EXISTS` throughout.
+        dangling = [
+            row["name"]
+            for row in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name != 'skills'"
+            ).fetchall()
+            if "skills" in (row["sql"] or "")
+        ]
+        for name in dangling:
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+        conn.execute("DROP TABLE skills")
+        conn.execute("ALTER TABLE skills_rebuild RENAME TO skills")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status, updated_at DESC)"
+        )
+        for statement in _statements(TRIGGERS):
+            conn.execute(statement)
+        broken = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if broken:
+            raise sqlite3.IntegrityError(f"skills rebuild broke {len(broken)} reference(s)")
+        conn.execute("COMMIT")
+    except Exception:
+        # Never let the rollback's own failure replace the real traceback.
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = previous_isolation
+    return True
 
 
 def migrate(conn: sqlite3.Connection) -> list[str]:
@@ -433,6 +596,8 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
             continue
         conn.execute(statement)
         applied.append(f"{table}.{column}")
+    if _rebuild_skills_for_the_wider_status(conn):
+        applied.append("skills.status(proposed|inactive)")
     return applied
 
 
@@ -935,10 +1100,20 @@ def upsert_skill(
     output_template: str = "",
     linked_claim_ids: Sequence[str] = (),
     origin_type: str = "distilled",
+    status: str = "active",
+    source_id: str | None = None,
+    source_locator: str = "",
 ) -> dict[str, Any]:
-    """Create or version-bump a skill, snapshotting the previous revision."""
+    """Create or version-bump a skill, snapshotting the previous revision.
+
+    `status` applies to a NEW skill only. An existing one keeps whatever it
+    has: §10.10 calls approval a security control, and an edit that promoted a
+    draft would be that control with a hole in it.
+    """
     if origin_type not in ORIGIN_TYPES:
         raise ValueError(f"unknown origin_type: {origin_type}")
+    if status not in SKILL_STATUSES:
+        raise ValueError(f"unknown skill status: {status}")
     slug = slugify(slug)
     steps_json = json.dumps([s for s in execution_steps if str(s).strip()], ensure_ascii=False)
     links_json = json.dumps(list(linked_claim_ids), ensure_ascii=False)
@@ -950,8 +1125,9 @@ def upsert_skill(
             """
             INSERT INTO skills (id, slug, name, description, trigger_when,
                                 execution_steps_json, guardrails, output_template,
-                                linked_claim_ids, origin_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                linked_claim_ids, origin_type, status,
+                                source_id, source_locator)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 skill_id,
@@ -964,6 +1140,9 @@ def upsert_skill(
                 output_template,
                 links_json,
                 origin_type,
+                status,
+                source_id,
+                source_locator,
             ),
         )
     else:
@@ -1032,10 +1211,42 @@ def set_skill_embedding(
     )
 
 
+def list_skills(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Sequence[str] = ("proposed", "active", "inactive"),
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """§7.9's three sections in one read.
+
+    The default deliberately excludes `archived`: that is the Archive's view,
+    not this page's. A caller that wants archived skills asks for them.
+    """
+    unknown = set(statuses) - set(SKILL_STATUSES)
+    if unknown:
+        raise ValueError(f"unknown skill status: {sorted(unknown)}")
+    placeholders = ",".join("?" for _ in statuses)
+    rows = conn.execute(
+        f"SELECT * FROM skills WHERE status IN ({placeholders}) "
+        "ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, "
+        "updated_at DESC LIMIT ?",
+        (*statuses, limit),
+    ).fetchall()
+    return [hydrate_skill(row) for row in rows]
+
+
+def count_skills_needing_review(conn: sqlite3.Connection) -> int:
+    """What the sidebar's amber pill counts (§5, §18.5): the queue, not the
+    library. When it reaches zero the pill becomes a plain total."""
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM skills WHERE status = 'proposed'"
+    ).fetchone()["n"]
+
+
 def set_skill_status(
     conn: sqlite3.Connection, skill_id: str, status: str, *, actor: str = "you"
 ) -> bool:
-    if status not in ("active", "archived"):
+    if status not in SKILL_STATUSES:
         raise ValueError(status)
     at, by = _archival(status, actor)
     cur = conn.execute(
