@@ -76,13 +76,26 @@ def client():
 
 
 class TestTheSurfaceIsServed:
-    def test_the_shell_answers_every_route_beneath_the_prefix(self, client):
-        """A pushState router owns the path. If `/next/rules` 404s, a deep link
-        works right up until the moment somebody reloads it."""
-        for path in ("/next", "/next/rules", "/next/transcripts/abc", "/next/library/sources"):
-            response = client.get(path)
+    def test_the_shell_answers_every_route_it_claims(self, client):
+        """A pushState router owns the path. If `/rules` 404s, a deep link
+        works right up until the moment somebody reloads it.
+
+        `R-19` moved these to the root. The routes are declared one by one
+        rather than as a catch-all, so the server and the router agree on
+        exactly which URLs exist — which is why this iterates the real list
+        rather than a sample."""
+        from app import webapi
+
+        for path in webapi.UI_PATHS:
+            response = client.get(path.replace("{id}", "abc"))
             assert response.status_code == 200, path
             assert "<title>Brain</title>" in response.text, path
+
+    def test_a_path_it_does_not_claim_is_a_404_not_the_shell(self, client):
+        """A catch-all would make every typo render a page, and a path
+        parameter is the shape of a traversal bug."""
+        for path in ("/rulez", "/library", "/profile/extra"):
+            assert client.get(path).status_code == 404, path
 
     def test_the_four_layers_are_served_and_linked_in_build_order(self, client):
         html = SHELL.read_text()
@@ -91,25 +104,39 @@ class TestTheSurfaceIsServed:
         for sheet in order + ["frames.js"]:
             assert client.get(f"/{sheet}").status_code == 200, sheet
 
-    def test_it_never_links_the_shipped_stylesheet(self):
-        """`app.css` declares five of the same token names with other values."""
+    def test_the_old_stylesheet_is_gone_rather_than_merely_unlinked(self):
+        """`app.css` declared five of the same token names with other values,
+        so a document linking both silently recoloured itself. `R-19` deleted
+        it; this is what stops it coming back."""
+        assert not (ROOT / "app/static/app.css").exists()
         assert 'href="/app.css"' not in SHELL.read_text()
 
-    def test_it_is_gated_like_the_preview_harness(self, monkeypatch):
+    def test_the_app_is_not_behind_a_flag_any_more(self):
+        """`R-19`: while two apps were served, this one sat behind
+        `BRAIN_NEXT_UI` and 404'd without it. That was right then and is a way
+        to ship an outage now — a flag on the whole product is not a safety
+        feature."""
+        import inspect
+
         from app import webapi
-        from app.config import Settings
 
-        assert webapi.next_ui_enabled()
-        prod = Settings(env="prod")
-        monkeypatch.delenv("BRAIN_NEXT_UI", raising=False)
-        assert not webapi.next_ui_enabled(prod)
-        monkeypatch.setenv("BRAIN_NEXT_UI", "1")
-        assert webapi.next_ui_enabled(prod)
+        assert not hasattr(webapi, "next_ui_enabled")
+        assert not hasattr(webapi, "preview_enabled")
 
-    def test_the_shipped_control_plane_is_untouched(self, client):
-        """The redesign is built alongside, not over. `/` is still the old app
-        until the cutover."""
-        assert 'data-layout' in client.get("/").text
+        # The handler's docstring explains the gate by naming it, so read
+        # the code below it rather than the prose.
+        source = inspect.getsource(webapi.ui)
+        body = source.split('"""')[2] if source.count('"""') >= 2 else source
+        assert "environ" not in body, "no kill switch inside the handler either"
+        assert "BRAIN_NEXT_UI" not in body
+
+    def test_the_root_is_this_app_now(self, client):
+        """The inverse of what this file used to assert. `/` was the old
+        control plane until the cutover; it is the shell now."""
+        text = client.get("/").text
+        assert "<title>Brain</title>" in text
+        assert 'data-base=""' in text
+        assert "data-layout" not in text, "that attribute belonged to the old harness"
 
 
 class TestTheTemplate:

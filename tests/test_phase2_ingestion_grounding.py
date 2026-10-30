@@ -1239,16 +1239,39 @@ class TestEngineArchive:
         assert tenant_db.get_source(web.tenant, source_id) is None
         assert tenant_db.counts(web.tenant)["claims"] == 0
 
-    def test_trash_is_still_a_road_to_deletion(self, cfg, user):
-        """Widening the precondition must not close the path that worked."""
+    def test_a_row_left_in_trash_can_still_be_deleted(self, cfg, user):
+        """`R-19` folded Trash into Archive and removed every way to create a
+        trashed row — but `op_permanent_delete` still accepts the status on
+        purpose, because a database restored from a backup taken before the
+        fold can hold one, and `tenant.migrate` only runs on open.
+
+        So the status is written here directly. That is not a shortcut around
+        a deleted operation; it is the only way the state now arises, and the
+        path out of it has to keep working."""
         web = E.build_context(user["user_id"], surface="web_ui")
         E.op_ingest_source(web, YOUTUBE_URL)
         E.run_pending_jobs_sync(web.user_id, cfg=web.cfg)
         source_id = control_db.list_jobs(web.control, web.user_id)[0]["source_id"]
 
-        E.op_trash_item(web, "source", source_id)
+        tenant_db.set_source_status(web.tenant, source_id, "trash")
         assert E.op_permanent_delete(web, source_id).ok
         assert tenant_db.get_source(web.tenant, source_id) is None
+
+    def test_the_migration_folds_a_trashed_row_into_the_archive(self, cfg, user):
+        """The other half: a row that was already in Trash when the old app
+        went must surface somewhere a person can reach, or it is invisible
+        and unrecoverable for good."""
+        web = E.build_context(user["user_id"], surface="web_ui")
+        E.op_ingest_source(web, YOUTUBE_URL)
+        E.run_pending_jobs_sync(web.user_id, cfg=web.cfg)
+        source_id = control_db.list_jobs(web.control, web.user_id)[0]["source_id"]
+        tenant_db.set_source_status(web.tenant, source_id, "trash")
+
+        tenant_db.migrate(web.tenant)
+
+        archived = [row for row in tenant_db.list_archive(web.tenant) if row["id"] == source_id]
+        assert len(archived) == 1
+        assert archived[0]["archived_by"] == "you", "they put it there, not Brain"
 
     def test_archiving_is_the_only_destructive_verb_an_agent_can_use(self):
         """No `op_*` an MCP tool calls may hard-delete."""

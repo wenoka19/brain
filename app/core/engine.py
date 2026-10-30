@@ -2314,40 +2314,18 @@ def op_rescue_job(ctx: Context, job_id: str, pasted_text: str) -> OpResult:
     )
 
 
-@_syncs_tenant
-def op_trash_item(ctx: Context, item_type: ItemType, item_id: str) -> OpResult:
-    """Move a source to Trash — recoverable for 30 days, still not deleted."""
-    if item_type != "source":
-        # Claims and skills ride their source; Trash is a source-level concept.
-        return op_archive_item(ctx, item_type, item_id)
-    source = tenant_db.get_source(ctx.tenant, item_id)
-    if source is None:
-        return _fail("trash_item", "not_found", f"No source has the id `{item_id}`.")
-    tenant_db.set_source_status(ctx.tenant, item_id, "trash")
-    ctx.audit("trash_item", "ok", target_id=item_id)
-    return OpResult(
-        ok=True,
-        action="trash_item",
-        data={
-            "id": item_id,
-            "label": source["title"],
-            "status": "trash",
-            "recoverable_days": 30,
-            "library_counts": tenant_db.counts(ctx.tenant),
-        },
-    )
-
-
-def op_list_trash(ctx: Context) -> OpResult:
-    rows = ctx.tenant.execute(
-        "SELECT id, title, source_type, created_at FROM sources WHERE status = 'trash' "
-        "ORDER BY created_at DESC LIMIT 100"
-    ).fetchall()
-    return OpResult(
-        ok=True,
-        action="list_trash",
-        data={"items": [dict(row) for row in rows], "recoverable_days": 30},
-    )
+# `R-19`: `op_trash_item` and `op_list_trash` are gone with the cutover.
+#
+# Trash was a source-level status only the shipped control plane at `/` could
+# list and restore from. The redesigned app has no Trash screen and no way to
+# fill one — its model is active -> archived -> deleted for good, and §2's
+# 30-day recovery buffer is Archive (`R-14`). Keeping an operation that writes
+# a status nothing can read would have put a source somewhere the person
+# could not reach it. `tenant.migrate` folds the rows that were already there
+# into Archive, and the omnibar's "delete the X" archives.
+#
+# `op_permanent_delete` still accepts `trash` as "set aside" (`R-15`), because
+# a database restored from a backup taken before the fold can still hold one.
 
 
 #: Which table an id belongs to. The ids are prefixed at creation, so §7.12's
@@ -2652,7 +2630,9 @@ def op_profile(ctx: Context) -> OpResult:
         data={
             "email": user.get("email", ""),
             "about_you_context": user.get("about_you_context", ""),
-            "theme_mode": user.get("theme_mode", "warm_sunset"),
+            # `R-10`: two themes, and Light is the one a page with no stored
+            # choice already renders.
+            "theme_mode": user.get("theme_mode") or "light",
             "quotas": {
                 "credits_used": credits["used"],
                 "credits_cap": credits["cap"],

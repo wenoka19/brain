@@ -1,4 +1,4 @@
-"""`python -m app.cli doctor|selftest|preview-ax|preview-ui|worker|serve`
+"""`python -m app.cli doctor|selftest|preview-ax|dev|worker|serve`
 
 `doctor` answers "can this host run brain at all?", `selftest` answers "does the
 whole pipeline still work end to end?", and the two previews print or serve
@@ -122,12 +122,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         failures += 1
 
     static = Path(__file__).parent / "static"
-    missing = [name for name in ("index.html", "app.css", "app.js") if not (static / name).is_file()]
+    # `R-19`: the one app's four layers, its shell and its script. The
+    # consent card's two files are listed too, because the OAuth page is the
+    # one screen that renders outside the shell — and the one nobody would
+    # notice was broken until someone tried to connect an AI.
+    assets = (
+        "shell.html", "frames.js",
+        "tokens.css", "atoms.css", "molecules.css", "frames.css",
+        "consent.css", "consent.js",
+    )
+    missing = [name for name in assets if not (static / name).is_file()]
     if missing:
         line("bad", "web assets", f"missing {', '.join(missing)}")
         failures += 1
     else:
-        line("ok", "web assets", "index.html, app.css, app.js")
+        line("ok", "web assets", f"{len(assets)} files, shell and consent card")
 
     if cfg.is_test:
         line("ok", "providers", "deterministic (BRAIN_ENV=test)")
@@ -502,7 +511,7 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
         E.op_seed_demo(ctx)
         refused = E.op_permanent_delete(ctx, E.DEMO_SOURCE_VIDEO)
         assert not refused.ok and refused.error_reason == "not_set_aside"
-        E.op_trash_item(ctx, "source", E.DEMO_SOURCE_VIDEO)
+        E.op_archive_item(ctx, "source", E.DEMO_SOURCE_VIDEO)
         assert E.op_permanent_delete(ctx, E.DEMO_SOURCE_VIDEO).ok
         assert tenant_db.get_source(ctx.tenant, E.DEMO_SOURCE_VIDEO) is None
 
@@ -578,7 +587,9 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
         with TestClient(create_app(cfg)) as client:
             assert client.get("/healthz").json()["status"] == "ok"
             assert client.get("/").status_code == 200
-            assert client.get("/preview").status_code == 200
+            # `R-19`: a link made while the app lived under `/next` still works.
+            moved = client.get("/next/rules", follow_redirects=False)
+            assert moved.status_code == 302 and moved.headers["location"] == "/rules"
             headers = client.get("/").headers
             assert headers["X-Frame-Options"] == "DENY"
             login = client.post("/api/login", json={"email": "selftest@example.com"})
@@ -831,9 +842,10 @@ def _preview_ax_inner(args: argparse.Namespace, workdir: Path) -> int:
 
 
 # ===========================================================================
-# preview-ui / serve / worker
+# dev / serve / worker
 # ===========================================================================
-def cmd_preview_ui(args: argparse.Namespace) -> int:
+def cmd_dev(args: argparse.Namespace) -> int:
+    """Boot the app on a seeded throwaway library, for looking at it."""
     os.environ.setdefault("BRAIN_ENV", "test")
     os.environ["BRAIN_PREVIEW"] = "1"
     os.environ.setdefault("BRAIN_JWT_SECRET", "preview-secret-key-long-enough-ok")
@@ -852,10 +864,9 @@ def cmd_preview_ui(args: argparse.Namespace) -> int:
         E.op_seed_demo(E.build_context(user["user_id"], surface="web_ui"))
         print(f"seeded the demo library for {args.seed_email}")
 
-    print(f"\n  design harness   http://{args.host}:{args.port}/preview")
-    print(f"  the app itself   http://{args.host}:{args.port}/")
+    print(f"\n  the app   http://{args.host}:{args.port}/")
     print(f"  data             {cfg.data_dir}\n")
-    print("  top bar: layout + edge-state switcher · bottom bar: theme & WCAG tuner\n")
+    print("  seeded with the demo library, so every screen has something on it\n")
 
     import uvicorn
 
@@ -1291,13 +1302,13 @@ def build_parser() -> argparse.ArgumentParser:
     ax.add_argument("--keep", action="store_true")
     ax.set_defaults(func=cmd_preview_ax)
 
-    ui = sub.add_parser("preview-ui", help="serve the Checkpoint B design harness")
+    ui = sub.add_parser("dev", help="serve the app on a seeded throwaway library")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8080)
     ui.add_argument("--log-level", default="info")
     ui.add_argument("--no-seed", dest="seed", action="store_false", default=True)
     ui.add_argument("--seed-email", default="founder@example.com")
-    ui.set_defaults(func=cmd_preview_ui)
+    ui.set_defaults(func=cmd_dev)
 
     serve = sub.add_parser("serve", help="run the production server")
     serve.add_argument("--host", default="0.0.0.0")

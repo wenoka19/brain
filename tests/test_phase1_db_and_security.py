@@ -231,7 +231,10 @@ class TestControlDB:
         first = control_db.ensure_user(control, "Founder@Example.com")
         second = control_db.ensure_user(control, "founder@example.com")
         assert first["user_id"] == second["user_id"]
-        assert first["theme_mode"] == "warm_sunset"
+        # `R-10` dropped Warm Sunset; `R-19` found the default had outlived
+        # it, so every new account started on a theme the picker does not
+        # offer and nothing renders.
+        assert first["theme_mode"] == "light"
         assert first["media_minutes_used"] == 0 and first["files_used"] == 0
         assert first["schema_version"] == 1
 

@@ -12,11 +12,10 @@
 <link rel="stylesheet" href="/molecules.css">
 <link rel="stylesheet" href="/frames.css">
 </head>
-<!-- The new surface is served under a prefix while the shipped control plane
-     still owns `/`. The router adds it to every link and strips it before
-     matching, so a deep link survives a hard reload today and at cutover this
-     becomes `data-base=""` — one attribute, nothing else. -->
-<body data-base="/next">
+<!-- R-19, the cutover: this app owns the root. The attribute stays because
+     the router still reads it, and an empty base is the identity case — a
+     logical path and a real URL are now the same string. -->
+<body data-base="">
 
 <!-- The icon set. Inline symbols only: nothing is fetched, so the strict CSP
      holds and no glyph can render as a missing-character box. Every one is a

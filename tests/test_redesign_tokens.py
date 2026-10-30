@@ -192,15 +192,20 @@ class TestTheTokenContract:
         for name in DECL.findall(block):
             assert name[0] in SEMANTICS, f"the dark theme redeclares {name[0]}"
 
-    def test_tokens_and_the_old_stylesheet_are_never_loaded_together(self):
-        """Five names collide across the two files with different values, so a
-        document that links both silently recolours itself."""
-        html = (ROOT / "app/static/index.html").read_text()
-        links = set(re.findall(r'href="/(app\.css|tokens\.css)"', html))
-        assert links != {"app.css", "tokens.css"}, (
-            "index.html links both stylesheets; --bg-canvas, --text-primary and "
-            "--accent are declared in each with different values"
-        )
+    def test_no_later_layer_declares_a_token_of_its_own(self):
+        """The old form of this guarded against `app.css` and `tokens.css`
+        being loaded into one document: five names collided across them with
+        different values, so the page silently recoloured itself. `R-19`
+        deleted `app.css`, which removes that collision and leaves the
+        property underneath — one definition of `--accent` for the whole
+        product, including the OAuth card served outside the shell."""
+        assert not (ROOT / "app/static/app.css").exists()
+        for name in ("atoms.css", "molecules.css", "frames.css", "consent.css"):
+            body = re.sub(r"/\*.*?\*/", "", (ROOT / "app/static" / name).read_text(), flags=re.S)
+            for block in re.findall(r":root[^{]*\{([^}]*)\}", body):
+                assert not re.search(r"--[a-z0-9-]+\s*:", block), (
+                    f"{name} declares a token; tokens.css is the one place"
+                )
 
 
 # ---------------------------------------------------------------------------

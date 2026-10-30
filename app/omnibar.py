@@ -159,8 +159,13 @@ COMMAND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("edit_step", re.compile(r"^(?:edit|change|update)\s+step\s+(\d+)\s+(?:of|in|from)\s+(.+?)\s+to\s+(.+)$", re.I)),
     ("rename", re.compile(r"^rename\s+(.+?)\s+to\s+(.+)$", re.I)),
     ("restore", re.compile(r"^(?:restore|unarchive|bring back|un-archive)\s+(.+)$", re.I)),
-    ("trash", re.compile(r"^(?:trash|bin|move)\s+(.+?)(?:\s+to\s+(?:the\s+)?trash)?$", re.I)),
-    ("archive", re.compile(r"^(?:archive|hide|remove|delete|drop|get rid of)\s+(.+)$", re.I)),
+    # `R-19`: Trash folded into Archive at the cutover, so every one of these
+    # verbs lands in the same place. "to the trash" is still accepted as a
+    # trailing phrase, because people who learned to say it should not get an
+    # "I did not understand that".
+    ("archive", re.compile(
+        r"^(?:archive|hide|remove|delete|drop|get rid of|trash|bin|move)\s+(.+?)"
+        r"(?:\s+to\s+(?:the\s+)?(?:trash|archive))?$", re.I)),
     ("remember", re.compile(r"^(?:remember(?:\s+that)?|note that|my rule is)\s*[:,]?\s*(.+)$", re.I)),
     ("remember", re.compile(r"^((?:i\s+)?(?:always|never)\s+.+)$", re.I)),
     ("filter", re.compile(r"^(?:find|show me|show|search(?:\s+for)?|look up)\s+(.+)$", re.I)),
@@ -239,7 +244,6 @@ def _confirm(action: str, target: ResolvedTarget, extra: str = "") -> str:
     verbs = {
         "archive": "Archive",
         "restore": "Restore",
-        "trash": "Move to Trash",
         "rename": "Rename",
         "edit_step": "Edit",
     }
@@ -312,16 +316,12 @@ def _deterministic_command(ctx: E.Context, text: str) -> OmnibarPlan | None:
         if not target.id:
             return _unresolved(text, phrase)
 
-        requested_delete = bool(re.match(r"^\s*delete\b", text, re.I))
-        if action == "trash" and target.kind != "source":
-            action = "archive"  # Trash is a source-level concept
         note = ""
-        if requested_delete:
+        if re.match(r"^\s*delete\b", text, re.I):
             # Never let a typed "delete" become a hard delete.
-            action = "trash" if target.kind == "source" else "archive"
             note = (
-                "Nothing is deleted outright — it goes to Trash, recoverable for 30 days. "
-                "Permanent deletion lives in Profile → Data & Recovery."
+                "Nothing is deleted outright — it goes to your Archive, where you can "
+                "restore it or delete it for good."
             )
         return OmnibarPlan(
             mode=MODE_COMMAND,
@@ -478,22 +478,6 @@ def execute(ctx: E.Context, plan: OmnibarPlan) -> tuple[OmnibarReceipt, E.OpResu
                 f"{verb} “{truncate_words(result.data['label'], 10)}”",
                 undo_action="restore_item" if plan.action == "archive" else "archive_item",
                 undo_params={"item_type": plan.target_kind, "id": plan.target_id},
-                undo_label="Undo",
-            ),
-            result,
-        )
-
-    if plan.action == "trash":
-        result = E.op_trash_item(ctx, "source", plan.target_id)
-        if not result.ok:
-            return OmnibarReceipt(False, result.error_message, error_reason=result.error_reason), result
-        return (
-            OmnibarReceipt(
-                True,
-                f"Moved “{truncate_words(result.data['label'], 10)}” to Trash · "
-                "recoverable for 30 days",
-                undo_action="restore_item",
-                undo_params={"item_type": "source", "id": plan.target_id},
                 undo_label="Undo",
             ),
             result,

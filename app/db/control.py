@@ -43,7 +43,11 @@ CREATE TABLE IF NOT EXISTS users (
     user_id            TEXT PRIMARY KEY,
     email              TEXT UNIQUE NOT NULL,
     about_you_context  TEXT NOT NULL DEFAULT '',
-    theme_mode         TEXT NOT NULL DEFAULT 'warm_sunset'
+    -- `R-10` dropped Warm Sunset; the default outlived it, so every new
+    -- account was created on a theme the picker does not offer and nothing
+    -- renders. The CHECK still accepts it so a row written before the
+    -- migration below still loads.
+    theme_mode         TEXT NOT NULL DEFAULT 'light'
                        CHECK (theme_mode IN ('light','dark','warm_sunset')),
     -- `R-18` fossils. Credits replaced them; neither MIGRATIONS tuple has a
     -- DROP precedent and a column nothing reads costs nothing, so they stay
@@ -307,6 +311,12 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("users", "keep_uploads", "ALTER TABLE users ADD COLUMN keep_uploads INTEGER NOT NULL DEFAULT 1"),
 )
 
+#: Not a column: a value. `R-10` dropped Warm Sunset and `R-19` found the
+#: default had outlived it, so accounts exist sitting on a theme the picker
+#: does not offer. They are moved to Light, which is what they were seeing
+#: anyway — the page falls back to it when the stored name matches no theme.
+_THEME_FOLD = "UPDATE users SET theme_mode = 'light' WHERE theme_mode = 'warm_sunset'"
+
 
 def migrate(conn: sqlite3.Connection) -> list[str]:
     """Apply additive column migrations. Idempotent, and safe to run on boot."""
@@ -319,6 +329,9 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
             continue
         conn.execute(statement)
         applied.append(f"{table}.{column}")
+    folded = conn.execute(_THEME_FOLD).rowcount
+    if folded:
+        applied.append(f"users.theme_mode(warm_sunset->light, {folded} rows)")
     return applied
 
 
@@ -428,7 +441,9 @@ def update_profile(
         sets.append("about_you_context = ?")
         params.append(about_you_context[:20_000])
     if theme_mode is not None:
-        if theme_mode not in ("light", "dark", "warm_sunset"):
+        # `R-10`: two themes. A write of the third is refused rather than
+        # stored, because nothing would render it.
+        if theme_mode not in ("light", "dark"):
             raise ValueError(f"unknown theme_mode: {theme_mode}")
         sets.append("theme_mode = ?")
         params.append(theme_mode)

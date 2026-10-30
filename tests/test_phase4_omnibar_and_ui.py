@@ -157,11 +157,15 @@ class TestRouting:
         assert "did not read as a command" in plan.message
 
     def test_typed_delete_can_never_hard_delete(self, seeded):
-        """"delete" is routed to Trash, and the plan says so out loud."""
+        """A typed "delete" archives, and the plan says so before it runs.
+
+        `R-19` folded Trash into Archive, so the destination changed and the
+        guarantee did not: nothing the bar does is irreversible."""
         plan = omnibar.route(seeded, "delete the Enterprise Outbound Benchmark", submitted=True)
-        assert plan.action in ("trash", "archive")
+        assert plan.action == "archive"
         assert "Nothing is deleted outright" in plan.message
-        assert "30 days" in plan.message
+        assert "Archive" in plan.message
+        assert "Trash" not in plan.message
 
     def test_recency_words_resolve_to_the_newest_source(self, seeded):
         newest = tenant_db.upsert_source(
@@ -252,12 +256,19 @@ class TestExecution:
         assert "disagrees with" in receipt.text
         assert receipt.undo_action == "archive_claim"
 
-    def test_trash_from_the_bar_is_recoverable(self, seeded):
+    def test_delete_from_the_bar_is_recoverable(self, seeded):
+        """It lands in the Archive, and Undo takes it back out."""
+        def archived():
+            return {item["id"] for item in E.op_list_archive(seeded).data["items"]}
+
+        assert E.DEMO_SOURCE_REPORT not in archived()
         receipt, _ = self._run(seeded, "delete the Enterprise Outbound Benchmark")
-        assert receipt.ok and "30 days" in receipt.text
-        assert len(E.op_list_trash(seeded).data["items"]) == 1
+        assert receipt.ok
+        # Archiving a source takes its claims with it, so this checks the
+        # source itself rather than counting rows.
+        assert E.DEMO_SOURCE_REPORT in archived()
         assert omnibar.undo(seeded, receipt.undo_action, receipt.undo_params).ok
-        assert E.op_list_trash(seeded).data["items"] == []
+        assert E.DEMO_SOURCE_REPORT not in archived()
 
     def test_ingest_through_the_bar_queues_without_processing(self, seeded):
         plan = omnibar.route(seeded, "https://example.com/a-new-article", submitted=True)
@@ -527,17 +538,24 @@ class TestWebApiSurface:
         refused = signed_in.post(f"/api/delete/{source_id}", json={})
         assert refused.status_code == 400 and refused.json()["reason"] == "not_set_aside"
 
-        assert signed_in.post(f"/api/trash/source/{source_id}", json={}).json()["status"] == "trash"
-        assert signed_in.get("/api/trash").json()["items"][0]["id"] == source_id
+        # `R-19`: Archive is the one road to a permanent delete now.
+        assert signed_in.post(f"/api/archive/source/{source_id}", json={}).json()["ok"]
+        archived = signed_in.get("/api/archive").json()["items"]
+        assert any(item["id"] == source_id for item in archived)
         deleted = signed_in.post(f"/api/delete/{source_id}", json={}).json()
         assert deleted["ok"] and deleted["deleted_claims"] >= 1
-        assert signed_in.get("/api/trash").json()["items"] == []
+        assert not any(
+            item["id"] == source_id for item in signed_in.get("/api/archive").json()["items"]
+        )
 
-    def test_trashing_is_undone_by_restoring(self, signed_in):
+    def test_archiving_is_undone_by_restoring(self, signed_in):
         signed_in.post("/api/demo/seed", json={})
-        signed_in.post(f"/api/trash/source/{E.DEMO_SOURCE_VIDEO}", json={})
+        signed_in.post(f"/api/archive/source/{E.DEMO_SOURCE_VIDEO}", json={})
         signed_in.post(f"/api/archive/source/{E.DEMO_SOURCE_VIDEO}", json={"restore": True})
-        assert signed_in.get("/api/trash").json()["items"] == []
+        assert not any(
+            item["id"] == E.DEMO_SOURCE_VIDEO
+            for item in signed_in.get("/api/archive").json()["items"]
+        )
         assert signed_in.get("/api/cards?view=library").json()["claims"]
 
     def test_profile_serves_all_five_blocks(self, signed_in, cfg):
@@ -546,19 +564,24 @@ class TestWebApiSurface:
         assert profile["about_you_context"] == ""           # block 1
         assert profile["mcp_url"].endswith("/mcp")          # block 2
         assert "sessions" in profile                        # block 2
-        assert profile["theme_mode"] in ("light", "dark", "warm_sunset")  # block 3
+        assert profile["theme_mode"] in ("light", "dark")   # block 3 (`R-10`)
         assert profile["quotas"]["credits_cap"] == cfg.quota_credits     # block 4 (`R-18`)
         assert profile["retention"]["upload_days"] == cfg.upload_retention_days
         assert "files_cap" not in profile["quotas"], "`R-18`: one allowance, not three"
-        assert signed_in.get("/api/trash").status_code == 200            # block 5
+        assert signed_in.get("/api/archive").status_code == 200          # block 5 (`R-19`)
 
     def test_about_you_and_theme_persist(self, signed_in):
         signed_in.post("/api/profile", json={"about_you_context": "I run outbound for 6 people."})
-        signed_in.post("/api/profile", json={"theme_mode": "warm_sunset"})
+        signed_in.post("/api/profile", json={"theme_mode": "dark"})
         profile = signed_in.get("/api/profile").json()
         assert profile["about_you_context"] == "I run outbound for 6 people."
-        assert profile["theme_mode"] == "warm_sunset"
+        assert profile["theme_mode"] == "dark"
         assert signed_in.post("/api/profile", json={"theme_mode": "neon"}).status_code == 400
+        # `R-10`: two themes. The third is refused rather than stored, because
+        # nothing would render it.
+        assert signed_in.post(
+            "/api/profile", json={"theme_mode": "warm_sunset"}
+        ).status_code == 400
 
     def test_sessions_show_their_remaining_days_and_revoke_instantly(self, signed_in, cfg):
         user_id = signed_in.get("/api/profile").json() and control_db.control().execute(
@@ -605,178 +628,64 @@ class TestWebApiSurface:
         assert response.json()["reason"] == "internal_error"
 
 
-class TestPreviewHarness:
-    def test_the_harness_is_served_in_test_mode(self, signed_in):
-        response = signed_in.get("/preview")
+class TestTheAppIsServed:
+    """`R-19`: one app, at the root, with no flag in front of it.
+
+    What `TestPreviewHarness` used to assert about `/app.css` and `/app.js`,
+    said about the files that exist now. The three *contract* properties the
+    old `TestStaticContract` held — no inline script, nothing from a third
+    party, every icon in the sprite — moved to
+    `tests/test_redesign_frames.py`, where the rest of the new app's source
+    contract already lives.
+    """
+
+    #: Everything the shell asks the server for, with the type it must answer.
+    SERVED = (
+        ("/tokens.css", "text/css"),
+        ("/atoms.css", "text/css"),
+        ("/molecules.css", "text/css"),
+        ("/frames.css", "text/css"),
+        ("/frames.js", "javascript"),
+        ("/consent.css", "text/css"),
+        ("/consent.js", "javascript"),
+    )
+
+    def test_every_asset_the_shell_links_is_served(self, client):
+        shell = (STATIC / "shell.html").read_text(encoding="utf-8")
+        linked = set(re.findall(r'(?:href|src)="(/[^"]+)"', shell))
+        assert linked, "the shell links nothing — has it been renamed?"
+        for path in linked:
+            response = client.get(path)
+            assert response.status_code == 200, f"{path} is linked but not served"
+
+    def test_each_one_answers_with_the_type_it_claims(self, client):
+        for path, kind in self.SERVED:
+            assert kind in client.get(path).headers["content-type"], path
+
+    def test_the_root_serves_the_app(self, client):
+        response = client.get("/")
         assert response.status_code == 200
-        assert "harness" in response.text
+        assert "<title>Brain</title>" in response.text
+        assert 'data-base=""' in response.text, "the prefix is gone, so the base is empty"
 
-    def test_the_harness_is_off_unless_explicitly_enabled(self, cfg, monkeypatch):
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.delenv("BRAIN_PREVIEW", raising=False)
-        from app import config as config_module
+    def test_the_old_assets_are_gone_rather_than_merely_unlinked(self, client):
+        for path in ("/app.css", "/app.js", "/preview"):
+            assert client.get(path).status_code == 404, path
 
-        prod = config_module.load_settings()
-        assert webapi.preview_enabled(prod) is False
-        monkeypatch.setenv("BRAIN_PREVIEW", "1")
-        assert webapi.preview_enabled(prod) is True
+    def test_a_link_made_before_the_cutover_still_works(self, client):
+        """Someone bookmarked `/next/rules` while the app lived there."""
+        for old, new in (("/next", "/"), ("/next/rules", "/rules"), ("/next/", "/")):
+            moved = client.get(old, follow_redirects=False)
+            assert moved.status_code == 302, old
+            assert moved.headers["location"] == new, old
 
-    def test_static_assets_are_served(self, client):
-        assert client.get("/").status_code == 200
-        assert "text/css" in client.get("/app.css").headers["content-type"]
-        assert "javascript" in client.get("/app.js").headers["content-type"]
+    def test_a_query_string_survives_the_redirect(self, client):
+        moved = client.get("/next/skills?create=1", follow_redirects=False)
+        assert moved.headers["location"] == "/skills?create=1"
 
     def test_security_headers_cover_the_web_surface(self, client):
-        for path in ("/", "/app.js", "/api/me"):
+        for path in ("/", "/frames.js", "/api/me"):
             headers = client.get(path).headers
             assert headers["X-Frame-Options"] == "DENY"
             assert "script-src 'self'" in headers["Content-Security-Policy"]
             assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
-
-
-# ===========================================================================
-# the static files themselves
-# ===========================================================================
-class TestStaticContract:
-    @pytest.fixture(scope="class")
-    def html(self):
-        return (STATIC / "index.html").read_text(encoding="utf-8")
-
-    @pytest.fixture(scope="class")
-    def css(self):
-        return (STATIC / "app.css").read_text(encoding="utf-8")
-
-    @pytest.fixture(scope="class")
-    def js(self):
-        return (STATIC / "app.js").read_text(encoding="utf-8")
-
-    def test_the_page_is_compatible_with_script_src_self(self, html):
-        """No inline script and no inline handlers, so the CSP stays strict."""
-        scripts = re.findall(r"<script\b([^>]*)>(.*?)</script>", html, re.S)
-        for attrs, body in scripts:
-            assert "src=" in attrs, "an inline <script> would need 'unsafe-inline'"
-            assert body.strip() == ""
-        assert not re.search(r"\son[a-z]+\s*=", html)
-
-    def test_nothing_is_loaded_from_a_third_party(self, html, css, js):
-        for text in (html, css, js):
-            assert "http://" not in text.replace("http://www.w3.org", "")
-            assert "cdn." not in text
-            assert "googleapis" not in text and "unpkg" not in text
-
-    def test_the_icon_dictionary_is_complete_and_self_contained(self, html, js):
-        ids = set(re.findall(r'<symbol id="i-([a-z]+)"', html))
-        expected = {
-            "search", "ingest", "skill", "quote", "conflict", "locator", "archive",
-            "undo", "trash", "edit", "profile", "check", "copy",
-        }
-        assert ids == expected, ids ^ expected
-        # Every icon referenced anywhere must exist in the sprite.
-        used = set(re.findall(r'href="#i-([a-z]+)"', html)) | set(
-            re.findall(r'icon\("([a-z]+)"', js)
-        )
-        assert used <= ids, used - ids
-
-    def test_the_omnibar_is_not_a_chatbot(self, html, css, js):
-        """Rule 1: no sparkle icon, no bubbles, no thread.
-
-        Comments are stripped first — a comment documenting the ban is not a
-        violation of it.
-        """
-        def strip_comments(text: str) -> str:
-            text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-            return re.sub(r"^\s*//.*$", "", text, flags=re.M)
-
-        for text in (html, css, js):
-            bare = strip_comments(text)
-            for glyph in ("✨", "🪄", "💬", "🗨"):
-                assert glyph not in bare
-            for word in ("sparkle", "bubble", "chat-thread", "assistant-message"):
-                assert word not in bare.lower(), word
-
-    def test_every_theme_defines_every_semantic_token(self, css):
-        required = [
-            "--bg-canvas", "--bg-card", "--bg-card-hover", "--bg-inset",
-            "--border-subtle", "--border-strong", "--text-primary", "--text-muted",
-            "--accent", "--accent-quiet", "--accent-conflict", "--accent-ok",
-            "--ease-ui", "--duration-ui",
-        ]
-        for theme in ("light", "dark", "warm_sunset"):
-            block = re.search(
-                r':root\[data-theme="' + theme + r'"\]\s*\{(.*?)\}', css, re.S
-            )
-            assert block, theme
-            for token in required:
-                assert token in block.group(1), f"{theme} is missing {token}"
-
-    def test_warm_sunset_uses_the_gentler_motion(self, css):
-        block = re.search(r':root\[data-theme="warm_sunset"\]\s*\{(.*?)\}', css, re.S).group(1)
-        assert "--duration-ui:260ms" in block.replace(" ", "")
-
-    def test_no_colour_is_hard_coded_outside_the_token_blocks(self, css):
-        """Every rule must read a token, so the live tuner can rewrite anything."""
-        without_tokens = re.sub(r':root(\[data-theme="[a-z_]+"\])?\s*\{.*?\}', "", css, flags=re.S)
-        leaked = [
-            hex_value
-            for hex_value in re.findall(r"#[0-9A-Fa-f]{3,8}\b", without_tokens)
-            if hex_value.lower() not in ("#fff", "#ffffff")  # button-on-accent text
-        ]
-        assert leaked == [], leaked
-
-    def test_the_two_card_silhouettes_are_distinct(self, css, js):
-        squashed = re.sub(r"\s+", "", css)
-        assert ".card-skill{border-left:3pxsolidvar(--accent)}" in squashed
-        assert "card-skill" in js and "card-claim" in js
-
-    def test_the_outer_doll_shows_the_claim_and_the_inner_doll_the_quote(self, js):
-        """Checkpoint B's correction to Rule 2."""
-        outer = js[js.index("const head = `<button class=\"card-head\""):js.index("// Inner Doll")]
-        assert "esc(claim.claim)" in outer
-        assert "anchor_quote" not in outer
-        inner = js[js.index("// Inner Doll"):js.index("return `<article class=\"card card-claim\"")]
-        assert "anchor_quote" in inner
-        assert "when_it_fails" in inner and "metrics_and_quotes" in inner
-
-    def test_the_mobile_breakpoint_turns_the_inspector_into_a_sheet(self, css):
-        mobile = css[css.index("@media (max-width:860px)"):]
-        assert "translateY(100%)" in mobile
-        assert ".mobile-bar" in mobile
-        assert "border-top-left-radius" in mobile
-
-    def test_reduced_motion_is_respected(self, css):
-        assert "prefers-reduced-motion" in css
-
-    def test_the_profile_modal_blocks_are_numbered_and_in_order(self, html):
-        """Five locked at Checkpoint B, plus the audit log the founder added."""
-        headings = re.findall(r"<h3>(\d) · ([^<]+)</h3>", html)
-        assert [number for number, _ in headings] == ["1", "2", "3", "4", "5", "6"]
-        labels = " ".join(label.lower() for _, label in headings)
-        assert "about you" in labels
-        assert "mcp connection" in labels and "sessions" in labels
-        assert "appearance" in labels
-        assert "quotas" in labels
-        assert "recovery" in labels
-        assert "audit log" in labels
-
-    def test_the_tuner_exposes_the_contrast_readout_and_token_copy(self, html, js):
-        assert 'id="contrast"' in html and 'id="copy-tokens"' in html
-        assert "function updateContrast" in js
-        assert "0.03928" in js  # the WCAG relative-luminance curve
-        assert "function copyTokens" in js
-
-    def test_all_four_layouts_stay_selectable_in_the_harness(self, html, js):
-        assert set(re.findall(r'data-layout-pick="([A-Za-z0-9]+)"', html)) == {
-            "B1", "B2", "B3", "merged"
-        }
-        assert '["B1", "B2", "B3", "merged"].includes(layout)' in js
-
-    def test_every_edge_state_is_selectable(self, html):
-        options = set(re.findall(r'<option value="([a-z-]+)">', html))
-        assert {"blocked", "zero-match", "first-run", "ingesting"} <= options
-
-    def test_user_content_is_escaped_everywhere_it_is_interpolated(self, js):
-        """A claim is untrusted text; it must never reach innerHTML unescaped."""
-        for field in ("claim.claim", "claim.anchor_quote", "skill.name", "skill.slug"):
-            for match in re.finditer(re.escape("${" + field), js):
-                window = js[max(0, match.start() - 40):match.start()]
-                assert "esc(" in window, f"{field} interpolated without esc()"

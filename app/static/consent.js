@@ -7,14 +7,16 @@
 (function () {
   var root = document.documentElement;
 
-  function afterSix() {
-    var hour = new Date().getHours();
-    return hour >= 18 || hour < 6;
-  }
-
+  // `R-10`: two themes, light and dark. The Warm Sunset third and its 18:00
+  // switch were dropped from the design, so "auto" follows the machine rather
+  // than the clock — which is what a person who picked auto meant anyway.
   var stored = "light";
   try { stored = localStorage.getItem("brain.theme") || "light"; } catch (_) {}
-  root.dataset.theme = stored === "auto" ? (afterSix() ? "warm_sunset" : "light") : stored;
+  if (stored === "auto") {
+    var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    stored = dark ? "dark" : "light";
+  }
+  root.dataset.theme = stored === "dark" ? "dark" : "light";
 
   var cancel = document.getElementById("consent-cancel");
   if (cancel) {

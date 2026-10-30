@@ -1,12 +1,12 @@
-"""The Web Control Plane's HTTP surface (`/api/*`) and the `/preview` harness.
+"""The Web Control Plane's HTTP surface: §5's pages and `/api/*`.
 
 Browser sessions are separate from MCP tokens on purpose: an agent gets an
 audience-bound OAuth token, a person gets a signed, `SameSite=Strict` cookie.
 Every mutating request additionally needs a double-submit CSRF header, so a
 cross-site form post cannot act as the user even if the cookie rides along.
 
-Hard deletion, Trash recovery and export live here and **only** here — there is
-no MCP tool that reaches them.
+Hard deletion, archive recovery and export live here and **only** here — there
+is no MCP tool that reaches them.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from app import auth, omnibar
@@ -321,11 +321,6 @@ async def api_search(request: Request) -> Response:
 async def api_item(request: Request) -> Response:
     ctx = _context(request)
     return _result(E.op_fetch(ctx, request.path_params["item_id"]), status_on_error=404)
-
-
-@endpoint
-async def api_trash(request: Request) -> Response:
-    return _result(E.op_list_trash(_context(request)))
 
 
 @endpoint
@@ -698,16 +693,6 @@ async def api_archive(request: Request) -> Response:
 
 
 @endpoint
-async def api_trash_item(request: Request) -> Response:
-    ctx = _context(request)
-    _require_csrf(request)
-    return _result(
-        E.op_trash_item(ctx, request.path_params["item_type"], request.path_params["item_id"]),
-        status_on_error=404,
-    )
-
-
-@endpoint
 async def api_delete(request: Request) -> Response:
     """The one destructive endpoint.
 
@@ -963,7 +948,7 @@ async def api_demo(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# static + preview
+# static
 # ---------------------------------------------------------------------------
 def _static(filename: str, media_type: str) -> Callable:
     async def serve(request: Request) -> Response:
@@ -980,31 +965,17 @@ def _static(filename: str, media_type: str) -> Callable:
     return serve
 
 
-def next_ui_enabled(cfg: Settings | None = None) -> bool:
-    """The redesign is dev-gated until it replaces the shipped control plane.
+async def ui(request: Request) -> Response:
+    """Serve the shell for every one of §5's routes.
 
-    Same shape as the preview gate: on in tests, on with an explicit
-    environment variable, off everywhere else.
-    """
-    cfg = cfg or settings()
-    return cfg.is_test or os.environ.get("BRAIN_NEXT_UI") == "1"
-
-
-async def next_ui(request: Request) -> Response:
-    """Serve the shell for every route beneath the prefix.
-
-    A pushState router owns the path, so `/next/rules` must return the shell
+    A pushState router owns the path, so `/rules` must return the shell
     rather than a 404 — otherwise a deep link works until someone reloads it.
+
+    `R-19` removed the `BRAIN_NEXT_UI` gate this sat behind. It was right
+    while two apps were being served and the redesign was half-built; now
+    there is one app, and a flag that can turn the whole product off is a
+    way to ship an outage, not a safety feature.
     """
-    if not next_ui_enabled():
-        return _json(
-            {
-                "ok": False,
-                "reason": "next_ui_disabled",
-                "message": "Set BRAIN_NEXT_UI=1 to serve the redesigned surface.",
-            },
-            404,
-        )
     path = STATIC_DIR / "shell.html"
     if not path.is_file():
         return _json({"ok": False, "reason": "missing_asset", "message": "shell.html"}, 404)
@@ -1015,75 +986,67 @@ async def next_ui(request: Request) -> Response:
     )
 
 
-def preview_enabled(cfg: Settings | None = None) -> bool:
-    cfg = cfg or settings()
-    return cfg.is_test or os.environ.get("BRAIN_PREVIEW") == "1"
+#: §5's fourteen routes, which `R-19` moved to the root.
+#:
+#: Declared one by one rather than as `{path:path}`. A catch-all would trip
+#: the BOLA guard in `tests/test_phase6_security_and_live_providers.py` —
+#: correctly, since a path parameter is the shape of a traversal bug — and it
+#: would make every typo render a page instead of a 404. Server and router
+#: agree on exactly which URLs exist.
+UI_PATHS = (
+    "/",
+    "/library/transcripts",
+    "/library/summaries",
+    "/library/sources",
+    "/transcripts/{id}",
+    "/summaries/{id}",
+    "/sources/{id}",
+    "/rules",
+    "/skills",
+    "/activity",
+    "/connections",
+    "/archive",
+    "/profile",
+    "/signin",
+)
 
 
-async def preview(request: Request) -> Response:
-    """The design harness. Dev-only: never exposed on a production host."""
-    if not preview_enabled():
-        return _json(
-            {
-                "ok": False,
-                "reason": "preview_disabled",
-                "message": "Set BRAIN_PREVIEW=1 to enable the design harness.",
-            },
-            404,
-        )
-    path = STATIC_DIR / "index.html"
-    if not path.is_file():
-        return _json({"ok": False, "reason": "missing_asset", "message": "index.html"}, 404)
-    return FileResponse(path, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
+async def moved_to_root(request: Request) -> Response:
+    """`R-19`: `/next/...` is where this app lived while `/` was still the old
+    one. The prefix is gone, but a bookmark made during that time should not
+    land on a 404.
+
+    302, not 301: a permanent redirect is cached by browsers indefinitely,
+    and if this cutover ever has to be undone, an uncachable mistake is the
+    cheaper one to have made.
+    """
+    rest = request.path_params.get("rest", "")
+    target = "/" + rest.lstrip("/")
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    return RedirectResponse(target, status_code=302)
 
 
 ROUTES = [
-    Route("/", _static("index.html", "text/html; charset=utf-8"), methods=["GET"]),
-    Route("/app.css", _static("app.css", "text/css; charset=utf-8"), methods=["GET"]),
-    # Layer 1 of the redesign (MASTER_PLAN.md §2). Served but not yet linked by
-    # `index.html`: it declares five token names that `app.css` also declares
-    # with other values, so loading both into one document would recolour the
-    # running control plane.
+    *[Route(path, ui, methods=["GET"]) for path in UI_PATHS],
+    Route("/next", moved_to_root, methods=["GET"]),
+    Route("/next/{rest:path}", moved_to_root, methods=["GET"]),
     Route("/tokens.css", _static("tokens.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/atoms.css", _static("atoms.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/molecules.css", _static("molecules.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/frames.css", _static("frames.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/frames.js", _static("frames.js", "application/javascript; charset=utf-8"), methods=["GET"]),
-    # The redesigned surface, mounted under a prefix while the shipped control
-    # plane still owns `/`. Each of §5's fourteen routes returns the same
-    # shell, because a pushState router owns the path and a deep link has to
-    # survive a reload.
-    #
-    # They are declared one by one rather than as `{path:path}`. A catch-all
-    # would trip the BOLA guard in `tests/test_phase6_security_and_live_providers.py`
-    # — correctly, since a path parameter is the shape of a traversal bug — and
-    # it would also make every typo render a page instead of a 404. Server and
-    # router now agree on exactly which URLs exist.
-    Route("/next", next_ui, methods=["GET"]),
-    Route("/next/", next_ui, methods=["GET"]),
-    Route("/next/library/transcripts", next_ui, methods=["GET"]),
-    Route("/next/library/summaries", next_ui, methods=["GET"]),
-    Route("/next/library/sources", next_ui, methods=["GET"]),
-    Route("/next/transcripts/{id}", next_ui, methods=["GET"]),
-    Route("/next/summaries/{id}", next_ui, methods=["GET"]),
-    Route("/next/sources/{id}", next_ui, methods=["GET"]),
-    Route("/next/rules", next_ui, methods=["GET"]),
-    Route("/next/skills", next_ui, methods=["GET"]),
-    Route("/next/activity", next_ui, methods=["GET"]),
-    Route("/next/connections", next_ui, methods=["GET"]),
-    Route("/next/archive", next_ui, methods=["GET"]),
-    Route("/next/profile", next_ui, methods=["GET"]),
-    Route("/next/signin", next_ui, methods=["GET"]),
-    Route("/app.js", _static("app.js", "application/javascript; charset=utf-8"), methods=["GET"]),
+    #: The OAuth consent card's own sheet. It used to share `/app.css` with
+    #: the control plane; that file is gone, so it carries the few rules it
+    #: needs on top of the same tokens every other page uses.
+    Route("/consent.css", _static("consent.css", "text/css; charset=utf-8"), methods=["GET"]),
     Route("/consent.js", _static("consent.js", "application/javascript; charset=utf-8"), methods=["GET"]),
-    Route("/preview", preview, methods=["GET"]),
     Route("/api/login", api_login, methods=["POST"]),
     Route("/api/logout", api_logout, methods=["POST"]),
     Route("/api/me", api_me, methods=["GET"]),
     Route("/api/cards", api_cards, methods=["GET"]),
     Route("/api/search", api_search, methods=["GET"]),
     Route("/api/item/{item_id}", api_item, methods=["GET"]),
-    Route("/api/trash", api_trash, methods=["GET"]),
     Route("/api/export", api_export, methods=["GET"]),
     Route("/api/omnibar", api_omnibar, methods=["POST"]),
     Route("/api/omnibar/run", api_omnibar_run, methods=["POST"]),
@@ -1113,7 +1076,6 @@ ROUTES = [
     Route("/api/sources/{source_id}/reprocess", api_reprocess_source, methods=["POST"]),
     Route("/api/sources/{source_id}/summarise", api_generate_summary, methods=["POST"]),
     Route("/api/archive/{item_type}/{item_id}", api_archive, methods=["POST"]),
-    Route("/api/trash/{item_type}/{item_id}", api_trash_item, methods=["POST"]),
     Route("/api/delete/{item_id}", api_delete, methods=["POST"]),
     Route("/api/delete-library", api_delete_library, methods=["POST"]),
     Route("/api/delete-account", api_delete_account, methods=["POST"]),

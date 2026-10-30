@@ -34,7 +34,7 @@ class TestCli:
         sub = next(
             action for action in parser._actions if hasattr(action, "choices") and action.choices
         )
-        assert {"doctor", "selftest", "preview-ax", "preview-ui"} <= set(sub.choices)
+        assert {"doctor", "selftest", "preview-ax", "dev"} <= set(sub.choices)
         assert {"serve", "worker", "calibrate"} <= set(sub.choices)
 
     def test_doctor_passes_on_this_host(self, cfg, capsys):
@@ -96,11 +96,11 @@ class TestCli:
         assert "markdown tables: False" in out
         assert "minute" not in out.split("TOUCHPOINT 2")[0].lower()
 
-    def test_preview_ui_is_wired_but_not_started_here(self):
+    def test_the_dev_server_is_wired_but_not_started_here(self):
         parser = cli.build_parser()
-        args = parser.parse_args(["preview-ui"])
+        args = parser.parse_args(["dev"])
         assert args.port == 8080 and args.seed is True
-        assert parser.parse_args(["preview-ui", "--no-seed"]).seed is False
+        assert parser.parse_args(["dev", "--no-seed"]).seed is False
 
 
 # ===========================================================================
@@ -224,9 +224,51 @@ class TestPackaging:
             "ingestion/gatekeeper.py", "ingestion/providers.py", "ingestion/fetchers.py",
             "ingestion/extractor.py", "ingestion/grounder.py", "ingestion/linker.py",
             "core/engine.py", "core/formatting.py",
-            "static/index.html", "static/app.css", "static/app.js",
+            "storage/retention.py", "storage/r2_sync.py",
+            # `R-19`: the one app's shell, its script and its four layers,
+            # plus the OAuth card's two files — the one screen that renders
+            # outside the shell, and the one nobody would notice was broken
+            # until someone tried to connect an AI.
+            "static/shell.html", "static/frames.js",
+            "static/tokens.css", "static/atoms.css",
+            "static/molecules.css", "static/frames.css",
+            "static/consent.css", "static/consent.js",
         ):
             assert (ROOT / "app" / module).is_file(), module
+
+    def test_the_cutover_took_the_old_app_with_it(self):
+        """`R-19`. Left behind, these are 90KB of dead code that still looks
+        like the product — and `app.css` would quietly recolour any document
+        that linked it alongside `tokens.css`."""
+        for name in ("static/index.html", "static/app.css", "static/app.js"):
+            assert not (ROOT / "app" / name).exists(), name
+
+    #: Comments and docstrings explain the cutover by naming what it removed,
+    #: so they are stripped before the scan. A mention is not a reference —
+    #: only code can send a browser to a file that is not there.
+    _COMMENTS = (
+        re.compile('"""' + r"(?:.|\n)*?" + '"""'),            # python docstrings
+        re.compile("'''" + r"(?:.|\n)*?" + "'''"),            # and the other kind
+        re.compile(r"/\*(?:.|\n)*?\*/"),       # css and js block comments
+        re.compile(r"<!--(?:.|\n)*?-->"),     # html comments
+        re.compile(r"^\s*#.*$", re.M),         # python line comments
+        re.compile(r"^\s*//.*$", re.M),        # js line comments
+    )
+
+    def test_nothing_still_asks_for_a_deleted_asset(self):
+        """`R-19`. The failure mode this catches is a 404 on a page that
+        otherwise renders: a stylesheet that silently does not load, which
+        looks like a styling bug rather than a missing file."""
+        for path in sorted((ROOT / "app").rglob("*")):
+            if path.suffix not in (".py", ".js", ".html", ".css"):
+                continue
+            if "__pycache__" in str(path):
+                continue
+            code = path.read_text(encoding="utf-8")
+            for pattern in self._COMMENTS:
+                code = pattern.sub("", code)
+            for dead in ("/app.css", "/app.js", "index.html"):
+                assert dead not in code, f"{path.relative_to(ROOT)} still references {dead}"
 
     def test_the_dockerfile_ships_the_web_assets(self):
         text = (ROOT / "Dockerfile").read_text()

@@ -94,8 +94,12 @@ Every layer of `brain` must enforce the **2026 OWASP MCP Top 10** and defend aga
 - `app/mcp_server.py` (FastMCP Streamable HTTP `/mcp` exposing the 8 typed tools)
 - `app/omnibar.py` (Hybrid Deterministic + LLM Command Router for the Web Homepage Bar)
 - `app/main.py` (FastAPI app + Security Headers: CSP, X-Frame-Options: DENY)
-- `app/cli.py` (Full CLI: `python -m app.cli doctor|selftest|preview-ax|preview-ui`)
-- `app/static/index.html` (Co-designed Web App: Sidebar + Hybrid Omni-Bar + Cards + Profile Modal)
+- `app/cli.py` (Full CLI: `python -m app.cli doctor|selftest|preview-ax|dev|serve|worker`)
+- `app/webapi.py` (The web surface: §5's pages and `/api/*`)
+- `app/storage/retention.py` (`R-18`: sweeps a received file past its 30-day window)
+- `app/static/shell.html` + `app/static/frames.js` (The co-designed Web App, served at `/` since `R-19`: Sidebar + Hybrid Omni-Bar + Cards + Profile)
+- `app/static/tokens.css`, `atoms.css`, `molecules.css`, `frames.css` (The four layers, in build order: a later sheet may only compose what an earlier one declared)
+- `app/static/consent.css` + `app/static/consent.js` (The OAuth consent card — the one screen rendered outside the shell)
 - `tests/test_phase1_db_and_security.py`
 - `tests/test_phase2_ingestion_grounding.py`
 - `tests/test_phase3_mcp_and_auth.py`
@@ -170,7 +174,7 @@ Follow this exact sequence. Commit and update `PROGRESS.md` after each phase. **
 ---
 
 ### STOP GATE — CO-DESIGN CHECKPOINT B: Web App Touchpoints, Hybrid Omni-Bar & Theme Feel
-**DO NOT write `app/static/index.html` or `app/omnibar.py` until you complete this interactive checkpoint with the founder:**
+**DO NOT write the web app (`app/static/shell.html` and its layers) or `app/omnibar.py` until you complete this interactive checkpoint with the founder:**
 1. Present concrete visual layouts (clean ASCII wireframes + exact interaction specs) for the founder to review and shape on their phone:
    - **Touchpoint 1 (The Hybrid Homepage Omni-Bar):** How the bar visually distinguishes between instant deterministic filtering (`0ms`), file/URL drop ingestion states, and hitting `Enter` for an LLM natural-language action (e.g., *"Edit step 2 of my skill"* or *"Archive yesterday's video"*).
    - **Touchpoint 2 (Skill Cards vs. Library Claim Cards):** What fields are visible at a glance on a card before clicking, and how inline editing (`[Edit]`, `[Archive]`, `[Delete]`) feels.
@@ -178,6 +182,6 @@ Follow this exact sequence. Commit and update `PROGRESS.md` after each phase. **
 2. Iterate with the founder on every detail until they say "Lock it in," save the choices in `DESIGN_DECISIONS.md`, and then execute **Phase 4 & Phase 5**.
 
 ### Phase 4 & 5: Build the Co-Designed Web App, CLI, CI/CD & Production Packaging
-- Build `app/omnibar.py`, `app/main.py` (with strict CSP & security headers), and `app/static/index.html` matching Checkpoint B.
+- Build `app/omnibar.py`, `app/main.py` (with strict CSP & security headers), and the web app (`app/static/shell.html` + the four CSS layers + `frames.js`) matching Checkpoint B.
 - Build `app/cli.py`, `.github/workflows/ci.yml`, `Dockerfile`, `litestream.yml`, and `entrypoint.sh`.
 - Run `BRAIN_ENV=test pytest -v` and `python -m app.cli selftest` until 100% green, commit everything, and present the final summary.

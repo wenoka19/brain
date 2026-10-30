@@ -377,8 +377,25 @@ FRAMES.home = async function home(_params, ctx) {
 /* reading from the API                                                    */
 /* ---------------------------------------------------------------------- */
 
+/** `fetch`, but a dead network is a sentence rather than a rejection.
+ *
+ *  `fetch` rejects on a dropped connection, and that rejection travelled all
+ *  the way out of `api()` and `post()` as an unhandled promise rejection —
+ *  the page simply stopped, with "Failed to fetch" in a console nobody has
+ *  open. §6 rule 11: a thing that is unavailable says what is missing.
+ */
+async function reach(path, init) {
+  try {
+    return await fetch(path, init);
+  } catch (_) {
+    const error = new Error("Brain could not be reached. Check your connection and try again.");
+    error.reason = "offline";
+    throw error;
+  }
+}
+
 export async function api(path) {
-  const response = await fetch(path, {
+  const response = await reach(path, {
     headers: { "X-Brain-Request": "1" },
     credentials: "same-origin",
   });
@@ -2236,7 +2253,7 @@ function summaryMarkdown(data) {
 
 
 export async function post(path, body, method = "POST") {
-  const response = await fetch(path, {
+  const response = await reach(path, {
     method,
     credentials: "same-origin",
     headers: {
@@ -4038,9 +4055,34 @@ export function wireShell(router) {
 /* boot                                                                    */
 /* ---------------------------------------------------------------------- */
 
+/** `R-19`: the theme the person chose, on every page load.
+ *
+ *  It was only ever applied by the Profile picker's click handler, and
+ *  `shell.html` hardcodes `data-theme="light"` — so someone who chose Dark
+ *  got Light back on every reload, and on every deep link. The choice is
+ *  already stored and already served; nothing read it at boot.
+ *
+ *  It runs ahead of the first render and never blocks it: a theme that
+ *  arrives a frame late is a flash, a render that waits on the network is a
+ *  blank page.
+ */
+async function applyStoredTheme() {
+  try {
+    const me = await api("/api/profile");
+    const theme = me.theme_mode === "dark" ? "dark" : "light";
+    document.documentElement.dataset.theme = theme;
+    // Kept for the OAuth consent card, which is served outside the shell and
+    // so cannot ask the API for it.
+    try { localStorage.setItem("brain.theme", theme); } catch (_) {}
+  } catch (_) {
+    // Signed out, or offline. The document's own `data-theme` stands.
+  }
+}
+
 if (typeof document !== "undefined" && document.getElementById("content")) {
   const router = createRouter();
   wireShell(router);
+  applyStoredTheme();
   router.render(window.location.pathname).then(refreshCounts);
   window.addEventListener("popstate", refreshCounts);
 }

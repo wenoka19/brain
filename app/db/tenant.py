@@ -677,6 +677,27 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         applied.append("skills.status(proposed|inactive)")
     if _rebuild_sources_for_processing(conn):
         applied.append("sources.status(processing)")
+    # `R-19`, the cutover: Trash folds into Archive.
+    #
+    # Trash was a source-level status the shipped control plane at `/` could
+    # list and restore from. The redesigned app has no Trash screen and no way
+    # to put anything in one — its model is active -> archived -> deleted for
+    # good, and §2's 30-day recovery buffer is Archive (`R-14`). So when the
+    # old app goes, a row left at `status='trash'` would be reachable by
+    # nothing: invisible in every list, restorable from nowhere.
+    #
+    # Moving them to `archived` is the safe direction. Nothing is destroyed,
+    # they appear in §7.12 where the person can restore them or delete them
+    # for good, and the attribution says it was them rather than Brain —
+    # because it was: they put it in the Trash.
+    folded = conn.execute(
+        "UPDATE sources SET status = 'archived', "
+        "  archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP), "
+        "  archived_by = CASE WHEN archived_by = '' THEN 'you' ELSE archived_by END "
+        "WHERE status = 'trash'"
+    ).rowcount
+    if folded:
+        applied.append(f"sources.status(trash->archived, {folded} rows)")
     # Backfill the counts the column was added for; a row written before it
     # existed would otherwise read "0 words" forever.
     backfilled = conn.execute(

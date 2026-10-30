@@ -55,7 +55,11 @@ jobs:
         run: python -m app.cli preview-ax > /dev/null
 
   browser:
-    # The design harness is a deliverable, so its behaviour is tested too.
+    # `R-19`: the app in a real browser. Every defect in the redesign that
+    # mattered was found by rendering it, not by reading it — a template
+    # literal ended by a backtick in an HTML comment, which made every Python
+    # test pass and no page load; a phone that scrolled sideways on two
+    # routes. Neither is visible to a test that reads source as text.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -76,11 +80,8 @@ jobs:
           pip install -e ".[dev]"
           npm install --no-save playwright@1.49.1
           npx playwright install --with-deps chromium
-      - name: Smoke the control plane
-        run: python -m pytest tests/test_phase4_omnibar_and_ui.py -v
-
-      - name: The Profile modal opens and renders the audit log
-        run: python -m pytest tests/test_phase6_security_and_live_providers.py -v -k browser
+      - name: Every route renders, fits a phone, and escapes stored text
+        run: python -m pytest tests/test_redesign_browser.py -v
 
   docker:
     runs-on: ubuntu-latest

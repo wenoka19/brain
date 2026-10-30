@@ -270,7 +270,14 @@
    drops to --space-4, and card actions are permanently visible because there
    is no hover (handled in molecules.css). */
 @media (max-width: 719px) {
-  .shell { grid-template-columns: 1fr; }
+  /* `minmax(0, 1fr)`, not a bare `1fr`. A bare one is `minmax(auto, 1fr)`,
+     whose minimum is the column's *min-content* — so a single wide
+     descendant stretches the whole page and the phone scrolls sideways.
+     Measured: `/rules` was 577px against a 390px viewport, and the offender
+     list named `main.content` rather than anything inside it, which is what
+     a grid column refusing to shrink looks like. The desktop rule at the top
+     of this file already had the `minmax`; this one did not. */
+  .shell { grid-template-columns: minmax(0, 1fr); }
 
   .topbar {
     display: flex;

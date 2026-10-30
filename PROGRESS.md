@@ -1289,3 +1289,91 @@ in staging for up to 30 days with nothing in the product able to reach them.
 
 Deleting a file returns no credits, and all three dialogs say so: the credits
 paid for reading the text, which is already done.
+
+## R-19 — the cutover: one app, at the root (30 Oct 2026)
+
+Two web apps were served side by side while the redesign was built: the
+shipped control plane at `/` (`index.html` + `app.css` + `app.js`) and the
+redesign at `/next` (`shell.html` + four CSS layers + `frames.js`). That was
+right while the new one was half-built — the founder always had a working
+Brain — and it became a liability the moment both were complete. Every change
+had to land twice. `R-18` is the example: the credits meter had to be edited
+in both files, or `/` would have gone on saying "Media minutes 0 / 300".
+
+So: `/` serves the app, the `/next` prefix is gone, `shell.html` carries
+`data-base=""`, and the three old files are deleted. `/next/...` 302-redirects
+rather than 404s, because somebody bookmarked it — 302 and not 301, since a
+permanent redirect is cached indefinitely and an undo would have to fight
+every browser that saw it. The `BRAIN_NEXT_UI` gate is gone too: a flag that
+can turn the whole product off is a way to ship an outage, not a safety
+feature.
+
+### What had to be dealt with first
+
+**Trash.** The old app was the only surface that could list it or restore
+from it, and the new app has no Trash screen and no way to fill one — its
+model is active → archived → deleted for good, with Archive as §2's 30-day
+buffer (`R-14`). Deleting the old app would have left any row at
+`status='trash'` reachable by nothing. So `op_trash_item` and `op_list_trash`
+are gone, the omnibar's "delete the X" archives, and `tenant.migrate` folds
+existing trashed rows into Archive attributed to the person — they put it
+there. `op_permanent_delete` still accepts the status, because a database
+restored from a pre-fold backup can hold one.
+
+**The OAuth consent card.** It shared `/app.css` with the control plane, for
+a good reason: one definition of `--accent` for the whole product. It now
+loads `tokens.css` + `atoms.css` + a small `consent.css`, which declares no
+colour of its own. It also stopped promising a feature this same change
+deleted — "after 30 days in Trash" now names Archive.
+
+**The automated browser coverage.** The sharpest finding. Three Playwright
+suites ran in CI, and all three drove the old app; the redesign's fourteen
+probes print JSON, exit 0 regardless, and are spawned by nothing. Deleting
+the old suites would have left the new app looking fully tested — 1,400
+passing tests — while nothing had ever opened it. `tests/test_redesign_browser.py`
+and `tests/browser/app_audit.js` replace them: every route renders without
+throwing, nothing scrolls sideways at 390px, and a stored
+`<img src=x onerror=...>` reaches the DOM as text.
+
+### What the browser suite found the moment it existed
+
+**Two routes scrolled sideways on a phone.** `/rules` measured 577px against
+a 390px viewport and `/library/sources` 488px. The cause was one declaration:
+the mobile breakpoint said `grid-template-columns: 1fr`, and a bare `1fr` is
+`minmax(auto, 1fr)` — its minimum is the column's *min-content*, so one wide
+descendant stretches the page. The desktop rule twelve lines up already had
+`minmax(0, 1fr)`. Two earlier guesses at this (a wrapping toolbar, a
+`min-width: 0` on the search field) were reverted once the real cause was
+found: they fixed nothing and would have changed a layout §3.3 specifies.
+
+### Three more things the cutover exposed
+
+- **`consent.css` was never `git add`ed.** It would have shipped as a 404 on
+  the one screen rendered outside the shell — the first thing a person sees
+  when connecting Claude. Two packaging tests now guard it: every file the
+  layout promises exists, and nothing in `app/` still references a deleted
+  asset.
+- **`theme_mode` still defaulted to `warm_sunset`**, a theme `R-10` dropped,
+  so every new account started on something the picker does not offer and
+  nothing renders. Worse, the theme was applied only by the picker's click
+  handler — `shell.html` hardcodes `data-theme="light"`, so anyone who chose
+  Dark got Light back on every reload. Default fixed, old rows migrated, and
+  the choice is now read at boot.
+- **A dropped connection was an unhandled promise rejection.** `api()` and
+  `post()` called `fetch` directly, so the page simply stopped with "Failed
+  to fetch" in a console nobody has open. Both go through a wrapper that
+  turns it into a sentence (§6 rule 11).
+
+### Left undone, deliberately
+
+- **No paging.** The old app rendered at most 100 cards and kept filtering
+  over the full array; the new one renders every row it is given. This is the
+  one place the cutover is a net loss rather than a redesign. It needs a
+  paged API, not a front-end change.
+- **No audit-log screen.** `/api/audit-logs` is live, authenticated and
+  person-only, and the rows are written — CLAUDE.md §2.5 holds. But §7.13 as
+  the founder approved it has four blocks and no audit list, so the old
+  Profile modal's sixth block had nowhere to go. That is a product question,
+  not a dropped guarantee.
+- The sync watermark, the visual-viewport keyboard inset, and a single
+  Escape-ordering handler all went with `app.js` and are not rebuilt.

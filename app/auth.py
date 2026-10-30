@@ -492,15 +492,19 @@ async def register(request: Request) -> Response:
     )
 
 
-#: Linear-styled, and deliberately sharing `/app.css` rather than carrying its
-#: own copy of the theme tokens — one definition of `--accent` for the whole
-#: product. `/consent.js` applies the stored theme (and the 18:00 Warm Sunset
-#: switch) because the CSP forbids inline script, which is the right trade.
+#: Linear-styled, and deliberately built on the same `tokens.css` and
+#: `atoms.css` the app itself loads rather than carrying its own copy — one
+#: definition of `--accent` for the whole product, so the first screen someone
+#: sees when connecting Claude is recognisably the thing behind it.
+#: `/consent.js` applies the stored theme because the CSP forbids inline
+#: script, which is the right trade.
 CONSENT_PAGE = """<!doctype html>
 <html lang="en" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Connect {client_name} to brain</title>
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/atoms.css">
+<link rel="stylesheet" href="/consent.css">
 <script src="/consent.js" defer></script></head>
 <body class="consent-page">
 <main class="consent-card">
@@ -517,7 +521,7 @@ CONSENT_PAGE = """<!doctype html>
         <span>Save new claims and skills, and queue sources you paste into the chat.</span></li>
     <li><span class="consent-key">Safety</span>
         <span>Cannot permanently delete items &mdash; soft archive only. Deleting for good
-        takes a human click in this web app, after 30 days in Trash.</span></li>
+        takes a human click in this web app, from your Archive.</span></li>
     <li><span class="consent-key">Duration</span>
         <span>30 days, revocable anytime in <strong>&#128100; Profile &rarr; MCP connection</strong>.</span></li>
   </ul>
@@ -526,8 +530,8 @@ CONSENT_PAGE = """<!doctype html>
     <input type="hidden" name="state_blob" value="{state_blob}">
     {identity}
     <div class="consent-actions">
-      <button type="submit" class="btn btn-primary">Authorize Connection</button>
-      <button type="button" class="btn btn-quiet" id="consent-cancel">Cancel</button>
+      <button type="submit" class="btn" data-variant="primary">Authorize Connection</button>
+      <button type="button" class="btn" data-variant="ghost" id="consent-cancel">Cancel</button>
     </div>
   </form>
   <p class="consent-foot">Signing in here creates your library if you do not have one yet.</p>
@@ -542,7 +546,7 @@ CONSENT_KNOWN_IDENTITY = """<p class="consent-identity">Connecting as
 
 #: Not signed in: the email is the sign-in, inline, without leaving the flow.
 CONSENT_SIGN_IN = """<label class="consent-label" for="email">Your email</label>
-<input class="omni-input" id="email" name="email" type="email" required
+<input class="input" id="email" name="email" type="email" required
        autocomplete="email" placeholder="you@example.com" value="{email}">"""
 
 

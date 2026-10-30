@@ -3,7 +3,7 @@
 
 Route ownership, outermost first:
 
-* `/` `/app.css` `/app.js` `/preview` `/api/*` — the Web Control Plane
+* `/` and §5's pages, the four CSS layers, `/frames.js`, `/api/*` — the app
 * `/authorize` `/token` `/register` `/revoke` `/.well-known/*` — OAuth 2.1
 * everything under `/mcp` — the MCP Streamable HTTP transport
 """

@@ -1,0 +1,123 @@
+/* The OAuth consent card — the one page outside the app shell.
+ *
+ * `R-19`: it used to share `/app.css` with the shipped control plane, for a
+ * good reason ("one definition of `--accent` for the whole product"). The
+ * cutover deleted that file, and the reason survives it: this sheet declares
+ * no colours and no spacing of its own, only layout, and loads `tokens.css`
+ * and `atoms.css` above itself for everything else. So the first screen a
+ * person sees when they connect Claude or ChatGPT is the same product as
+ * the one behind it.
+ *
+ * It is a separate file rather than rules inside `molecules.css` because
+ * nothing here is reused: the consent card exists once, on a page the app
+ * shell never renders.
+ */
+
+.consent-page {
+  margin: 0;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* The bottom inset keeps the actions clear of a phone's home indicator. */
+  padding: var(--space-6) var(--space-4)
+           calc(var(--space-6) + env(safe-area-inset-bottom));
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.consent-card {
+  width: 100%;
+  max-width: 460px;
+  padding: var(--space-6) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  /* The same inset border every card in the app carries. The design has no
+     drop shadows, so neither does this. */
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.consent-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-bottom: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.consent-card h1 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.consent-sub {
+  margin: 0 0 var(--space-5);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.consent-grants {
+  list-style: none;
+  margin: 0 0 var(--space-5);
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.consent-grants li {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.consent-key {
+  padding-top: 1px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.consent-identity {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.consent-label {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.consent-form .input {
+  width: 100%;
+  margin-bottom: var(--space-4);
+}
+
+.consent-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.consent-actions .btn[data-variant="primary"] {
+  flex: 1;
+  justify-content: center;
+}
+
+.consent-foot {
+  margin: var(--space-5) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
