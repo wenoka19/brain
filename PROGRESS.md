@@ -1168,3 +1168,55 @@ been rendered in a browser rather than inspected as source. Ten probes under
 loads a page with a job still queued and drains the queue from another
 process, and one that makes real MCP calls with a key in the URL and reads
 the row they produce.
+
+## R-17 — storage out, 30-day retention in (30 Oct 2026)
+
+Two founder rulings, built together because neither is honest alone.
+
+**The usage screen shows no storage.** §7.10's capture meters `Storage 2.1 GB
+of 10 GB`. The founder struck it: *"The storage should not be in our pricing
+system… In the usage screen we shouldn't show the storage size."* So
+`op_activity` returns no `storage` key — absent, not a capless figure, because
+a number with no limit still invites the question of what the limit should be.
+Three meters remain, and every one of them has a ceiling the product actually
+enforces.
+
+**And a received file is swept after 30 days.** *"We should keep them for 30
+days and when those 30 days pass they should be deleted."* This closed a leak:
+**nothing had ever deleted an upload.** `api_upload` writes the bytes to
+`data_dir/uploads/{user_id}/` and `op_ingest_file` queues a job against that
+path; the single `unlink` in the route is the over-size failure branch, so
+every *successfully* processed file stayed on disk forever. Verified by
+uploading a file and finding it still there after the job reached `ready` —
+not by reading the code, which is how the branch was misread the first time.
+
+`app/storage/retention.py` sweeps anything past `cfg.upload_retention_days`,
+and the schedule hangs off `Worker`, the one role both production deployments
+run (in-process under `BRAIN_ROLE=web`, standalone under `=worker`). It sweeps
+before claiming rather than on the idle branch, so a container whose queue
+never empties still sweeps; a failure is logged and the queue carries on.
+`python -m app.cli sweep-uploads --dry-run` shows what is due without
+deleting it, for the deployment that has a backlog from before retention
+existed.
+
+Age alone decides, with no look at `ingestion_jobs`: the lease is 180 seconds
+and `attempts` is bounded at 3, so a live job resolves in minutes, and §7.3's
+rescue takes pasted text rather than re-reading the file. The sweep therefore
+needs no database, which is what lets the CLI and the tests run it directly.
+
+Striking the meter without the sweep would only have hidden a number that was
+still growing. That is the whole argument for doing both.
+
+### The measurement that argues with the ruling
+
+Recorded rather than quietly built around. The founder's unit is processed
+media — *"the amount of our processed videos, that's the thing that counts"* —
+and on this codebase a minute of video is the **cheapest** unit in the
+product. There is no transcription and no OCR anywhere: YouTube runs `yt-dlp
+--skip-download` against the caption track the platform already has, a
+caption-less video is refused, a scanned PDF is refused. What costs money is
+characters of source text (one extraction call per ~1,400 characters: ~7 for
+a 10-minute video, 39 for an hour, 200–600 for a 200-page PDF, ~35,000 for a
+20MB `.txt`), and above that, tension classification at up to `claims × 8`
+calls per ingestion with nothing capping it. `OPEN-4` holds the lever choice;
+the full ranking is in `MASTER_PLAN.md` §17 under `R-17`.

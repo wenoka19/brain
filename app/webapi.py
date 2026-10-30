@@ -419,7 +419,10 @@ async def api_upload(request: Request) -> Response:
         raise ApiError(400, "no_file", "No file was attached.")
     _rate_limit(ctx, "upload", {"name": upload.filename}, ingestion=True)
 
-    staging = ctx.cfg.data_dir / "uploads" / ctx.user_id
+    # `R-17`: this is a staging folder, not storage. The bytes are kept for
+    # `cfg.upload_retention_days` so a failed read can be looked at, then
+    # swept by `app/storage/retention.py`.
+    staging = ctx.cfg.uploads_dir_for(ctx.user_id)
     staging.mkdir(parents=True, exist_ok=True)
     safe_name = Path(str(upload.filename)).name  # strip any path the client sent
     target = staging / f"{control_db.new_id('up')}_{safe_name}"

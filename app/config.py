@@ -111,6 +111,14 @@ class Settings:
 
     # ---- ingestion caps ---------------------------------------------------
     max_upload_bytes: int = 20 * MB
+    #: `R-17`: how long a file the person uploaded is kept after it has been
+    #: read. Brain needs the bytes until the job finishes — and for a few
+    #: days after, so a failure can be looked at — but not forever. The
+    #: knowledge is in the tenant database by then; the file is a receipt.
+    #: Past this window `app/storage/retention.py` deletes it, which is why
+    #: §7.10 reports no storage figure: the bytes on disk measure this
+    #: window, not the person's use of the product.
+    upload_retention_days: int = 30
     max_docx_decompressed_bytes: int = 30 * MB
     max_zip_compression_ratio: int = 120
     max_pdf_pages: int = 200
@@ -386,6 +394,20 @@ class Settings:
     def users_dir(self) -> Path:
         return self.data_dir / "users"
 
+    @property
+    def uploads_dir(self) -> Path:
+        """Where a received file waits to be read, and is swept from.
+
+        One subdirectory per *verified* user id, exactly as `users_dir` —
+        `uploads_dir_for` does the same check `tenant_db_path` does.
+        """
+        return self.data_dir / "uploads"
+
+    def uploads_dir_for(self, user_id: str) -> Path:
+        if not USER_ID_RE.match(user_id or ""):
+            raise ValueError(f"unsafe user_id: {user_id!r}")
+        return self.uploads_dir / user_id
+
     def tenant_db_path(self, user_id: str) -> Path:
         """Resolve a tenant database path from a *verified* user id.
 
@@ -400,6 +422,7 @@ class Settings:
     def ensure_dirs(self) -> None:
         self.users_dir.mkdir(parents=True, exist_ok=True)
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _env() -> BrainEnv:

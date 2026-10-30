@@ -2831,10 +2831,11 @@ function sizeLabel(bytes) {
   return `${(n / 1024 ** 3).toFixed(1)} GB`;
 }
 
-/** §4.6's meter card. A bar only where there is a cap to measure against:
- *  §7.10's capture meters calls and storage, and this product enforces a
- *  ceiling on neither — a bar against a number nothing checks is decoration,
- *  and `OPEN-3` puts the question to the founder rather than inventing one. */
+/** §4.6's meter card. A bar only where there is a cap to measure against — a
+ *  bar against a number nothing checks is decoration. Every meter the page
+ *  shows today does have a cap; the capless branch stays because `R-17`'s
+ *  reasoning is that a figure may outlive its limit, and the card should
+ *  degrade to an honest number rather than draw a fictional bar. */
 function meterCard(meter) {
   const { used, cap, label, unit } = meter;
   const shown = unit === "bytes" ? sizeLabel(used) : Number(used).toLocaleString();
@@ -2867,7 +2868,10 @@ FRAMES.activity = async function activity() {
   // Named `…Html` and built before the template, which is the convention the
   // escaping guard enforces: a hole into markup has to be visibly trusted at
   // the point it is interpolated, not trusted because of what it calls.
-  const metersHtml = ["sources", "minutes", "calls", "storage"]
+  // `R-17`: no storage meter. §7.10's capture shows `Storage 2.1 GB of
+  // 10 GB`; the founder struck it, and what the person sends us is swept
+  // after 30 days anyway, so the bytes on disk say nothing about their use.
+  const metersHtml = ["sources", "minutes", "calls"]
     .map((key) => meterCard(data.usage[key]))
     .join("");
 

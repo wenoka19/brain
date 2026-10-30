@@ -892,6 +892,50 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return worker_main()
 
 
+def cmd_sweep_uploads(args: argparse.Namespace) -> int:
+    """`R-17`'s sweep, by hand.
+
+    The worker runs it hourly on its own. This exists for the two cases the
+    worker does not cover: seeing what *would* go before it goes
+    (`--dry-run`), and clearing a deployment that ran before retention
+    existed, where there is a backlog nobody wants to wait an hour for.
+    """
+    import time
+    from dataclasses import replace
+
+    from app.config import settings
+    from app.storage import retention
+
+    cfg = settings()
+    days = cfg.upload_retention_days if args.days is None else args.days
+    cfg = replace(cfg, upload_retention_days=days)
+    print(f"uploads   {cfg.uploads_dir}")
+    print(f"keeping   {days} day(s)")
+
+    if args.dry_run:
+        cutoff = time.time() - max(0, days) * 86400.0
+        due = [
+            path
+            for user_dir in sorted(cfg.uploads_dir.glob("*"))
+            if user_dir.is_dir()
+            for path in sorted(user_dir.iterdir())
+            if path.is_file() and path.stat().st_mtime < cutoff
+        ]
+        for path in due:
+            age = (time.time() - path.stat().st_mtime) / 86400.0
+            print(f"  would delete  {path.name}  ({age:.0f} days old)")
+        print(f"\n{len(due)} file(s) due. Nothing was deleted (--dry-run).")
+        return 0
+
+    swept = retention.sweep_uploads(cfg=cfg)
+    print(f"\ndeleted   {swept.files} file(s), {swept.bytes} byte(s)")
+    print(f"folders   {swept.dirs} emptied folder(s) removed")
+    if swept.failed:
+        print(f"skipped   {len(swept.failed)}: {', '.join(swept.failed[:5])}")
+        return 1
+    return 0
+
+
 # ===========================================================================
 # calibrate
 # ===========================================================================
@@ -1263,6 +1307,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = sub.add_parser("worker", help="run the ingestion worker")
     worker.set_defaults(func=cmd_worker)
+
+    sweep = sub.add_parser(
+        "sweep-uploads", help="delete received files past their retention window"
+    )
+    sweep.add_argument(
+        "--days", type=int, default=None,
+        help="override the retention window for this run (default: config)",
+    )
+    sweep.add_argument(
+        "--dry-run", action="store_true", help="list what is due without deleting it"
+    )
+    sweep.set_defaults(func=cmd_sweep_uploads)
 
     calibrate = sub.add_parser(
         "calibrate", help="measure real cosine separation and derive the retrieval floors"

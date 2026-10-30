@@ -23,7 +23,7 @@ from app.config import Settings, settings
 from app.core.engine import process_job
 from app.db import control as control_db
 from app.db import tenant as tenant_db
-from app.storage import r2_sync
+from app.storage import r2_sync, retention
 
 LOGGER = logging.getLogger("brain.worker")
 IDLE_SLEEP_SEC = 2.0
@@ -38,6 +38,11 @@ class Worker:
         self.poll_interval = poll_interval
         self._stop = asyncio.Event()
         self.processed: list[dict[str, Any]] = []
+        # `R-17`. The worker is the one role that exists in both deployments
+        # (`BRAIN_ROLE=worker`, and in-process under `=web`), so hanging the
+        # sweep here means every production container runs it and no surface
+        # has to remember to.
+        self.sweeper = retention.Sweeper(cfg=self.cfg)
 
     def request_stop(self) -> None:
         LOGGER.info("stop requested; finishing the current job")
@@ -70,9 +75,24 @@ class Worker:
         self.processed.append(outcome)
         return outcome
 
+    def sweep_if_due(self) -> retention.Sweep | None:
+        """§7.10's missing storage meter, enforced. Never raises.
+
+        Housekeeping must not be able to stop the queue: an upload that
+        cannot be deleted is a warning in the log, not a dead worker.
+        """
+        try:
+            return self.sweeper.run_if_due()
+        except Exception:
+            LOGGER.exception("upload sweep failed; the queue carries on")
+            return None
+
     async def run(self, *, max_jobs: int | None = None) -> list[dict[str, Any]]:
         LOGGER.info("worker started in %s mode", self.cfg.env)
         while not self._stop.is_set():
+            # Before claiming, so a container that boots sweeps once even if
+            # the queue never goes idle.
+            await asyncio.to_thread(self.sweep_if_due)
             try:
                 # The pipeline is synchronous and SQLite-bound, so it runs in a
                 # thread to keep the event loop free for signals.

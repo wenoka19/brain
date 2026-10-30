@@ -2504,14 +2504,18 @@ def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
     not from the capture's illustrative ones. §7.10 shows `Calls 1,284 of
     5,000` and `Storage 2.1 GB of 10 GB`; neither cap exists here. What is
     enforced is `quota_files`, `quota_media_minutes`, and a per-minute call
-    ceiling — so those three carry a meter, and storage is reported as a
-    figure with no bar. A meter against a number nothing checks is decoration,
-    and §6 rule 11's whole argument is that a control which cannot keep its
-    promise should say so instead.
+    ceiling — so those three carry a meter. A meter against a number nothing
+    checks is decoration, and §6 rule 11's whole argument is that a control
+    which cannot keep its promise should say so instead.
 
-    **`OPEN-4`** is left for the founder: whether to introduce a monthly call
-    allowance and a storage cap (and then meter them), or keep the page
-    honest about having neither.
+    **`R-17`**: storage is not reported at all, not even as a capless figure.
+    The founder ruled it out as a lever — "we shouldn't show storage" — and
+    the reason holds on inspection: what the person sends us is a link, an
+    image or a document, and once it is read there is nothing left worth
+    charging for. The received file is swept after
+    `cfg.upload_retention_days` (`app/storage/retention.py`), so stored bytes
+    are bounded by that window rather than by the person's behaviour. What
+    counts is what was *processed*, and that is the three meters above.
 
     **Calls** — the MCP log. A row is a call a *connection* made, which is
     what `connection_id` marks: the operations also write their own audit
@@ -2529,8 +2533,6 @@ def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
 
     user = control_db.get_user(ctx.control, ctx.user_id) or {}
     counts = tenant_db.counts(ctx.tenant)
-    path = ctx.cfg.tenant_db_path(ctx.user_id)
-    stored = path.stat().st_size if path.exists() else 0
 
     calls = [
         {
@@ -2576,9 +2578,7 @@ def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
                     "cap": ctx.cfg.tool_calls_per_min,
                     "unit": "rate",
                 },
-                # No cap is enforced on storage, so it carries none. See
-                # `OPEN-4` above.
-                "storage": {"label": "Stored", "used": stored, "cap": None, "unit": "bytes"},
+                # No `storage` key. `R-17`, above.
             },
             "calls": calls,
         },

@@ -933,11 +933,17 @@ mark {
 /* ======================================================================
    §7.10 ACTIVITY
    ====================================================================== */
-/* §12: "960–1199 | meter grid becomes one column". Above that it is one row
-   of four, which is what makes the four figures comparable at a glance. */
+/* §12: "960–1199 | meter grid becomes one column". Above that it is one row,
+   which is what makes the figures comparable at a glance.
+
+   Three columns, not the four §7.10's capture draws: `R-17` struck the
+   storage meter, and a `repeat(4, …)` left a quarter of the row empty on the
+   right. The count is written out rather than `auto-fit` because §12 names
+   an exact breakpoint behaviour, and because adding a fourth meter should be
+   a decision someone makes here on purpose. */
 .meter-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: var(--space-4);
 }
 

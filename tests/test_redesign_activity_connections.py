@@ -303,14 +303,24 @@ class TestTheActivityLogIsALogOfCalls:
     def test_the_meters_read_the_numbers_the_product_enforces(self, web):
         """§7.10's capture shows `Calls 1,284 of 5,000` and `2.1 GB of 10 GB`;
         neither cap exists here. A meter against a number nothing checks is
-        decoration — `OPEN-3` puts the question to the founder."""
+        decoration, so every meter the page draws has a real ceiling behind
+        it."""
         usage = E.op_activity(web).data["usage"]
         assert usage["sources"]["cap"] == web.cfg.quota_files
         assert usage["minutes"]["cap"] == web.cfg.quota_media_minutes
         assert usage["calls"]["cap"] == web.cfg.tool_calls_per_min
-        # Nothing enforces a storage cap, so the figure carries none.
-        assert usage["storage"]["cap"] is None
-        assert usage["storage"]["used"] >= 0
+        for key, meter in usage.items():
+            assert meter["cap"] is not None, f"{key} draws a meter with no ceiling"
+
+    def test_the_strip_draws_no_storage_card(self):
+        """`R-17`. The founder struck storage as a lever — "in the usage screen
+        we shouldn't show the storage size" — so the frame does not ask for
+        it. The engine side of the same ruling is in
+        `test_redesign_retention.py`, with the sweep that makes it honest."""
+        frames = (Path(__file__).resolve().parents[1] / "app/static/frames.js").read_text()
+        activity = frames[frames.index("FRAMES.activity =") :]
+        meters = activity[activity.index("const metersHtml") : activity.index(".join(")]
+        assert "storage" not in meters
 
     def test_the_rate_meter_is_counted_from_the_log_not_the_limiter(self, web, control):
         """The limiter is per-process memory; the page has to be right behind
@@ -443,9 +453,27 @@ class TestTheTwoFrames:
         assert "display: block" in block
         assert "height: var(--meter-h)" in block
 
+    def test_the_strip_has_a_column_per_meter(self):
+        """`R-17` took the row from four meters to three and the grid still
+        said `repeat(4, 1fr)`, so a quarter of the row sat empty on the right.
+        Only a render showed it. The count is pinned to the frame's own list
+        so the two cannot drift again."""
+        import re
+
+        frames = self.frames()
+        activity = frames[frames.index("FRAMES.activity =") :]
+        listed = re.search(r"const metersHtml = \[(.*?)\]", activity, re.S)
+        meters = len(re.findall(r'"', listed.group(1))) // 2
+        assert meters == 3, "the frame's own list of meters"
+
+        css = self.css("frames.css")
+        row = css[css.index(".meter-row {") : css.index("}", css.index(".meter-row {"))]
+        assert f"repeat({meters}, 1fr)" in row, f"{meters} meters, grid says: {row.strip()}"
+
     def test_a_meter_with_no_cap_draws_no_bar(self):
-        """§7.10's capture meters storage against 10 GB; nothing here enforces
-        one. A bar against a number nothing checks is decoration."""
+        """No meter the page draws today is capless, but a figure can outlive
+        its limit — and then the card should degrade to an honest number
+        rather than a bar against something nothing checks."""
         frames = self.frames()
         meter = frames[frames.index("function meterCard(") : frames.index("FRAMES.activity =")]
         assert "cap === null || cap === undefined" in meter
