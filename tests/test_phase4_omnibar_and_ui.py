@@ -303,11 +303,51 @@ class TestWebApiAuth:
     def test_a_bad_email_is_refused(self, client):
         assert client.post("/api/login", json={"email": "not-an-email"}).status_code == 400
 
+    def _tamper(self, client, value: str) -> int:
+        """Send `value` as the only session cookie, and report the status.
+
+        The jar is cleared first, which is the whole point. `cookies.set()`
+        ADDS a cookie rather than replacing one the server set — the original
+        carries a domain and this one does not — so the client then sends
+        both and the server reads whichever comes first. That is how this
+        test passed for years while proving nothing: half the time it was
+        answering on the *valid* cookie.
+
+        It surfaced on CI (all three Python versions, same assertion) and not
+        locally, because which of the two wins depends on jar ordering. The
+        product was never wrong: `read_session_cookie` rejects both a broken
+        signature and a rewritten body, and 401s each one over HTTP.
+        """
+        client.cookies.clear()
+        client.cookies.set(webapi.SESSION_COOKIE, value)
+        assert len(list(client.cookies.jar)) == 1, "the jar must hold only the forgery"
+        return client.get("/api/cards").status_code
+
     def test_a_tampered_session_cookie_is_rejected(self, client, cfg):
         client.post("/api/login", json={"email": "founder@example.com"})
-        good = client.cookies.get(webapi.SESSION_COOKIE)
-        client.cookies.set(webapi.SESSION_COOKIE, good[:-4] + "AAAA")
-        assert client.get("/api/cards").status_code == 401
+        good = next(
+            cookie.value
+            for cookie in client.cookies.jar
+            if cookie.name == webapi.SESSION_COOKIE
+        )
+        body, signature = good.rsplit(".", 1)
+
+        # The cookie is `body.signature`, so there are two ways to forge one:
+        # keep the claims and guess the signature, or rewrite the claims and
+        # keep a signature that no longer covers them.
+        assert self._tamper(client, body + "." + signature[:-4] + "AAAA") == 401
+        assert self._tamper(client, body[:-4] + "AAAA" + "." + signature) == 401
+
+    def test_the_untampered_cookie_still_works(self, client, cfg):
+        """The other half: a test that 401s on everything would pass the one
+        above without the app being able to authenticate anybody."""
+        client.post("/api/login", json={"email": "founder@example.com"})
+        good = next(
+            cookie.value
+            for cookie in client.cookies.jar
+            if cookie.name == webapi.SESSION_COOKIE
+        )
+        assert self._tamper(client, good) == 200
 
     def test_mutations_require_the_csrf_header(self, client):
         response = client.post("/api/login", json={"email": "founder@example.com"})
