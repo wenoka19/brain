@@ -329,8 +329,10 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
             continue
         conn.execute(statement)
         applied.append(f"{table}.{column}")
-    folded = conn.execute(_THEME_FOLD).rowcount
-    if folded:
+    # Read before writing: `migrate` runs on every open, and this fold can
+    # only ever happen once. See the matching note in `tenant.migrate`.
+    if conn.execute("SELECT 1 FROM users WHERE theme_mode = 'warm_sunset' LIMIT 1").fetchone():
+        folded = conn.execute(_THEME_FOLD).rowcount
         applied.append(f"users.theme_mode(warm_sunset->light, {folded} rows)")
     return applied
 

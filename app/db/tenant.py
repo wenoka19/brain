@@ -690,22 +690,32 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     # they appear in §7.12 where the person can restore them or delete them
     # for good, and the attribution says it was them rather than Brain —
     # because it was: they put it in the Trash.
-    folded = conn.execute(
-        "UPDATE sources SET status = 'archived', "
-        "  archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP), "
-        "  archived_by = CASE WHEN archived_by = '' THEN 'you' ELSE archived_by END "
-        "WHERE status = 'trash'"
-    ).rowcount
-    if folded:
+    # Read before writing. `migrate` runs on every connection open, not once
+    # — `init_schema` calls it — so an unconditional UPDATE here takes a write
+    # lock on every open, forever, for a fold that can only ever happen once.
+    # Five threads opening a cold tenant together is exactly the case
+    # `TestSingleflightHydration` covers, and it is where that shows up as
+    # `database is locked`.
+    if conn.execute("SELECT 1 FROM sources WHERE status = 'trash' LIMIT 1").fetchone():
+        folded = conn.execute(
+            "UPDATE sources SET status = 'archived', "
+            "  archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP), "
+            "  archived_by = CASE WHEN archived_by = '' THEN 'you' ELSE archived_by END "
+            "WHERE status = 'trash'"
+        ).rowcount
         applied.append(f"sources.status(trash->archived, {folded} rows)")
     # Backfill the counts the column was added for; a row written before it
     # existed would otherwise read "0 words" forever.
-    backfilled = conn.execute(
-        "UPDATE source_content SET word_count = "
-        "  LENGTH(TRIM(full_text)) - LENGTH(REPLACE(TRIM(full_text), ' ', '')) + 1 "
-        "WHERE word_count = 0 AND TRIM(full_text) != ''"
-    ).rowcount
-    if backfilled:
+    # Same shape, and it predates `R-19` — it was already taking a write lock
+    # on every open to backfill rows that are backfilled after the first one.
+    if conn.execute(
+        "SELECT 1 FROM source_content WHERE word_count = 0 AND TRIM(full_text) != '' LIMIT 1"
+    ).fetchone():
+        backfilled = conn.execute(
+            "UPDATE source_content SET word_count = "
+            "  LENGTH(TRIM(full_text)) - LENGTH(REPLACE(TRIM(full_text), ' ', '')) + 1 "
+            "WHERE word_count = 0 AND TRIM(full_text) != ''"
+        ).rowcount
         applied.append(f"source_content.word_count({backfilled} rows)")
     return applied
 
