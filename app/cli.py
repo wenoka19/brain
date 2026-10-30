@@ -847,7 +847,6 @@ def _preview_ax_inner(args: argparse.Namespace, workdir: Path) -> int:
 def cmd_dev(args: argparse.Namespace) -> int:
     """Boot the app on a seeded throwaway library, for looking at it."""
     os.environ.setdefault("BRAIN_ENV", "test")
-    os.environ["BRAIN_PREVIEW"] = "1"
     os.environ.setdefault("BRAIN_JWT_SECRET", "preview-secret-key-long-enough-ok")
     os.environ.setdefault("BRAIN_ALLOWED_HOSTS", f"{args.host}:{args.port},localhost:{args.port}")
 
