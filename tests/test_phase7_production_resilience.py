@@ -774,123 +774,51 @@ def mobile_report(mobile_server):
     return json.loads(result.stdout)
 
 
-class TestMobileViewport:
-    """iPhone portrait, every layout, every edge state.
-
-    Both of the defects this guards against have happened: the fixed tuner bar
-    covered the sidebar Profile button, and a long `anchor_quote` pushed a card
-    past the viewport.
-    """
-
-    def test_the_audit_ran_at_the_right_size_with_no_script_errors(self, mobile_report):
-        assert mobile_report["viewport"] == [MOBILE_WIDTH, MOBILE_HEIGHT]
-        assert mobile_report["errors"] == [], mobile_report["errors"]
-        # 4 layouts x 9 states, none skipped.
-        assert len(mobile_report["states"]) == 36
-
-    def test_no_state_overflows_horizontally(self, mobile_report):
-        """A phone that scrolls sideways is the clearest possible signal that a
-        layout was only ever looked at on a laptop."""
-        failures = [
-            f"{row['layout']}/{row['state']}: scrollWidth={row['scrollWidth']} "
-            f"offenders={row['offenders']}"
-            for row in mobile_report["states"]
-            if row["scrollWidth"] > MOBILE_WIDTH or row["offenders"]
-        ]
-        assert failures == [], "\n".join(failures)
-
-    @pytest.mark.parametrize("layout", ["B1", "B2", "B3", "merged"])
-    def test_every_layout_was_measured_in_every_state(self, mobile_report, layout):
-        states = {row["state"] for row in mobile_report["states"] if row["layout"] == layout}
-        assert states == {
-            "happy", "blocked", "zero-match", "first-run", "three-way",
-            "long-quote", "ingesting", "empty", "offline",
-        }
-
-    def test_the_conflict_sheet_opens_and_closes_on_a_phone(self, mobile_report):
-        sheet = mobile_report["sheet"]
-        assert sheet["found"] is True, "the seeded library has no disagreement to inspect"
-        assert sheet["open"] is True
-        assert sheet["textLength"] > 100, "an empty sheet is not an open sheet"
-        assert sheet["closed"] is True
-        assert sheet["cardsAfterClose"] >= 1, "closing it must return you to the library"
-
-    def test_the_conflict_sheet_is_not_under_the_tuner_bar(self, mobile_report):
-        """The Phase 4 defect, in its other form: the bar is fixed to the
-        bottom, so anything it covers cannot be tapped."""
-        sheet = mobile_report["sheet"]
-        assert sheet["closeButton"]["found"] is True
-        assert sheet["closeButton"]["visible"] is True
-        assert sheet["closeButton"]["covered"] is False, sheet["closeButton"].get("coveredBy")
-        assert sheet["closeButton"]["inViewport"] is True
-
-    def test_the_sheet_fits_the_screen(self, mobile_report):
-        box = mobile_report["sheet"]["box"]
-        assert box["left"] >= 0
-        assert box["right"] <= MOBILE_WIDTH
-        assert mobile_report["sheet"]["overflow"]["scrollWidth"] <= MOBILE_WIDTH
-
-    def test_the_profile_modal_is_reachable_and_escapable_on_a_phone(self, mobile_report):
-        profile = mobile_report["profile"]
-        # Reached from the fixed bottom bar, since the sidebar is an off-canvas
-        # drawer at this width — and the bar must not be under the tuner.
-        assert profile["button"]["visible"] is True
-        assert profile["button"]["covered"] is False, profile["button"].get("coveredBy")
-        assert profile["button"]["inViewport"] is True
-        assert profile["open"] is True
-        # Five blocks from Checkpoint B, plus the audit log added in Phase 6.
-        assert len(profile["blocks"]) == 6, profile["blocks"]
-        assert profile["closeButton"]["covered"] is False, profile["closeButton"].get("coveredBy")
-        assert profile["closeButton"]["inViewport"] is True
-        # Two ways out: a modal you can only leave by reloading is a trap.
-        assert profile["closedByButton"] is True
-        assert profile["closedByEscape"] is True
-
-    def test_the_bottom_bar_and_the_tuner_do_not_overlap(self, mobile_report):
-        """Two bars both fixed to the bottom edge is how the Phase 4 defect
-        happened. In the harness the tuner has to sit above the nav bar."""
-        bar = mobile_report["profile"]["barBox"]
-        tuner = mobile_report["profile"]["tunerBox"]
-        assert tuner["bottom"] <= bar["top"] + 1, (
-            f"the tuner (bottom {tuner['bottom']}) overlaps the nav bar "
-            f"(top {bar['top']})"
-        )
-
-    def test_the_profile_modal_fits_the_screen(self, mobile_report):
-        box = mobile_report["profile"]["box"]
-        assert box["left"] >= 0 and box["right"] <= MOBILE_WIDTH
-        assert mobile_report["profile"]["overflow"]["scrollWidth"] <= MOBILE_WIDTH
-        assert mobile_report["profile"]["overflow"]["offenders"] == []
-
-    def test_an_offline_page_says_so_instead_of_failing_silently(self, mobile_report):
-        """`fetch` rejects when the network is gone. That used to skip every
-        caller's `if (!data.ok)` branch, so the page half-rendered in silence."""
-        offline = mobile_report["offline"]
-        assert offline["strip"] >= 1
-        assert "could not be reached" in offline["text"]
-        assert offline["overflow"]["scrollWidth"] <= MOBILE_WIDTH
+# `R-19`: `TestMobileViewport` drove the deleted `index.html` through
+# Playwright at 390x844 and went with it. Its property — "a phone that
+# scrolls sideways is the clearest possible signal that a layout was only
+# ever looked at on a laptop" — moved to `tests/test_redesign_browser.py`,
+# which checks the same thing against every route the app now serves. It
+# found the property already broken on two of them, which is the argument
+# for porting this rather than deleting it.
 
 
 class TestOfflineIsHandledInTheSource:
     """Asserted in the source too, so the contract holds on a host where
-    Playwright is unavailable and the browser test skips."""
+    Playwright is unavailable and the browser test skips.
 
-    def test_the_api_helper_cannot_reject(self):
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        body = js.split("async function api(")[1].split("\n}")[0]
+    `R-19`: the mechanism changed with the app. `app.js` returned a synthetic
+    failed *payload*; `frames.js` throws an Error its callers already know how
+    to render. What must not change is that a dropped connection reaches the
+    person as a sentence rather than an unhandled promise rejection — the page
+    simply stopping, with "Failed to fetch" in a console nobody has open.
+    """
+
+    def _js(self) -> str:
+        return (ROOT / "app" / "static" / "frames.js").read_text()
+
+    def test_neither_helper_calls_fetch_directly(self):
+        """Both go through the wrapper, or one of them can still reject."""
+        js = self._js()
+        for name in ("export async function api(", "export async function post("):
+            body = js.split(name)[1].split("\n}")[0]
+            assert "await reach(" in body, name
+            assert "await fetch(" not in body, name
+
+    def test_the_wrapper_turns_a_dead_network_into_a_sentence(self):
+        js = self._js()
+        body = js.split("async function reach(")[1].split("\n}\n")[0]
         assert "try {" in body and "await fetch(" in body
-        assert "catch" in body and "offlinePayload()" in body
+        assert "catch" in body
+        assert "could not be reached" in body
+        assert 'reason = "offline"' in body
 
-    def test_the_offline_payload_is_an_ordinary_failed_response(self):
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        payload = js.split("function offlinePayload()")[1].split("\n}")[0]
-        assert 'ok: false' in payload
-        assert 'reason: "offline"' in payload
-        assert "could not be reached" in payload
-
-    def test_the_harness_exposes_the_offline_state(self):
-        html = (ROOT / "app" / "static" / "index.html").read_text()
-        assert '<option value="offline">' in html
+    def test_the_sentence_is_something_a_person_can_act_on(self):
+        js = self._js()
+        message = js.split("could not be reached")[0].split('new Error("')[-1]
+        assert "Brain" in message
+        body = js.split("async function reach(")[1].split("\n}\n")[0]
+        assert "Check your connection" in body
 
 
 # ===========================================================================

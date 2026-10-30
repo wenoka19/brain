@@ -1,0 +1,1285 @@
+/* brain — the frames.
+   MASTER_PLAN.md §5 (the template), §12 (responsive), and one frame per §7.
+   Layer 4 of 4: it may compose tokens, atoms and molecules, and declare
+   nothing of its own that those three already name.
+
+   §6 rule 4 sets the vertical rhythm this file obeys throughout:
+     --space-8 between sections
+     --space-1 between a section title and its note
+     --space-4 between the note and its content
+*/
+
+/* The icon sprite. `width=0 height=0` is not enough: an inline <svg> still
+   generates a line box, and that line box pushed the whole page down 21px and
+   broke §14.12's "no scroll on Home at 1512x982". Taken out of flow rather
+   than `display:none`, which is the form every browser resolves `<use>`
+   against. §1.1 forbids an inline style, so it lives here. */
+.sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* ======================================================================
+   §5 THE TEMPLATE
+
+   A 240px sidebar on `--bg-base`, and everything right of it on
+   `--bg-canvas`, scrolling independently.
+   ====================================================================== */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: 100vh;
+  min-height: 100svh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  border-right: var(--border-width) solid var(--border-subtle);
+  background: var(--bg-base);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  overflow-y: auto;
+  padding-top: calc(var(--space-3) + env(safe-area-inset-top));
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+/* The 20px accent square of §5. It is drawn, not an icon, so it never
+   inherits a stroke. */
+.brand-mark {
+  width: var(--slot-size);
+  height: var(--slot-size);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+}
+
+.brand-rule { margin: var(--space-2) var(--space-2) var(--space-3); }
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: var(--slot-size);
+  height: var(--slot-size);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+.sidebar-foot { margin-top: auto; }
+.sidebar-foot .divider { margin: var(--space-3) var(--space-2); }
+
+.content {
+  padding: var(--space-8);
+  padding-bottom: calc(var(--space-8) + env(safe-area-inset-bottom));
+  outline: none;
+}
+
+/* "inner max-width --content-max (880) centred" (§5). */
+.wrap {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+}
+
+/* "Reading surfaces (Transcript, Summary) use --read-max (680) instead." */
+.wrap[data-read] { max-width: var(--read-max); }
+
+/* §7.13 sets Profile to 720. */
+.wrap[data-narrow] { max-width: 720px; }
+
+/* The top bar does not exist above 720px. */
+.topbar { display: none; }
+.nav-scrim { display: none; }
+
+/* ======================================================================
+   Page furniture shared by every frame
+   ====================================================================== */
+.page-title {
+  margin: 0 0 var(--space-6);
+  font-size: var(--text-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+}
+
+/* §6 rule 4. A section is a titled block; its note sits one step below the
+   title, and its content four steps below the note. */
+.section { margin-top: var(--space-8); }
+.section:first-child { margin-top: 0; }
+
+.section-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.section-note {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--text-secondary);
+}
+
+/* A toolbar: the search field takes the room, the controls keep their size
+   (§3.3's `flex: 0 0 auto` is what stops their labels wrapping). */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+}
+
+.search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.search .slot {
+  position: absolute;
+  left: var(--space-3);
+  color: var(--icon-muted);
+  pointer-events: none;
+}
+
+.search .input { padding-left: calc(var(--space-3) + var(--slot-size) + var(--space-2)); }
+
+/* The `Ctrl K` chip rides inside a list's own search field, which is not the
+   control that shortcut focuses (§3.10). */
+.search .kbd {
+  position: absolute;
+  right: var(--space-2);
+  pointer-events: none;
+}
+
+.search:has(.kbd) .input { padding-right: calc(var(--space-10) + var(--space-4)); }
+
+/* §6 rule 14: dates group lists. */
+.date-group + .date-group { margin-top: var(--space-6); }
+
+.date-label {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* §6 rule 12: an empty state is an invitation. It says what will appear here
+   and gives the button that makes it happen; it never says "no items". */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-10) 0;
+  max-width: 56ch;
+  color: var(--text-secondary);
+}
+
+/* ======================================================================
+   §7.1 HOME — empty state
+
+   "Content flex-centred, inner stack max-width 720, margin-top:-6vh (true
+   centring sits too low once the sidebar anchors the eye)."
+   ====================================================================== */
+.home {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: calc(100vh - var(--space-8) * 2);
+  min-height: calc(100svh - var(--space-8) * 2);
+}
+
+.home-stack {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+  margin-top: -6vh;
+}
+
+.home-greeting {
+  margin: 0;
+  font-size: var(--text-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+}
+
+.home-pitch {
+  margin: var(--space-3) 0 var(--space-6);
+  max-width: 56ch;
+  font-size: var(--text-lg);
+  color: var(--text-secondary);
+}
+
+/* "action links, padding-left --space-5, so they align with the omnibar
+   text" (§7.1). */
+.home-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding-left: var(--space-5);
+}
+
+/* The whole content area is a drop target (§7.1). */
+.content[data-dropping] .home-stack {
+  outline: 2px dashed var(--accent);
+  outline-offset: var(--space-5);
+  border-radius: var(--radius-lg);
+}
+
+/* ======================================================================
+   §12 RESPONSIVE
+   ====================================================================== */
+
+/* 960–1199: the meter grid becomes one column. */
+@media (max-width: 1199px) {
+  .meter-grid { grid-template-columns: 1fr; }
+}
+
+/* 720–959: the sidebar persists; log rows drop their connection and latency. */
+@media (max-width: 959px) {
+  .log-row [data-col="connection"],
+  .log-row [data-col="latency"] { display: none; }
+}
+
+/* < 720: the sidebar becomes a top bar with a menu button, content padding
+   drops to --space-4, and card actions are permanently visible because there
+   is no hover (handled in molecules.css). */
+@media (max-width: 719px) {
+  /* `minmax(0, 1fr)`, not a bare `1fr`. A bare one is `minmax(auto, 1fr)`,
+     whose minimum is the column's *min-content* — so a single wide
+     descendant stretches the whole page and the phone scrolls sideways.
+     Measured: `/rules` was 577px against a 390px viewport, and the offender
+     list named `main.content` rather than anything inside it, which is what
+     a grid column refusing to shrink looks like. The desktop rule at the top
+     of this file already had the `minmax`; this one did not. */
+  .shell { grid-template-columns: minmax(0, 1fr); }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    padding: var(--space-2) var(--space-4);
+    padding-top: calc(var(--space-2) + env(safe-area-inset-top));
+    border-bottom: var(--border-width) solid var(--border-subtle);
+    background: var(--bg-base);
+  }
+
+  .topbar .brand { padding: 0; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    width: var(--sidebar-width);
+    height: auto;
+    transform: translateX(-100%);
+    transition: transform var(--duration-base) var(--ease-standard);
+  }
+
+  .sidebar[data-open="true"] { transform: none; }
+
+  .sidebar > .brand,
+  .brand-rule { display: none; }
+
+  .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: var(--bg-overlay);
+  }
+
+  .nav-scrim[hidden] { display: none; }
+
+  .content { padding: var(--space-4); }
+
+  .home { min-height: calc(100svh - 120px); }
+  .home-stack { margin-top: 0; }
+  .home-greeting { font-size: var(--text-stat); }
+}
+
+/* ======================================================================
+   §7.5 and §7.6 — the reading surfaces
+   ====================================================================== */
+.back {
+  margin-bottom: var(--space-4);
+}
+
+/* The caret points back, so it is the forward one turned around. */
+.back-caret {
+  transform: rotate(180deg);
+}
+
+.read-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
+}
+
+.read-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.read-meta > * + *::before {
+  content: "·";
+  margin-right: var(--space-2);
+}
+
+/* The action bar of §7.5. It gains its bottom border only once stuck, which
+   is what `position: sticky` plus the scroll-state class is for. */
+.read-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: var(--space-6) 0 var(--space-4);
+  padding: var(--space-2) 0;
+  background: var(--bg-canvas);
+}
+
+.read-bar[data-stuck="true"] {
+  border-bottom: var(--border-width) solid var(--border-subtle);
+}
+
+.read-bar-spacer { flex: 1 1 auto; }
+
+/* §7.6's Brief / Full. The active segment is an accent-filled pill, which is
+   why its label is `--on-accent` and not white. */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-code);
+  flex: 0 0 auto;
+}
+
+.segment {
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.segment:hover,
+.segment[data-force~="hover"] { color: var(--text-primary); }
+
+.segment[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* §7.5's body: timestamps in a 64px gutter, text at reading size.
+   `R-1` struck speakers, so a turn is a moment and its words. */
+.transcript-body {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+
+.turn {
+  display: contents;
+}
+
+.turn-time {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 3px;
+}
+
+.turn-time a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.turn-time a:hover,
+.turn-time a[data-force~="hover"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.turn-text {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+}
+
+/* The instruction that produced a summary (§7.6). */
+.note-box {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.note-text {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.gist {
+  margin: 0 0 var(--space-8);
+  font-size: var(--text-lead);
+  line-height: var(--leading-read);
+}
+
+/* §7.6: "Every point carries its timestamp, right-aligned, clickable through
+   to the transcript. This is what makes a generated summary trustworthy." */
+.points {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+.point {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+}
+
+.point + .point {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.point-text {
+  flex: 1 1 auto;
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+}
+
+.point-time {
+  flex: 0 0 auto;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 4px;
+}
+
+.point-time a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.point-time a:hover,
+.point-time a[data-force~="hover"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 719px) {
+  .transcript-body { grid-template-columns: 48px 1fr; }
+}
+
+/* ======================================================================
+   §7.3 SOURCE DETAIL
+   ====================================================================== */
+.source-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+/* §7.3's 132x74 thumbnail. `--bg-code` is grey-150, which is also the canvas,
+   so a thumb painted with it is invisible on this page. `--bg-base` is the
+   next step down and is what makes it read as a frame. */
+.source-thumb {
+  display: grid;
+  place-items: center;
+  width: 132px;
+  height: 74px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  color: var(--icon-muted);
+}
+
+.source-head .read-title { margin-bottom: var(--space-1); }
+.source-head .read-meta { margin-bottom: var(--space-2); }
+
+.work { margin-top: var(--space-6); }
+
+.work-hint {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.yield-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.yield-head .section-title { flex: 1 1 auto; }
+
+.yield-card {
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.yield-card + .yield-card { margin-top: var(--space-2); }
+
+.yield-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-weight: var(--weight-medium);
+}
+
+.yield-card-head .slot { color: var(--icon-muted); }
+.yield-card-head .pill { margin-left: auto; }
+
+.yield-gist {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: var(--leading-read);
+}
+
+.yield-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.yield-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+}
+
+.yield-row + .yield-row {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.yield-text { flex: 1 1 auto; }
+
+.yield-time {
+  flex: 0 0 auto;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.yield-time a { color: inherit; text-decoration: none; }
+
+.yield-time a:hover,
+.yield-time a[data-force~="hover"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ======================================================================
+   §7.8 RULES and §7.9 SKILLS — inside an expansion
+   ====================================================================== */
+.rule-full {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+}
+
+.rule-quote {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-control);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* §4.10's counter is for genuine sequences. A skill's steps are one — §7.9
+   calls them "the only numbered list in the app outside guided setup" — but
+   they sit inside a card, so they carry no circular counter. */
+.steps-plain > li {
+  grid-template-columns: 1fr;
+  padding: var(--space-1) 0;
+  border-top: 0;
+  list-style: decimal inside;
+  display: list-item;
+}
+
+.steps-plain > li::before { content: none; }
+
+/* ======================================================================
+   §7.14 SIGN IN
+   ====================================================================== */
+.signin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100svh - var(--space-8) * 2);
+}
+
+/* "The card must be width-capped and centred." The known bug §7.14 names:
+   as a flex child with no max-width the column collapses to ~240px and the
+   placeholder truncates mid-word. */
+.signin-card {
+  width: 100%;
+  max-width: 380px;
+  flex: 0 0 auto;
+  padding: var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.signin-title {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+}
+
+.signin-lede {
+  margin: 0 0 var(--space-5);
+  color: var(--text-secondary);
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.signin-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.signin-card .divider { margin: var(--space-5) 0; }
+
+.signin-promises {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.signin-promises > li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.signin-promises .icon { color: var(--status-active-text); margin-top: 2px; }
+
+/* §4.10's counter is for a guided sequence; a skill's steps sit inside a card
+   and want no circle and no rules between them. The divider lives on
+   `li + li`, so neutralising it needs the same shape, not a looser one. */
+.steps-plain > li + li { border-top: 0; }
+
+/* ======================================================================
+   §7.13 PROFILE
+   ====================================================================== */
+.card-group {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  overflow: hidden;
+}
+
+.avatar-lg {
+  width: 40px;
+  height: 40px;
+  font-size: var(--text-base);
+  flex: 0 0 auto;
+}
+
+.theme-row {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.theme-option[aria-pressed="true"] { color: var(--text-primary); }
+
+/* §7.13: "a theme picker where each option shows itself" — a swatch
+   reproducing that theme's sidebar/canvas split. The two literals here are
+   the one place a theme must paint a colour it is not currently in, so they
+   name the primitives of the theme they depict. */
+.theme-swatch {
+  display: block;
+  width: 58px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-control);
+}
+
+.theme-option[aria-pressed="true"] .theme-swatch {
+  box-shadow:
+    inset 0 0 0 var(--border-width) var(--accent),
+    0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.theme-swatch[data-swatch="light"] {
+  background: linear-gradient(to right, var(--grey-200) 0 30%, var(--grey-150) 30% 100%);
+}
+
+.theme-swatch[data-swatch="dark"] {
+  background: linear-gradient(to right, var(--ink-950) 0 30%, var(--ink-925) 30% 100%);
+}
+
+.save-note {
+  margin-top: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* ======================================================================
+   §7.12 ARCHIVE
+   ====================================================================== */
+.filter-row { margin-bottom: var(--space-6); }
+
+.date-group[hidden] { display: none; }
+.exp-card[hidden] { display: none; }
+
+/* The omnibar's own status line (§7.1 submit, §6 rule 11). */
+.omni-status {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.omni-status[data-tone="error"] { color: var(--danger); }
+.work-hint[data-tone="error"] { color: var(--danger); }
+
+/* §4.4: a failed step keeps its own marker rather than borrowing the check. */
+.work-step[data-state="failed"] { color: var(--danger); }
+
+.work-step[data-state="failed"] .work-marker::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--danger);
+}
+
+/* ======================================================================
+   controls that answer
+   ====================================================================== */
+.menu-wrap { position: relative; flex: 0 0 auto; }
+
+.match-count {
+  position: absolute;
+  right: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.search:has(.match-count) .input { padding-right: var(--space-10); }
+
+/* The in-page highlight of §7.5. */
+mark {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+}
+
+.search-note {
+  margin: calc(var(--space-6) * -1 + var(--space-2)) 0 var(--space-6);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* The sentinel that tells the sticky bar when it has stuck (§7.5). */
+.stick-sentinel { display: block; height: 1px; }
+
+/* §7.6's Full view. */
+.chapters { margin-top: var(--space-8); }
+
+.chapter { padding: var(--space-4) 0; }
+.chapter + .chapter { border-top: var(--border-width) solid var(--border-subtle); }
+
+.chapter-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.chapter-range {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chapter-text {
+  margin: var(--space-2) 0 0;
+  color: var(--text-secondary);
+  line-height: var(--leading-read);
+}
+
+/* §7.1's create panel, reached by `?create=1` from `+ Write a rule` and
+   `+ Add a skill`. It sits above the list, because the person came to add
+   something rather than to read. */
+.create-panel .card-group { padding: var(--space-4); }
+
+.create-field + .create-field { margin-top: var(--space-4); }
+
+.create-field .field-label { display: block; margin-bottom: var(--space-1); }
+
+.create-field .input { width: 100%; }
+
+.create-area {
+  height: auto;
+  padding: var(--space-2) var(--space-3);
+  line-height: var(--leading-normal);
+  resize: vertical;
+}
+
+.create-panel .btn-row { margin-top: var(--space-5); align-items: center; }
+
+/* §7.8's inline `Edit`, inside the expanded rule card. It replaces the action
+   row rather than opening a dialog: the rule is already on screen at reading
+   size, and the edit is two fields. */
+.rule-edit { margin-top: var(--space-4); }
+
+.rule-edit .field-label { display: block; margin-bottom: var(--space-1); }
+
+.rule-edit .input { width: 100%; }
+
+.rule-edit .input + .field-label { margin-top: var(--space-4); }
+
+/* §7.3's Summary card carries `Copy` and `Download` in its head. §18.4: "the
+   Summary card shows prose with no visible controls at rest" — §4.1's
+   hover-only rule, applied to a card that is not an item card. */
+.yield-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.yield-card:hover .yield-actions,
+.yield-card:focus-within .yield-actions,
+.yield-card[data-force~="hover"] .yield-actions { opacity: 1; }
+
+@media (max-width: 719px) {
+  .yield-actions { opacity: 1; }
+}
+
+/* §7.3's header menu sits at the end of the row, per §6 rule 1. */
+.source-head .menu-wrap { margin-left: auto; align-self: flex-start; }
+
+/* The header's inline rename takes the title's size so the page does not jump. */
+.title-rename {
+  height: auto;
+  width: 100%;
+  padding: 2px var(--space-2);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+}
+
+/* ======================================================================
+   §7.10 ACTIVITY
+   ====================================================================== */
+/* §12: "960–1199 | meter grid becomes one column". Above that it is one row,
+   which is what makes the figures comparable at a glance.
+
+   Three columns, not the four §7.10's capture draws: `R-17` struck the
+   storage meter, and a `repeat(4, …)` left a quarter of the row empty on the
+   right. The count is written out rather than `auto-fit` because §12 names
+   an exact breakpoint behaviour, and because adding a fourth meter should be
+   a decision someone makes here on purpose. */
+.meter-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 1199px) {
+  .meter-row { grid-template-columns: 1fr; }
+}
+
+/* §7.10: rows are "40px, one line, denser than an item card because a log is
+   scanned, not browsed". The columns are fixed where the content is fixed —
+   a time, a latency, a status — and elastic only for the two that vary, so
+   the eye can run down any one of them. */
+.call-log {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  overflow: hidden;
+}
+
+.call + .call { border-top: var(--border-width) solid var(--border-subtle); }
+
+.call-head {
+  display: grid;
+  grid-template-columns: 56px 8px 1fr auto minmax(0, 1.4fr) 64px 64px;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 40px;
+  padding: 0 var(--space-4);
+  text-align: left;
+  font-size: var(--text-sm);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.call-head:hover,
+.call-head[data-force~="hover"] { background: var(--bg-hover); }
+
+.call-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The dot is the status at a glance, before the pill is read. */
+.call-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-active-text);
+}
+
+.call-dot[data-ok="false"] { background: var(--status-pending-text); }
+
+.call-conn {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* §7.10: "tool name in `--font-mono` on `--bg-canvas`". */
+.call-tool {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.call-target {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.call-latency {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.call-body {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.call[data-open="false"] .call-body { display: none; }
+
+.call-pre {
+  margin: var(--space-1) 0 var(--space-4);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.call-returned {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--text-secondary);
+}
+
+/* §12: "720–959 | log rows drop the connection and latency columns". */
+@media (max-width: 959px) {
+  .call-head { grid-template-columns: 56px 8px auto minmax(0, 1fr) 64px; }
+  .call-conn,
+  .call-latency { display: none; }
+}
+
+/* ======================================================================
+   §7.11 CONNECTIONS
+   ====================================================================== */
+/* §7.11: the empty state is "accent-bordered, first on the page". Once there
+   is a connection it stops shouting — the person has done the thing it was
+   there to get them to do. */
+.connect-card[data-state="empty"] {
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--accent);
+}
+
+.connect-title {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--text-lead);
+  font-weight: var(--weight-semibold);
+}
+
+.connect-lede {
+  margin: 0;
+  max-width: 54ch;
+  color: var(--text-secondary);
+}
+
+.connect-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.connect-row .input { flex: 1 1 auto; min-width: 0; }
+
+/* The two tiles of §7.11. `Show me how` rides in the meta line rather than
+   as a separate control: the whole header already opens the card, and a
+   second thing to click would be §6 rule 2's duplicate. */
+.how + .how { margin-top: var(--space-3); }
+
+.step-title { font-weight: var(--weight-medium); }
+
+.step-paths {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+  color: var(--text-secondary);
+}
+
+.step-paths li + li { margin-top: var(--space-1); }
+
+.step-note {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+}
+
+/* §7.11: "The placeholder is an amber `<mark>`; it fills with the real link
+   once generated." */
+.code mark {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+}
+
+.conn-list {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  overflow: hidden;
+}
+
+.conn {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  min-height: var(--card-height);
+}
+
+.conn + .conn { border-top: var(--border-width) solid var(--border-subtle); }
+
+.conn-name {
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 719px) {
+  .connect-row { flex-wrap: wrap; }
+  .connect-row .input { flex: 1 0 100%; }
+  .conn { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .conn .item-meta { grid-column: 1 / -1; }
+}
+
+/* ======================================================================
+   §7.2 HOME — the thread state
+   ====================================================================== */
+/* "Greeting and pitch disappear. The thread fills the space and scrolls; the
+   composer pins to the bottom with a gradient mask above it." The stack stops
+   being centred, because a conversation grows downward from the top. */
+.home[data-thread="true"] {
+  justify-content: flex-start;
+  padding-top: var(--space-6);
+}
+
+.home[data-thread="true"] .home-stack {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-6);
+  /* The gradient mask §7.2 names: the thread fades under the composer rather
+     than being cut off by it, so a half-line never reads as the end. */
+  /* `currentColor`, not a literal: a mask reads only the alpha channel, so
+     the colour is irrelevant and the token layer stays unbroken. */
+  mask-image: linear-gradient(to bottom, transparent 0, currentColor var(--space-4),
+                              currentColor calc(100% - var(--space-6)), transparent 100%);
+}
+
+.turn-row {
+  display: flex;
+  margin-bottom: var(--space-4);
+}
+
+.turn-row[data-who="you"] { justify-content: flex-end; }
+
+.bubble {
+  max-width: 82%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  color: var(--text-primary);
+}
+
+/* What the person said reads as theirs. */
+.turn-row[data-who="you"] .bubble {
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+/* The work block and the result table are tables, not sentences: they take
+   the width. */
+.bubble-wide { max-width: 100%; width: 100%; }
+
+/* A suggestion chip row and the work block are not messages and should not be
+   boxed like one — the work block brings its own card. */
+.bubble-bare {
+  max-width: 100%;
+  width: 100%;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/* §7.2's layout draws the work block across the thread, not shrunk to its
+   longest step. */
+.bubble-bare > .work { width: 100%; }
+
+.bubble-error { box-shadow: inset 0 0 0 var(--border-width) var(--danger); }
+
+.thread-said { margin: var(--space-1) 0 0; }
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--weight-medium);
+  word-break: break-all;
+}
+
+.source-chip .icon { flex: 0 0 auto; }
+
+.thread-note { margin: 0; color: var(--text-secondary); }
+
+/* §7.2: the hint sits under the composer while Brain works. */
+.thread-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* §7.2: "work block collapses → `Processed in 2m 14s · 6 steps`". The header
+   is the whole block once it is done — the steps are on the source's page,
+   and six resolved rows in a thread are six lines nobody re-reads. */
+.work[data-collapsed="true"] .work-steps { display: none; }
+
+/* §7.2's result table. */
+.result-table {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+}
+
+.result-row + .result-row {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.result-table + .btn-row { margin-top: var(--space-4); }
+
+@media (max-width: 719px) {
+  /* §12: "the thread composer sits above the keyboard". */
+  .home[data-thread="true"] { padding-top: var(--space-4); }
+  .bubble { max-width: 92%; }
+}

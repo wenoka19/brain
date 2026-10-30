@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -33,7 +34,7 @@ class TestCli:
         sub = next(
             action for action in parser._actions if hasattr(action, "choices") and action.choices
         )
-        assert {"doctor", "selftest", "preview-ax", "preview-ui"} <= set(sub.choices)
+        assert {"doctor", "selftest", "preview-ax", "dev"} <= set(sub.choices)
         assert {"serve", "worker", "calibrate"} <= set(sub.choices)
 
     def test_doctor_passes_on_this_host(self, cfg, capsys):
@@ -78,7 +79,7 @@ class TestCli:
             "Checkpoint A: the search envelope obeys the locked format",
             "omni-bar: a typed delete can only reach Trash",
             "oauth: PKCE, audience binding, rotation, revocation",
-            "trash: deletion is gated on it",
+            "deletion: gated on being set aside first",
             "tenant isolation",
         ):
             assert claim in out, claim
@@ -95,11 +96,11 @@ class TestCli:
         assert "markdown tables: False" in out
         assert "minute" not in out.split("TOUCHPOINT 2")[0].lower()
 
-    def test_preview_ui_is_wired_but_not_started_here(self):
+    def test_the_dev_server_is_wired_but_not_started_here(self):
         parser = cli.build_parser()
-        args = parser.parse_args(["preview-ui"])
+        args = parser.parse_args(["dev"])
         assert args.port == 8080 and args.seed is True
-        assert parser.parse_args(["preview-ui", "--no-seed"]).seed is False
+        assert parser.parse_args(["dev", "--no-seed"]).seed is False
 
 
 # ===========================================================================
@@ -123,10 +124,17 @@ class TestWorker:
         claimed = [first.drain_once(), second.drain_once()]
         assert sum(1 for outcome in claimed if outcome is not None) == 1
 
-    def test_a_crashing_job_fails_cleanly_and_refunds_the_quota(self, cfg, user, monkeypatch):
+    def test_a_crashing_job_fails_cleanly_and_refunds_the_credits(self, cfg, user, monkeypatch):
+        """`R-18` kept the guarantee and changed the currency. A crash inside
+        `process_job` happens after the gate may already have charged, so the
+        worker reads the charge off the job ROW and gives back exactly it."""
         ctx = E.build_context(user["user_id"])
         E.op_ingest_source(ctx, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        assert control_db.get_user(ctx.control, user["user_id"])["media_minutes_used"] > 0
+        job = control_db.list_jobs(ctx.control, user["user_id"])[0]
+        # Charge it the way the gate would, then crash the pipeline.
+        control_db.debit_credits(ctx.control, user["user_id"], 4_000, cfg=cfg)
+        control_db.set_job_charge(ctx.control, job["job_id"], 4_000)
+        assert control_db.credits_state(ctx.control, user["user_id"], cfg=cfg)["used"] == 4_000
 
         def explode(job, *, cfg=None):
             raise RuntimeError("the parser exploded")
@@ -135,7 +143,29 @@ class TestWorker:
         outcome = worker.Worker(cfg=cfg).drain_once()
         assert outcome["status"] == "failed"
         assert "exploded" in outcome["message"]
-        assert control_db.get_user(ctx.control, user["user_id"])["media_minutes_used"] == 0
+        assert control_db.credits_state(ctx.control, user["user_id"], cfg=cfg)["used"] == 0
+
+    def test_a_job_that_burns_its_last_attempt_is_reaped_and_refunded(self, cfg, user):
+        """The leak `R-18` found: `claim_next_job` filters on
+        `attempts < max_attempts`, so a job that crashed its last attempt was
+        never selected again — it kept a non-terminal status forever and
+        nothing ever ran the code that gives its charge back."""
+        ctx = E.build_context(user["user_id"])
+        E.op_ingest_source(ctx, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        job = control_db.list_jobs(ctx.control, user["user_id"])[0]
+        control_db.debit_credits(ctx.control, user["user_id"], 2_500, cfg=cfg)
+        control_db.set_job_charge(ctx.control, job["job_id"], 2_500)
+        ctx.control.execute(
+            "UPDATE ingestion_jobs SET attempts = ?, status = 'fetching' WHERE job_id = ?",
+            (worker.MAX_ATTEMPTS, job["job_id"]),
+        )
+        assert control_db.claim_next_job(ctx.control) is None, "unclaimable, as designed"
+
+        assert worker.Worker(cfg=cfg).drain_once() is None  # nothing left to run
+        assert control_db.credits_state(ctx.control, user["user_id"], cfg=cfg)["used"] == 0
+        reaped = control_db.list_jobs(ctx.control, user["user_id"])[0]
+        assert reaped["status"] == "failed"
+        assert reaped["error_reason"] == "attempts_exhausted"
 
     def test_an_expired_lease_is_recovered(self, cfg, user):
         ctx = E.build_context(user["user_id"])
@@ -194,9 +224,51 @@ class TestPackaging:
             "ingestion/gatekeeper.py", "ingestion/providers.py", "ingestion/fetchers.py",
             "ingestion/extractor.py", "ingestion/grounder.py", "ingestion/linker.py",
             "core/engine.py", "core/formatting.py",
-            "static/index.html", "static/app.css", "static/app.js",
+            "storage/retention.py", "storage/r2_sync.py",
+            # `R-19`: the one app's shell, its script and its four layers,
+            # plus the OAuth card's two files — the one screen that renders
+            # outside the shell, and the one nobody would notice was broken
+            # until someone tried to connect an AI.
+            "static/shell.html", "static/frames.js",
+            "static/tokens.css", "static/atoms.css",
+            "static/molecules.css", "static/frames.css",
+            "static/consent.css", "static/consent.js",
         ):
             assert (ROOT / "app" / module).is_file(), module
+
+    def test_the_cutover_took_the_old_app_with_it(self):
+        """`R-19`. Left behind, these are 90KB of dead code that still looks
+        like the product — and `app.css` would quietly recolour any document
+        that linked it alongside `tokens.css`."""
+        for name in ("static/index.html", "static/app.css", "static/app.js"):
+            assert not (ROOT / "app" / name).exists(), name
+
+    #: Comments and docstrings explain the cutover by naming what it removed,
+    #: so they are stripped before the scan. A mention is not a reference —
+    #: only code can send a browser to a file that is not there.
+    _COMMENTS = (
+        re.compile('"""' + r"(?:.|\n)*?" + '"""'),            # python docstrings
+        re.compile("'''" + r"(?:.|\n)*?" + "'''"),            # and the other kind
+        re.compile(r"/\*(?:.|\n)*?\*/"),       # css and js block comments
+        re.compile(r"<!--(?:.|\n)*?-->"),     # html comments
+        re.compile(r"^\s*#.*$", re.M),         # python line comments
+        re.compile(r"^\s*//.*$", re.M),        # js line comments
+    )
+
+    def test_nothing_still_asks_for_a_deleted_asset(self):
+        """`R-19`. The failure mode this catches is a 404 on a page that
+        otherwise renders: a stylesheet that silently does not load, which
+        looks like a styling bug rather than a missing file."""
+        for path in sorted((ROOT / "app").rglob("*")):
+            if path.suffix not in (".py", ".js", ".html", ".css"):
+                continue
+            if "__pycache__" in str(path):
+                continue
+            code = path.read_text(encoding="utf-8")
+            for pattern in self._COMMENTS:
+                code = pattern.sub("", code)
+            for dead in ("/app.css", "/app.js", "index.html"):
+                assert dead not in code, f"{path.relative_to(ROOT)} still references {dead}"
 
     def test_the_dockerfile_ships_the_web_assets(self):
         text = (ROOT / "Dockerfile").read_text()
@@ -318,10 +390,90 @@ class TestPackaging:
         assert "sqlite_vec" in text and "FTS5" in text
         assert "pip install" in text
 
+    def test_every_directly_imported_package_is_declared(self):
+        """The drift that shipped: four packages imported and declared nowhere.
+
+        `app/` imported `starlette` and `pydantic` directly while declaring
+        neither — both arrived transitively through FastAPI, which works only
+        for as long as someone else's dependency keeps supplying them. The test
+        suite imported `PyYAML` and `reportlab`, declared in no list at all, so
+        it collected only on hosts that happened to have them. And `mcp` and
+        `yt-dlp` lived in the `Dockerfile` alone, so `pip install .` produced an
+        app that could not import itself.
+
+        This walks the real import graph instead of trusting a list.
+        """
+        import ast
+        import sys
+        from importlib.metadata import packages_distributions
+
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+
+        def names(specs):
+            out = set()
+            for spec in specs:
+                head = re.split(r"[<>=!~\[;\s]", spec, maxsplit=1)[0]
+                out.add(head.lower().replace("_", "-"))
+            return out
+
+        runtime = names(project["dependencies"])
+        dev = runtime | names(project["optional-dependencies"]["dev"])
+        modules = packages_distributions()
+        stdlib = set(sys.stdlib_module_names)
+
+        def imported_tops(folder):
+            found = set()
+            for path in sorted((ROOT / folder).rglob("*.py")):
+                if "__pycache__" in path.parts:
+                    continue
+                for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+                    if isinstance(node, ast.Import):
+                        found.update(a.name.split(".")[0] for a in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                        found.add(node.module.split(".")[0])
+            return {m for m in found if m not in stdlib and m not in {"app", "tests"}}
+
+        for folder, declared in (("app", runtime), ("tests", dev)):
+            for module in sorted(imported_tops(folder)):
+                dists = modules.get(module)
+                assert dists, (
+                    f"{folder}/ imports {module!r}, which maps to no installed "
+                    f"distribution — cannot verify it is declared"
+                )
+                canonical = {d.lower().replace("_", "-") for d in dists}
+                assert canonical & declared, (
+                    f"{folder}/ imports {module!r} (from {sorted(canonical)}) but "
+                    f"pyproject.toml does not declare it"
+                )
+
+    def test_the_mcp_floor_matches_the_module_paths_the_code_imports(self):
+        """`mcp>=1.2` was a green build that failed at import.
+
+        `app/mcp_server.py` imports `mcp.server.mcpserver.MCPServer` and
+        `mcp.server.transport_security`, which exist only in 2.x.
+        """
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+        spec = next(s for s in project["dependencies"] if s.startswith("mcp"))
+        assert ">=2" in spec, spec
+
+        source = (ROOT / "app/mcp_server.py").read_text()
+        assert "from mcp.server.mcpserver import MCPServer" in source
+        assert "mcp.server.transport_security" in (ROOT / "app/main.py").read_text()
+
+    def test_no_second_dependency_list_exists(self):
+        """Three lists existed and two had drifted. Now there is one, and the
+        other two read it. A restated list is the bug, so assert its absence."""
+        pins = re.compile(r"[\"'][A-Za-z0-9_.-]+(\[[a-z,]+\])?>=[0-9]")
+        for name in ("Dockerfile", ".claude/setup.sh"):
+            text = (ROOT / name).read_text()
+            assert not pins.search(text), (
+                f"{name} restates a pinned dependency; it must read pyproject.toml instead"
+            )
+            assert "pyproject.toml" in text, f"{name} never reads pyproject.toml"
+            assert "tomllib" in text, f"{name} does not parse pyproject.toml"
+
     def test_nothing_committed_carries_a_real_secret(self):
         """A placeholder is fine; a key is not."""
-        import re
-
         suspicious = re.compile(
             r"(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|-----BEGIN [A-Z ]*PRIVATE KEY)"
         )

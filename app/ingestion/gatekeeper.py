@@ -241,11 +241,30 @@ def file_source_type(extension: str) -> str:
     raise GatekeeperError("unsupported_file", f"`.{extension}` files are not supported in V1.")
 
 
+#: The prefix `api_upload` puts on a staged file so two uploads of the same
+#: name cannot collide: `up_` + `new_id`'s 20 hex characters + `_`.
+#: Pinned to exactly 20 so a person's own `up_abc_notes.txt` survives intact —
+#: a looser pattern would quietly rename their file.
+_STAGED_RE = re.compile(r"^up_[0-9a-f]{20}_")
+
+
+def unstage(name: str) -> str:
+    """The name the person gave the file, not the one we stored it under.
+
+    The worker re-validates from `ingestion_jobs.input_target`, which is the
+    staged path, so without this the source is titled
+    `up_0228df82e6454712ad38_board notes.txt` — a machine id the person never
+    chose, shown back to them as the name of their own document, and carried
+    into the spend list on §7.10.
+    """
+    return _STAGED_RE.sub("", name)
+
+
 def validate_file(path: str | Path, *, filename: str | None = None, cfg: Settings | None = None) -> ValidatedFile:
     """Validate an upload: extension, declared size, magic bytes, zip bombs."""
     cfg = cfg or settings()
     file_path = Path(path)
-    name = filename or file_path.name
+    name = filename or unstage(file_path.name)
     extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
     if not extension:

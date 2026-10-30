@@ -1,0 +1,723 @@
+/* brain — the molecules.
+   MASTER_PLAN.md §4, assembled from the atoms of §3. Layer 3 of 4.
+
+   §4 names ten. Three more are built here because the frames need them and
+   §4's ten do not cover them: the group heading of §7.8/§7.9, the filter pill
+   of §7.12, and the meter card of §7.10. Each is marked and justified where it
+   sits.
+
+   Where §4 and a capture disagree, §0 rule 3 gives it to the document, and the
+   disagreement is recorded in §18 rather than resolved in silence. Two matter
+   here: the work block collapses on Home and stays open on a source detail
+   (§18.4), and `Restore` sits in an Archive card's header rather than its body
+   (`R-9`). */
+
+/* ======================================================================
+   §4.1 Item card — the workhorse
+
+   One component for Transcripts, Summaries, Sources and Archive. §4.1 is
+   unusually specific about two things, because both have bitten:
+
+     · `.item-text` must be a column flex and the title a block, or the title
+       will not truncate and will run into the pill;
+     · the pill and the actions must be `flex: 0 0 auto`, or they compress
+       before the title does.
+   ====================================================================== */
+.item-card {
+  display: flex;
+  text-decoration: none;
+  color: inherit;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--card-height);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  text-align: left;
+  width: 100%;
+  transition: box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.item-card:hover,
+.item-card[data-force~="hover"] {
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-control);
+}
+
+/* The 36px tile holding the type glyph, seen on every list in the captures. */
+.item-type {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  color: var(--icon-muted);
+}
+
+.item-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.item-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+/* "Type · detail · detail". The separator is drawn rather than typed, so no
+   string carries a bullet and translation cannot lose one. */
+.item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  min-width: 0;
+}
+
+.item-meta > * + *::before {
+  content: "·";
+  margin-right: var(--space-2);
+  color: var(--text-muted);
+}
+
+/* §7.7: the yield closes the meta line in green. A source with nothing green
+   produced nothing, which is what makes it the most useful column on the page. */
+.item-yield { color: var(--status-active-text); }
+
+/* §7.12: who archived it. Amber, because an agent did it and the person did
+   not. */
+.item-attribution { color: var(--status-pending-text); }
+
+.item-card > .pill,
+.item-actions {
+  flex: 0 0 auto;
+}
+
+/* "Actions are invisible at rest, appear on :hover and on :focus-within, and
+   are always visible on mobile" — because a phone has no hover. */
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.item-card:hover .item-actions,
+.item-card:focus-within .item-actions,
+.item-card[data-force~="hover"] .item-actions {
+  opacity: 1;
+}
+
+@media (max-width: 719px) {
+  .item-actions { opacity: 1; }
+}
+
+/* ======================================================================
+   §4.2 Expandable card — Rules, Skills, Archive
+   ====================================================================== */
+.exp-card {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+  transition: box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.exp-card:hover,
+.exp-card[data-force~="hover"] {
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-control);
+}
+
+/* §18.5: a proposed skill is outlined in amber. It is how a review queue reads
+   as a queue without a pill on every row. */
+.exp-card[data-state="proposed"] {
+  box-shadow: inset 0 0 0 var(--border-width) var(--status-pending-text);
+}
+
+/* §18.5: an inactive skill is dimmed — "kept, but your AI cannot reach them". */
+.exp-card[data-state="inactive"] .item-title,
+.exp-card[data-state="inactive"] .item-meta,
+.exp-card[data-state="inactive"] .item-type {
+  opacity: 0.55;
+}
+
+/* The row that holds the toggle, the header actions and the caret. §6 rule 5
+   puts the --space-4 horizontal padding here, on the container, which is what
+   lines the icon up with every other surface's. */
+.exp-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--card-height);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* The toggle takes the rest of the row, so clicking anywhere in the title
+   area opens the card. `min-width: 0` is what lets the title truncate inside
+   a flex child rather than pushing the caret off the end. */
+.exp-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+}
+
+/* §18.8 and §7.9 put actions in the header — `↺ Restore` and `⋯`, or a
+   `Review` button. §18.6: "collapsed cards show the caret alone", so they
+   appear with the body. */
+.exp-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.exp-card[data-open="false"] .exp-actions { display: none; }
+
+/* A `Review` button is the collapsed card's one entry point (§7.9), so it is
+   the exception: it is the thing the person came to the page to press. */
+.exp-card[data-open="false"] .exp-actions:has([data-act="review"]) { display: flex; }
+
+.exp-caret-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+/* Collapsed shows one clamped line (§4.2). */
+.exp-card[data-open="false"] .item-meta,
+.exp-card[data-open="false"] .exp-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.exp-caret {
+  flex: 0 0 auto;
+  color: var(--icon-muted);
+  transition: transform var(--duration-base) var(--ease-standard);
+}
+
+/* "caret rotates -90° when closed" (§4.2): open points down, closed points
+   right. */
+.exp-card[data-open="false"] .exp-caret { transform: rotate(-90deg); }
+
+.exp-body {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.exp-card[data-open="false"] .exp-body { display: none; }
+
+/* A muted label above a block inside an expansion: "When to use it",
+   "What it does", "Original link", "Key points". */
+.field-label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The provenance chips of §7.8 and §7.9. */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--bg-code);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.chip .slot { color: var(--icon-muted); }
+
+.chip-row + .btn-row { margin-top: var(--space-4); }
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ======================================================================
+   §4.3 Omnibar
+   ====================================================================== */
+.omnibar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--border-control);
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    outline-color var(--duration-fast) var(--ease-standard);
+}
+
+.omnibar:focus-within,
+.omnibar[data-force~="focus"] {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  outline-offset: -1px;
+}
+
+/* The field inside carries no box of its own: the omnibar is the box. */
+.omnibar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  background: none;
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+}
+
+/* No focus ring on the inner field: the omnibar is the control, and it draws
+   the ring on `:focus-within`. Unconditional, because a `:focus` rule here
+   would be an interactive style with nothing to double it against (§6
+   rule 10) — and a reset is not a state. */
+.omnibar input { outline: none; }
+.omnibar input::placeholder { color: var(--text-muted); }
+
+/* §4.3 ends with it in bold: no `Ctrl K` hint inside the omnibar. The lists
+   each carry one in their own search field, which is a different control. */
+
+/* ======================================================================
+   §4.4 Work block — the ingestion step list
+
+   "The work block is a view of real state, never a fake animation" (§9.1). A
+   step shows its finding only once done, and the running step shows nothing.
+   ====================================================================== */
+.work {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.work-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-4);
+  text-align: left;
+  font-weight: var(--weight-semibold);
+}
+
+.work-head .pill { margin-left: auto; }
+
+.work-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.work-step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.work-step[data-state="pending"] { color: var(--text-muted); }
+
+/* The marker: a 6px dot, a 14px spinner, a check. One box so the three states
+   do not shift the row. */
+.work-marker {
+  display: grid;
+  place-items: center;
+  width: var(--slot-size);
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.work-step[data-state="pending"] .work-marker::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+}
+
+.work-step[data-state="running"] .work-marker::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: work-spin 700ms linear infinite;
+}
+
+@keyframes work-spin { to { transform: rotate(360deg); } }
+
+.work-step[data-state="done"] .work-marker { color: var(--status-active-text); }
+
+/* "A finished step reveals its result on the right of its name" — beside it,
+   not flushed to the card's edge, which is what the captures show. */
+.work-result {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.work-step[data-state="running"] .work-result,
+.work-step[data-state="pending"] .work-result { display: none; }
+
+/* Collapsed, on Home only (§18.4): the source detail keeps its block open. */
+.work[data-open="false"] .work-steps { display: none; }
+
+/* ======================================================================
+   §4.5 Message
+
+   "Entrance: 6px rise + fade over --duration-slow. Nothing else animates."
+   ====================================================================== */
+.msg {
+  display: flex;
+  margin-bottom: var(--space-4);
+  animation: msg-in var(--duration-slow) var(--ease-standard) both;
+}
+
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.msg[data-from="user"] { justify-content: flex-end; }
+
+.msg[data-from="user"] > * {
+  max-width: 84%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+}
+
+.msg[data-from="brain"] > * {
+  max-width: 68ch;
+}
+
+/* ======================================================================
+   §4.6 Setting row — label and help left, control right, always
+   ====================================================================== */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.setting-row + .setting-row {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.setting-text { flex: 1 1 auto; min-width: 0; }
+
+.setting-label {
+  display: block;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.setting-help {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.setting-control { flex: 0 0 auto; }
+
+@media (max-width: 719px) {
+  .setting-row { flex-direction: column; align-items: stretch; }
+  .setting-control { width: 100%; }
+}
+
+/* ======================================================================
+   §4.7 Overflow menu
+   ====================================================================== */
+.menu {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  min-width: 190px;
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow:
+    inset 0 0 0 var(--border-width) var(--border-subtle),
+    0 8px 24px color-mix(in srgb, var(--ink-900) 14%, transparent);
+}
+
+.menu[hidden] { display: none; }
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  text-align: left;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.menu-item .slot { color: var(--icon-muted); }
+
+.menu-item:hover,
+.menu-item[data-force~="hover"] { background: var(--bg-hover); }
+
+/* "A separator precedes destructive items." */
+.menu-sep {
+  height: var(--border-width);
+  margin: var(--space-1) 0;
+  background: var(--border-subtle);
+}
+
+.menu-item[data-variant="danger"] { color: var(--danger); }
+
+.menu-item[data-variant="danger"]:hover,
+.menu-item[data-variant="danger"][data-force~="hover"] {
+  background: var(--danger-soft);
+}
+
+/* ======================================================================
+   §4.8 Confirm dialog, and §9.4's two-step gate
+   ====================================================================== */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: var(--bg-overlay);
+}
+
+.scrim[hidden] { display: none; }
+
+.dialog {
+  width: 100%;
+  max-width: 460px;
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.dialog-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-lead);
+  font-weight: var(--weight-semibold);
+}
+
+.dialog-body {
+  margin: 0 0 var(--space-4);
+  color: var(--text-secondary);
+}
+
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* §9.4's two-step indicator is **not built**, by `R-16`. The plan specified
+   "step 1 type DELETE, step 2 identity check" and `OPEN-2` left the check
+   undecided; the founder settled it as one layer, so there are no steps to
+   indicate. `.steps`, `.steps-rule` and `.step-dot` are removed rather than
+   left defined — a molecule no frame instantiates is the thing this project
+   spent a day deleting everywhere else.
+
+   The one detail of §18.8 that survives is this: the word is printed in
+   danger, semibold. */
+.danger-word {
+  color: var(--danger);
+  font-weight: var(--weight-semibold);
+}
+
+/* ======================================================================
+   §4.9 Toast
+   ====================================================================== */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--space-6) + env(safe-area-inset-bottom));
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  /* §4.9 names both: "`--ink-900` background, white text". The toast is the
+     one surface that does not follow the theme — a dark slab in light, a
+     lighter slab in dark, legible on either, which is what a transient
+     notification wants. */
+  background: var(--ink-900);
+  color: var(--white);
+  font-size: var(--text-sm);
+  transform: translateX(-50%);
+  animation: msg-in var(--duration-base) var(--ease-standard) both;
+}
+
+.toast[hidden] { display: none; }
+
+.toast button {
+  color: var(--white);
+  font-weight: var(--weight-medium);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ======================================================================
+   §4.10 Guided steps — Connections setup, and a skill's "what it does"
+
+   "Used only for genuine sequences." The counter is the only numbered list in
+   the app outside those two places.
+   ====================================================================== */
+.steps-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: step;
+}
+
+.steps-list > li {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+  counter-increment: step;
+}
+
+.steps-list > li + li {
+  border-top: var(--border-width) solid var(--border-subtle);
+}
+
+.steps-list > li::before {
+  content: counter(step);
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  background: var(--bg-code);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+/* ======================================================================
+   Three more the frames need, which §4 does not name
+   ====================================================================== */
+
+/* A group heading. §7.9 specifies it exactly — a bold line with a plain
+   explanatory line beneath — and `R-6` gives Rules the same shape, so counts
+   stay in the navigation with no exception anywhere in the app. */
+.group-head { margin-bottom: var(--space-4); }
+
+.group-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.group-note {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+}
+
+/* The type filter of §7.12. It exists on Archive and nowhere else, because
+   Archive is the only heterogeneous list in the app. */
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.filter-pill {
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-control);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.filter-pill:hover,
+.filter-pill[data-force~="hover"] { background: var(--bg-hover); }
+
+.filter-pill[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: none;
+}
+
+/* The meter card of §7.10: a label, the figure, the meter, a context line. */
+.meter-card {
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
+}
+
+.meter-label { color: var(--text-secondary); }
+
+.meter-figure {
+  margin: var(--space-2) 0 var(--space-3);
+  font-size: var(--text-stat);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.meter-figure small {
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+
+.meter-note {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* §7.4's inline `Rename`. The title is already on screen, so the field takes
+   its place rather than opening a dialog to change one line of text. It
+   inherits the title's weight and size so the row does not jump. */
+.item-rename {
+  height: auto;
+  padding: 2px var(--space-2);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+}

@@ -993,3 +993,387 @@ directly, and the static shape of the Dockerfile. Two things only a real build
 confirms: that `setpriv` is present in `python:3.12-slim` (it is part of
 `util-linux`, which Debian marks essential, and the `su` fallback covers it if
 not), and that Railway's builder is happy with the rest of the file.
+
+---
+
+## Phase 8 — THE CONFORMANCE REVIEW, AND THE CONTROLS IT FOUND INERT
+
+Every built frame was read against its §7 section, the §6 global rules and the
+capture notes of §18. The review returned 119 findings, 24 blocking — and
+almost all of the blockers were one defect wearing eleven faces: **a control
+the design specifies, drawn on the page, with nothing behind it.** §6 rule 11
+is explicit that this is worse than a control that was never drawn, because
+the person finds out by clicking.
+
+Each finding was re-verified by hand before being acted on; the review had
+read a working tree that was being edited while it read, and several of what
+it reported had already been fixed.
+
+### The worst of them: a frame that returned before its own wiring
+
+```js
+return el(`… <input id="in-page"> <button id="copy"> …`);
+wireReadBar(node);   // never reached
+```
+
+§7.5 and §7.6 both had this. Nothing warns: the markup is right, the ids are
+right, the handlers are written and correct, the page renders, no error reaches
+the console, and every control is inert. It is now a rule in
+`tests/test_redesign_controls.py` — a `return` at a frame's own indentation
+ends the function, so any statement after it is dead — checked against every
+frame, and a reintroduced early return fails it by name.
+
+### What is now real
+
+| Frame | What it could not do | Now |
+|---|---|---|
+| §7.5 transcript | in-page search, Copy, Download, the sticky border | marks and counts live, Copy carries the timestamps, `Download ▾` offers only producible formats, the border arrives only once stuck |
+| §7.6 summary | Brief/Full, Copy, Download | switches real content — and where there is none to switch to (≤5 points, no chapters) `Full` says "That is the whole summary" rather than moving nothing |
+| §7.3 source | Copy/Download the summary, the overflow menu, and **nothing polled** | both controls, `Rename`/`Re-process`/`Archive`, and a work block that follows real state — loaded with a job still queued, it notices the queue draining from another process |
+| §7.4 transcripts | no card actions at all | `Copy`, `Download`, `⋯` with Rename / View the source / Generate a summary / Archive, hover-only at rest |
+| §7.7 sources | the `Needs you` state and `Fix this` | both pills, the remedy as a tooltip keyed on the provider's reason code, and a `Fix this` that really retries |
+| §7.8 rules | `Edit` and `Archive` were plain buttons | both wired, inline, with an Undo toast |
+| §7.9 skills | no `Review` button; `⋯` had no handler | the queue's entry point exists; Activate/Deactivate, `Export .md` and Delete all work — `POST /api/skills/:id/state` had been served since the queue was built and called by nothing |
+| §7.12 archive | **no `Restore` at all** | `R-9`'s header button, with §9.4's Undo toast |
+| §7.13 profile | `Delete library` and `Delete account` had no handler and no endpoint | both, behind §9.4's two-step dialog |
+| §7.1's create links | `?create=1` was read by no frame | a panel on both, and a web endpoint to write a rule |
+
+### Backend the design asked for
+
+* `op_rename_source`, `op_reprocess_source`, `op_generate_summary` — the three
+  menu items with nothing behind them. All person-only: an agent renaming
+  someone's library, spending their minutes on a re-read, or writing a summary
+  they had switched off are decisions §2 rules out by the same argument that
+  keeps `delete` off the MCP surface. `Generate a summary` runs the summariser
+  over the **stored** text, which is the whole reason it exists on a transcript
+  card.
+* `op_delete_library` and `op_delete_account`, both requiring the typed word
+  **at the engine** — a dialog is a frame's promise, and a frame is one bug
+  away from firing a POST with an empty body.
+* `ingestion_jobs.error_reason`, so §7.7's tooltip can state the remedy. A
+  sentence written for the person cannot be matched on, and matching on prose
+  is how a tooltip silently goes wrong the first time the wording improves.
+* `skills` list joins its source title, because §7.9's expanded body ends with
+  provenance and a read per card to draw it is a read per card too many.
+
+### Four defects found by running it, not by reading it
+
+1. **`[hidden]` did nothing on any atom.** `hidden` is a statement of fact and
+   any explicit `display` beats it; nearly every atom sets one. At step 1 of
+   §9.4's dialog both `Continue` and the final `Delete account` were on screen,
+   the second merely disabled. `.menu[hidden]`, `.scrim[hidden]` and
+   `.toast[hidden]` had each been re-asserting it by hand — the tell that it
+   belonged in the base block once.
+2. **Opening a card's menu navigated away from the list.** The trigger is a
+   `<button>` inside the card's own `<a>`, and `wireMenus` stopped the bubble
+   without cancelling the link, so §4.7's menu was drawn onto a page that was
+   already being replaced.
+3. **The loop breaker refused a person changing their mind.** Its fingerprint
+   for `set_skill_state` was the skill id alone, so switching a skill off and
+   straight back on inside 15 seconds read as one call made twice. Same for
+   `review_skill` and `rename_source`; each fingerprint now carries what makes
+   two calls different, and the guard still catches a genuine repeat.
+4. **A blocked source was stamped as archived.** `_archival` stamped anything
+   that was not `active`, so a source that had just failed to fetch carried an
+   archive date and the words `archived by you`, having been archived by
+   nobody.
+
+### Two conflicts in the plan, ruled on rather than guessed
+
+* **`R-14`** — §7.9 lists `Delete (confirms)` in a live skill's menu; §6 rule 8
+  says "only the person deletes, and only from Archive or Profile". Rule 8
+  wins, because §2's 30-day recovery buffer is a security property and a menu
+  item is not a place to spend it. The item keeps §7.9's name, sets the skill
+  aside, and the dialog says plainly where it went.
+* **`R-15`** — `Delete permanently` requires the thing to be **set aside**,
+  archived or trashed, not trashed specifically. §9.4 puts the control on an
+  archived card and Trash is a source-level concept, so the original rule meant
+  the button could only ever answer `not_in_trash` — and `not_found` for a
+  rule, skill or summary, whose ids were resolved against `sources` alone.
+
+`op_permanent_delete` also refuses an agent surface outright now. It was
+previously unreachable only in the sense that no MCP tool wrapped it; §2's
+"zero destructive LLM tools" is a property of the engine, not of the tool list.
+
+### Still to build
+
+§7.2 (Home's thread state), §7.10 Activity and §7.11 Connections. The last two
+need the approved §9.2 rows: four columns on `audit_logs`, and a `connections`
+entity accepting `?key=` in the same validation function.
+
+---
+
+## Phase 9 — THE LAST THREE FRAMES
+
+§7.2, §7.10 and §7.11 — and the two rows of `STACK_AUDIT.md` §9.2 they
+needed, which were the last unbuilt items on the approved list.
+
+### §7.10 Activity
+
+Four columns on `audit_logs`, written at `_run_tool` because that is the one
+place that knows a call's arguments, its duration and its size. A row with a
+`connection_id` is a call a connection made; the operations' own rows are the
+internal trail §2 requires and are not calls.
+
+The meters read what the product enforces rather than what the capture shows.
+`Calls 1,284 of 5,000` and `2.1 GB of 10 GB` are caps that do not exist here;
+`quota_files`, `quota_media_minutes` and the per-minute ceiling do. `OPEN-4`
+is the founder's call: add the two caps, or keep the page honest.
+
+### §7.11 Connections
+
+The key goes in the URL, because a chat app's connector dialog has no header
+field — §7.11 calls this verified behaviour rather than a choice. Both doors
+meet at one validation function. Only the SHA-256 digest is stored; the
+plaintext exists in the response that minted it and nowhere else.
+
+**The cost of that design, paid explicitly:** a credential in a query string
+is a credential in every access log. The ASGI middleware strips it from the
+scope, but uvicorn writes its line from the raw request *before* any
+middleware runs — so a logging filter redacts the value. The path still reads
+`?key=[redacted]`: you can see a key was used, and §7.10 says which
+connection used it, without the log being a list of working credentials.
+
+### §7.2 Home, the thread
+
+The composer is never disabled, an interjection reaches the job without
+restarting it, and the acknowledgement says what the note will actually
+reach — §7.2's own reply, *"Still on the summary, so nothing is lost"*, is
+true only while the summary is ahead. Once no step is pending the engine
+refuses rather than reassuring.
+
+### Four defects only a render showed
+
+1. **Every meter rendered as a vertical bar.** `.meter` is a `<span>` and
+   §3.9's atom set no `display`. The atom was written before anything used
+   it — the same trap `.v-rule` fell into, the second time it has cost a
+   render.
+2. **The web spent the agent's rate-limit budget.** §2's `30 tool calls/min`
+   is about an agent in a runaway loop; a browser reads `/api/counts` plus a
+   list per navigation. Clicking through the app for a minute returned a 429
+   rendered as the page, in a sentence written for an LLM. The web now has
+   its own window and its own sentences; the agent's ceiling is unchanged
+   and asserted.
+3. **An interjection also triggered submit's "paste a link" error**, so Brain
+   acknowledged a message and rejected it in the same breath.
+4. **A frame's root is not inside itself.** `querySelector` searches
+   descendants, and `listFrame` returns the `.wrap` while Home returns the
+   `.home`. Two debugging rounds before it became `self_or_within()`.
+
+### Where the build is
+
+All fourteen frames of §7 are built, every control is wired, and each one has
+been rendered in a browser rather than inspected as source. Ten probes under
+`tests/browser/` hold the half no static test can reach — including one that
+loads a page with a job still queued and drains the queue from another
+process, and one that makes real MCP calls with a key in the URL and reads
+the row they produce.
+
+## R-17 — storage out, 30-day retention in (30 Oct 2026)
+
+Two founder rulings, built together because neither is honest alone.
+
+**The usage screen shows no storage.** §7.10's capture meters `Storage 2.1 GB
+of 10 GB`. The founder struck it: *"The storage should not be in our pricing
+system… In the usage screen we shouldn't show the storage size."* So
+`op_activity` returns no `storage` key — absent, not a capless figure, because
+a number with no limit still invites the question of what the limit should be.
+Three meters remain, and every one of them has a ceiling the product actually
+enforces.
+
+**And a received file is swept after 30 days.** *"We should keep them for 30
+days and when those 30 days pass they should be deleted."* This closed a leak:
+**nothing had ever deleted an upload.** `api_upload` writes the bytes to
+`data_dir/uploads/{user_id}/` and `op_ingest_file` queues a job against that
+path; the single `unlink` in the route is the over-size failure branch, so
+every *successfully* processed file stayed on disk forever. Verified by
+uploading a file and finding it still there after the job reached `ready` —
+not by reading the code, which is how the branch was misread the first time.
+
+`app/storage/retention.py` sweeps anything past `cfg.upload_retention_days`,
+and the schedule hangs off `Worker`, the one role both production deployments
+run (in-process under `BRAIN_ROLE=web`, standalone under `=worker`). It sweeps
+before claiming rather than on the idle branch, so a container whose queue
+never empties still sweeps; a failure is logged and the queue carries on.
+`python -m app.cli sweep-uploads --dry-run` shows what is due without
+deleting it, for the deployment that has a backlog from before retention
+existed.
+
+Age alone decides, with no look at `ingestion_jobs`: the lease is 180 seconds
+and `attempts` is bounded at 3, so a live job resolves in minutes, and §7.3's
+rescue takes pasted text rather than re-reading the file. The sweep therefore
+needs no database, which is what lets the CLI and the tests run it directly.
+
+Striking the meter without the sweep would only have hidden a number that was
+still growing. That is the whole argument for doing both.
+
+### The measurement that argues with the ruling
+
+Recorded rather than quietly built around. The founder's unit is processed
+media — *"the amount of our processed videos, that's the thing that counts"* —
+and on this codebase a minute of video is the **cheapest** unit in the
+product. There is no transcription and no OCR anywhere: YouTube runs `yt-dlp
+--skip-download` against the caption track the platform already has, a
+caption-less video is refused, a scanned PDF is refused. What costs money is
+characters of source text (one extraction call per ~1,400 characters: ~7 for
+a 10-minute video, 39 for an hour, 200–600 for a 200-page PDF, ~35,000 for a
+20MB `.txt`), and above that, tension classification at up to `claims × 8`
+calls per ingestion with nothing capping it. The founder's answer is `R-18` below — characters, which is the unit this
+points at; the full ranking is in `MASTER_PLAN.md` §17 under `R-17`.
+
+## R-18 — credits, one plan, and the person's say in what Brain keeps (30 Oct 2026)
+
+The founder's answer to the lever question, and it is the one the measurement
+pointed at: *"we should not use video minutes but some kind of credit thing…
+A character is a credit, kind of like how Eleven Labs does it… In usage we
+will replace that."* Plus a ruling that kept the scope small: *"it should be
+just one plan, the free plan… It's not an urgency right now."* No tier, no
+billing period beyond the monthly reset, no price, no payment code.
+
+### One debit, at the one line where the number is real
+
+Minutes had to be reserved up front and released on failure, because a
+minute was guessable before the fetch — a flat provisional 15 for YouTube,
+and nothing at all for an article. Characters are not guessable (`normalize_url`
+knows no duration, no bytes, no page count, and `NormalizedTarget.estimated_minutes`
+is a field nothing in the repo assigns) but they are *exactly known* the
+moment the fetch returns, which is still above every LLM call. So there is
+nothing to reserve: one atomic debit at the entry to `_ingest_content`, with
+the ceiling inside the `WHERE` clause so two workers racing the same account
+cannot both cross it.
+
+**The billed number is what the extractor chunks, never `content.full_text`.**
+`clean_text` truncates `full_text` at 2,000,000 characters while applying
+itself to each cue *separately*, leaving the cues uncapped — and the chunker
+consumes the cues. Billing `full_text` would have charged a 20MB text file
+for a tenth of what it costs to read.
+
+### What the mapping found that had to be fixed too
+
+- **A job that burned its last attempt leaked forever.** `claim_next_job`
+  filters on `attempts < max_attempts`, so such a job kept a non-terminal
+  status and nothing ever ran the code that releases what it booked.
+  `reap_exhausted_jobs` now runs at the top of every drain. **A docstring in
+  `app/storage/retention.py`, written earlier the same day, asserted the
+  opposite** — that such a job "is released rather than left pending". It was
+  wrong, and it is corrected in place rather than quietly deleted.
+- **`run_pending_jobs_sync` had no `try/except`** around `process_job`, unlike
+  `Worker.drain_once`. Three crashes there made the leak permanent.
+- **The `Sources` meter measured a different number from the one enforced** —
+  a tenant source count against `quota_files`, which only uploads ever
+  incremented — so it could read `3 of 50` while the enforced figure was
+  `0 of 50`. It is now a true count with no cap.
+- **The agent hint for a spent allowance told the agent to have the person
+  archive sources to free room.** Nothing in the product has ever returned an
+  allowance for removed content. A remedy that does nothing is worse than
+  none, because the agent spends the person's time on it.
+- **The classifier loop had no ceiling** — up to `claims × link_top_k` LLM
+  calls, which at maturity dwarfs the extraction bill the price is derived
+  from. `link_max_calls_per_job` bounds it, and reports when it truncates.
+
+### The three retention controls
+
+*"We should tell the people that we keep their thing there, somewhere in the
+profile… People should also be able to say, 'Okay I don't want you to keep
+it.'"* And: *"the person should be able to delete an upload sooner than 30
+days."*
+
+No new category was needed — the Profile already has **Your data**, and all
+three belong there or on the source they concern. The day count comes from
+`cfg.upload_retention_days`, the same setting the sweeper reads, so the
+sentence cannot drift from the behaviour. The opt-out deletes on the failure
+path too: a file someone asked not to keep is not kept because Brain had
+trouble with it. And `op_delete_library` and `op_delete_account` now take the
+uploads with them — before this, closing an account left the person's files
+in staging for up to 30 days with nothing in the product able to reach them.
+
+Deleting a file returns no credits, and all three dialogs say so: the credits
+paid for reading the text, which is already done.
+
+## R-19 — the cutover: one app, at the root (30 Oct 2026)
+
+Two web apps were served side by side while the redesign was built: the
+shipped control plane at `/` (`index.html` + `app.css` + `app.js`) and the
+redesign at `/next` (`shell.html` + four CSS layers + `frames.js`). That was
+right while the new one was half-built — the founder always had a working
+Brain — and it became a liability the moment both were complete. Every change
+had to land twice. `R-18` is the example: the credits meter had to be edited
+in both files, or `/` would have gone on saying "Media minutes 0 / 300".
+
+So: `/` serves the app, the `/next` prefix is gone, `shell.html` carries
+`data-base=""`, and the three old files are deleted. `/next/...` 302-redirects
+rather than 404s, because somebody bookmarked it — 302 and not 301, since a
+permanent redirect is cached indefinitely and an undo would have to fight
+every browser that saw it. The `BRAIN_NEXT_UI` gate is gone too: a flag that
+can turn the whole product off is a way to ship an outage, not a safety
+feature.
+
+### What had to be dealt with first
+
+**Trash.** The old app was the only surface that could list it or restore
+from it, and the new app has no Trash screen and no way to fill one — its
+model is active → archived → deleted for good, with Archive as §2's 30-day
+buffer (`R-14`). Deleting the old app would have left any row at
+`status='trash'` reachable by nothing. So `op_trash_item` and `op_list_trash`
+are gone, the omnibar's "delete the X" archives, and `tenant.migrate` folds
+existing trashed rows into Archive attributed to the person — they put it
+there. `op_permanent_delete` still accepts the status, because a database
+restored from a pre-fold backup can hold one.
+
+**The OAuth consent card.** It shared `/app.css` with the control plane, for
+a good reason: one definition of `--accent` for the whole product. It now
+loads `tokens.css` + `atoms.css` + a small `consent.css`, which declares no
+colour of its own. It also stopped promising a feature this same change
+deleted — "after 30 days in Trash" now names Archive.
+
+**The automated browser coverage.** The sharpest finding. Three Playwright
+suites ran in CI, and all three drove the old app; the redesign's fourteen
+probes print JSON, exit 0 regardless, and are spawned by nothing. Deleting
+the old suites would have left the new app looking fully tested — 1,400
+passing tests — while nothing had ever opened it. `tests/test_redesign_browser.py`
+and `tests/browser/app_audit.js` replace them: every route renders without
+throwing, nothing scrolls sideways at 390px, and a stored
+`<img src=x onerror=...>` reaches the DOM as text.
+
+### What the browser suite found the moment it existed
+
+**Two routes scrolled sideways on a phone.** `/rules` measured 577px against
+a 390px viewport and `/library/sources` 488px. The cause was one declaration:
+the mobile breakpoint said `grid-template-columns: 1fr`, and a bare `1fr` is
+`minmax(auto, 1fr)` — its minimum is the column's *min-content*, so one wide
+descendant stretches the page. The desktop rule twelve lines up already had
+`minmax(0, 1fr)`. Two earlier guesses at this (a wrapping toolbar, a
+`min-width: 0` on the search field) were reverted once the real cause was
+found: they fixed nothing and would have changed a layout §3.3 specifies.
+
+### Three more things the cutover exposed
+
+- **`consent.css` was never `git add`ed.** It would have shipped as a 404 on
+  the one screen rendered outside the shell — the first thing a person sees
+  when connecting Claude. Two packaging tests now guard it: every file the
+  layout promises exists, and nothing in `app/` still references a deleted
+  asset.
+- **`theme_mode` still defaulted to `warm_sunset`**, a theme `R-10` dropped,
+  so every new account started on something the picker does not offer and
+  nothing renders. Worse, the theme was applied only by the picker's click
+  handler — `shell.html` hardcodes `data-theme="light"`, so anyone who chose
+  Dark got Light back on every reload. Default fixed, old rows migrated, and
+  the choice is now read at boot.
+- **A dropped connection was an unhandled promise rejection.** `api()` and
+  `post()` called `fetch` directly, so the page simply stopped with "Failed
+  to fetch" in a console nobody has open. Both go through a wrapper that
+  turns it into a sentence (§6 rule 11).
+
+### Left undone, deliberately
+
+- **No paging.** The old app rendered at most 100 cards and kept filtering
+  over the full array; the new one renders every row it is given. This is the
+  one place the cutover is a net loss rather than a redesign. It needs a
+  paged API, not a front-end change.
+- **No audit-log screen.** `/api/audit-logs` is live, authenticated and
+  person-only, and the rows are written — CLAUDE.md §2.5 holds. But §7.13 as
+  the founder approved it has four blocks and no audit list, so the old
+  Profile modal's sixth block had nowhere to go. That is a product question,
+  not a dropped guarantee.
+- The sync watermark, the visual-viewport keyboard inset, and a single
+  Escape-ordering handler all went with `app.js` and are not rebuilt.

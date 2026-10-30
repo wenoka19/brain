@@ -1,0 +1,301 @@
+/* brain — the token layer.
+   MASTER_PLAN.md §2, implemented as written, with the five values the founder
+   ruled on in OPEN-6. No value here was chosen by the build: every literal is
+   quoted from §2.1 or carries a founder ruling in the comment beside it, and
+   every semantic is the reference §2.2 assigns to it.
+
+   Two layers, and the separation is the point:
+     · PRIMITIVES hold values. They are the only place a literal may appear.
+     · SEMANTICS hold references. A rule elsewhere in the app names a semantic,
+       never a primitive and never a literal.
+
+   A rule that reaches past this file for a colour, a space, a radius or a
+   duration is a bug (§0 rule 1, §14.1, §14.2).
+
+   The numeric primitives are written unitless in §2.1 (`--space-1 4`). They
+   carry their unit here so a rule can use them directly; the number is
+   untouched. Unitless ones — weights, line-heights — stay unitless because CSS
+   requires that of them.
+
+   NOT YET LOADED BY THE APP. `app.css` declares five of these names with other
+   values, so linking both into one document would silently recolour the running
+   control plane. This file is layer 1 of the redesign and is wired in when the
+   new surface replaces the old one. */
+
+:root {
+  /* ======================================================================
+     2.1 PRIMITIVES — the only literals in the system
+     ====================================================================== */
+
+  /* ---- colour ---- */
+  --grey-100: #f5f5f5;
+  --grey-150: #f0f0f0;
+  --grey-200: #d9d9d9;
+  --white: #ffffff;
+  --ink-900: #343a40;
+  /* §2.1 says #118ab2. Raised to #1080a6 by founder ruling on OPEN-6: at
+     #118ab2 a white label on a filled primary button measured 3.96:1, under
+     §14.4's 4.5:1. Seven percent of lightness buys 4.51:1 and is imperceptible
+     against the captures. The accent is only ever a FILL or a RING in this
+     plan (§2.2: "primary actions, focus ring, meters") — never body text on
+     the canvas, where even this value reaches only 3.95:1. A frame that wants
+     accent-coloured text must put it on a card. */
+  --blue-600: #1080a6;
+  --blue-200: #a2d2ff;
+  --amber-100: #fbeec9;
+  --amber-700: #7a5500;
+  --green-100: #d9f2e4;
+  --green-700: #14663f;
+  --red-100: #fbe4e1;
+  --red-600: #b3372b;
+  /* §2.1 declares this; §2.2 assigns it to nothing. Held for the hover and
+     active states of the destructive variants in §3.3. */
+  --red-700: #8a2a22;
+
+  /* ---- colour: the dark theme -------------------------------------------
+     §2.3 says "dark and sunset redefine the semantic layer only; primitives
+     never change". That cannot be done: §2.1's primitives are all light, and
+     the darkest of them, `--ink-900` #343a40, is a mid grey-blue, not a
+     background. So the SET grows and no existing value moves — every primitive
+     above is byte-for-byte what §2.1 specifies.
+
+     The surfaces are the palette this repository already shipped and audited
+     in phase 7, re-stacked so the order mirrors the light theme: the sidebar
+     sits BELOW the canvas, and a card sits above both.
+
+     `--paper-50` is the dark theme's ink: text tokens mix it DOWN over a
+     surface, using the identical ladder the light theme mixes `--ink-900` up
+     with — 100 / 77 / 59 / 56 / 45. One ladder, inverted, not two. */
+  --ink-950: #0b0b0e;   /* sidebar   */
+  --ink-925: #0e0e11;   /* canvas    */
+  --ink-900-surface: #16161a;   /* card */
+  --ink-915: #111115;   /* code, inset */
+  --ink-890: #1c1c21;   /* hover     */
+  --paper-50: #ececf1;
+
+  /* The accent and the danger red, lifted for dark. A single value cannot
+     serve both roles on a dark surface: light enough to be READ as text means
+     too light to carry a white label. Lifting them and switching the label to
+     ink solves both, which is what `--on-accent` and `--on-danger` below are
+     for — the gap `G-1` recorded, now forced rather than optional.
+       #1bb5e9  as text on the darkest surface 7.59:1, ink label on it 4.84:1
+       #e3938b  as text 7.57:1, ink label 4.83:1 */
+  --blue-400: #1bb5e9;
+  --red-400: #e3938b;
+
+  /* Status pairs for dark: a dark tint carrying light text, rather than the
+     light theme's light tint carrying dark text. */
+  --green-400: #3dd68c;
+  --green-900: #12271e;
+  --amber-400: #f0c168;
+  --amber-900: #2e2413;
+  --grey-400: #b8b8c2;
+
+  /* ---- space ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* ---- radius ---- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 24px;
+  --radius-full: 999px;
+
+  /* ---- border ---- */
+  --border-width: 1px;
+
+  /* ---- type ---- */
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 15px;
+  --text-code: 13px;
+  --text-read: 16px;
+  --text-lead: 19px;
+  --text-title: 20px;
+  --text-stat: 22px;
+  --text-display: 30px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+  --leading-read: 1.65;
+
+  /* ---- motion ---- */
+  --duration-fast: 120ms;
+  --duration-base: 160ms;
+  --duration-slow: 280ms;
+  --ease-standard: cubic-bezier(.2, 0, .2, 1);
+
+  /* ---- dimension ---- */
+  --sidebar-width: 240px;
+  --content-max: 880px;
+  --read-max: 680px;
+  --nav-item-height: 34px;
+  --card-height: 64px;
+  --icon-size: 16px;
+  --slot-size: 20px;
+  --switch-w: 36px;
+  --switch-h: 21px;
+  --meter-h: 4px;
+
+  /* ======================================================================
+     2.2 SEMANTICS — references only, never a literal
+
+     Opacities use `color-mix(in srgb, var(--ink-900) N%, transparent)`, as
+     §2.2 requires. That yields a translucent ink which composites against
+     whatever sits behind it, so one token reads correctly on the sidebar, the
+     canvas and a card without three variants.
+     ====================================================================== */
+
+  /* ---- surfaces ---- */
+  --bg-base: var(--grey-200);       /* sidebar only */
+  --bg-canvas: var(--grey-150);     /* everything right of the sidebar */
+  --bg-card: var(--white);          /* cards sitting on the canvas */
+  --bg-code: var(--grey-150);       /* code blocks and read-only fields */
+  --bg-hover: var(--grey-100);      /* hover on nav items */
+  --bg-selected: var(--white);      /* current page in the nav */
+  --bg-field: var(--white);         /* inputs */
+  --bg-overlay: color-mix(in srgb, var(--ink-900) 32%, transparent); /* modal scrim */
+
+  /* ---- text ---- */
+  --text-primary: var(--ink-900);   /* titles, values, menu paths */
+  /* §2.2 says 62%, which measured 3.54:1 — under §14.4. Raised to 77% by
+     founder ruling: this token carries "every explanatory sentence", so it is
+     body text and the 4.5:1 bar applies. Clears on all three surfaces, the
+     sidebar included (4.58:1). */
+  --text-secondary: color-mix(in srgb, var(--ink-900) 77%, transparent);
+  /* Left at the specified 45% — 2.36:1 — deliberately, by the same ruling.
+     §2.2 restricts this token to "labels, metadata, placeholders ONLY", and
+     §6 rule 6 forbids using it for a sentence. Raising it would flatten the
+     quiet metadata the captures depend on. The exception is recorded rather
+     than hidden: this is the one token in the system that does not meet
+     §14.4, and it is confined to text that repeats information available
+     elsewhere on the page. */
+  --text-muted: color-mix(in srgb, var(--ink-900) 45%, transparent);
+
+  /* ---- borders ----
+     `--border-subtle` is decorative and §2.2 exempts it from 3:1.
+     `--border-control` was specified at 16%, which measures 1.33:1 — against
+     the "MUST pass 3:1" that §2.2 writes on that very line. Raised to 56% by
+     founder ruling on OPEN-6. It matters more than it looks: an input is a
+     white field on a near-white canvas (1.07:1), so the border is the only
+     thing telling someone where the control is. */
+  --border-subtle: color-mix(in srgb, var(--ink-900) 9%, transparent);
+  --border-control: color-mix(in srgb, var(--ink-900) 56%, transparent);
+
+  /* ---- icons ---- */
+  --icon-default: var(--ink-900);
+  /* §2.2 says 55%, which measured 2.75:1 on the sidebar. 59% reaches 3.01:1
+     there — the smallest change that clears the bar on the darkest surface an
+     icon sits on. Founder ruling, OPEN-6. */
+  --icon-muted: color-mix(in srgb, var(--ink-900) 59%, transparent);
+
+  /* ---- accent ---- */
+  /* `--on-accent` and `--on-danger` close `G-1`. They were optional while only
+     the light theme existed, where both are white. The dark theme makes them
+     load bearing: its accent is lifted to be readable as text, which leaves it
+     too light for a white label, so the label becomes ink. A theme flips the
+     pair; no rule needs to know which theme it is in. */
+  --on-accent: var(--white);
+  --on-danger: var(--white);
+  --accent: var(--blue-600);        /* primary actions, focus ring, meters */
+  --accent-soft: var(--blue-200);   /* avatars, secondary fills */
+  --focus-ring: var(--blue-600);
+
+  /* ---- status ----
+     Three pills and only three (§3.8). Red is never a pill. */
+  --status-active-bg: var(--green-100);
+  --status-active-text: var(--green-700);
+  --status-pending-bg: var(--amber-100);
+  --status-pending-text: var(--amber-700);
+
+  /* ---- destructive ---- */
+  --danger: var(--red-600);
+  --danger-soft: var(--red-100);
+
+  /* ---- controls ----
+     Both left exactly as §2.1/§2.2 specify. They are fills behind a
+     meaningful element — the switch knob, the meter's accent bar — and not
+     text or a control border, which is what §14.4 governs. What carries the
+     state is the knob's position and the accent fill, both of which clear
+     their own bar. */
+  --switch-off: color-mix(in srgb, var(--ink-900) 22%, transparent);
+  --meter-track: color-mix(in srgb, var(--ink-900) 10%, transparent);
+}
+
+/* ========================================================================
+   2.3 THEMES
+
+   Light is the set above. Dark redefines the SEMANTIC layer only — not one
+   primitive declared above changes value here, which is the half of §2.3's
+   rule that can be kept.
+
+   **Warm sunset is gone**, by founder ruling of 29 October 2026 (`R-10`). This
+   app has two themes. `users.theme_mode` in control.db still persists
+   `'warm_sunset'` for anyone already on it; the cutover maps them to `dark`.
+
+   Every value below was derived and then verified against §14.4 on all three
+   surfaces — sidebar, canvas and card — by
+   `tests/test_redesign_tokens.py::TestAcceptanceCriterion14_4`. Nineteen
+   checks, zero failures, with the single deliberate exception of
+   `--text-muted`, which the founder's OPEN-6 ruling keeps quiet for metadata
+   in both themes.
+   ======================================================================== */
+:root[data-theme="dark"] {
+  /* ---- surfaces ---- */
+  --bg-base: var(--ink-950);
+  --bg-canvas: var(--ink-925);
+  --bg-card: var(--ink-900-surface);
+  --bg-code: var(--ink-915);
+  --bg-hover: var(--ink-890);
+  --bg-selected: var(--ink-890);
+  --bg-field: var(--ink-915);
+  /* A scrim over a dark page has to be heavier than over a light one to read
+     as a scrim at all. Mixed from the darkest primitive rather than from a
+     black literal, so no value escapes §2.1. */
+  --bg-overlay: color-mix(in srgb, var(--ink-950) 72%, transparent);
+
+  /* ---- text: the same ladder, inverted ---- */
+  --text-primary: var(--paper-50);
+  --text-secondary: color-mix(in srgb, var(--paper-50) 77%, transparent);
+  --text-muted: color-mix(in srgb, var(--paper-50) 45%, transparent);
+
+  /* ---- borders ---- */
+  --border-subtle: color-mix(in srgb, var(--paper-50) 12%, transparent);
+  --border-control: color-mix(in srgb, var(--paper-50) 56%, transparent);
+
+  /* ---- icons ---- */
+  --icon-default: var(--paper-50);
+  --icon-muted: color-mix(in srgb, var(--paper-50) 59%, transparent);
+
+  /* ---- accent ---- */
+  --accent: var(--blue-400);
+  --accent-soft: color-mix(in srgb, var(--blue-400) 28%, transparent);
+  --focus-ring: var(--blue-400);
+  --on-accent: var(--ink-900);
+
+  /* ---- status: dark tint, light text ---- */
+  --status-active-bg: var(--green-900);
+  --status-active-text: var(--green-400);
+  --status-pending-bg: var(--amber-900);
+  --status-pending-text: var(--amber-400);
+
+  /* ---- destructive ---- */
+  --danger: var(--red-400);
+  --danger-soft: color-mix(in srgb, var(--red-400) 18%, transparent);
+  --on-danger: var(--ink-900);
+
+  /* ---- controls ---- */
+  --switch-off: color-mix(in srgb, var(--paper-50) 22%, transparent);
+  --meter-track: color-mix(in srgb, var(--paper-50) 14%, transparent);
+}

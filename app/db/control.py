@@ -43,10 +43,22 @@ CREATE TABLE IF NOT EXISTS users (
     user_id            TEXT PRIMARY KEY,
     email              TEXT UNIQUE NOT NULL,
     about_you_context  TEXT NOT NULL DEFAULT '',
-    theme_mode         TEXT NOT NULL DEFAULT 'warm_sunset'
+    -- `R-10` dropped Warm Sunset; the default outlived it, so every new
+    -- account was created on a theme the picker does not offer and nothing
+    -- renders. The CHECK still accepts it so a row written before the
+    -- migration below still loads.
+    theme_mode         TEXT NOT NULL DEFAULT 'light'
                        CHECK (theme_mode IN ('light','dark','warm_sunset')),
+    -- `R-18` fossils. Credits replaced them; neither MIGRATIONS tuple has a
+    -- DROP precedent and a column nothing reads costs nothing, so they stay
+    -- rather than being removed from under an existing control.db.
     media_minutes_used INTEGER NOT NULL DEFAULT 0,
     files_used         INTEGER NOT NULL DEFAULT 0,
+    -- `R-18`: the one allowance. Characters of source text, spent at the
+    -- gate in `_ingest_content`, reset on the first of the month.
+    credits_used       INTEGER NOT NULL DEFAULT 0,
+    credits_period     TEXT NOT NULL DEFAULT '',
+    keep_uploads       INTEGER NOT NULL DEFAULT 1,
     schema_version     INTEGER NOT NULL DEFAULT 1,
     created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -78,6 +90,10 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
     error_message    TEXT NOT NULL DEFAULT '',
     reserved_minutes INTEGER NOT NULL DEFAULT 0,
     reserved_files   INTEGER NOT NULL DEFAULT 0,
+    -- `R-18`: what this job actually spent. It is what makes a retry charge
+    -- once and a refund exact — both read it from the ROW, never from the
+    -- job dict, which a worker holds as a stale in-memory copy.
+    charged_credits  INTEGER NOT NULL DEFAULT 0,
     claims_extracted INTEGER NOT NULL DEFAULT 0,
     attempts         INTEGER NOT NULL DEFAULT 0,
     locked_until     DATETIME,
@@ -86,6 +102,28 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_user ON ingestion_jobs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_pending ON ingestion_jobs(status, locked_until);
+
+-- One row per pipeline step, per job. `MASTER_PLAN.md` §9.1: "Each transition
+-- writes a `job` row. The UI polls or streams from those rows -- the work block
+-- is a view of real state, never a fake animation."
+--
+-- The job's own `status` column cannot carry this: it holds one value, and the
+-- work block of §4.4 shows six, each with its own result line, its own timing
+-- and its own failure. `detail` is what a finished step reveals beside its
+-- name -- "8,412 words captured", "3 found" -- and it stays empty while the
+-- step runs, because §4.4 is explicit that a running step reveals nothing.
+CREATE TABLE IF NOT EXISTS job_steps (
+    job_id      TEXT NOT NULL REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
+    ordinal     INTEGER NOT NULL,
+    step        TEXT NOT NULL,
+    state       TEXT NOT NULL DEFAULT 'pending'
+                CHECK (state IN ('pending','running','done','skipped','failed')),
+    detail      TEXT NOT NULL DEFAULT '',
+    started_at  DATETIME,
+    finished_at DATETIME,
+    PRIMARY KEY (job_id, step)
+);
+CREATE INDEX IF NOT EXISTS idx_job_steps ON job_steps(job_id, ordinal);
 
 -- Authorization codes are short-lived (60s), single-use and PKCE-bound. They
 -- live in the database rather than in process memory so the token exchange
@@ -103,6 +141,26 @@ CREATE TABLE IF NOT EXISTS oauth_auth_codes (
     consumed       INTEGER NOT NULL DEFAULT 0,
     created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- §7.11. "One server. Two ways to authenticate. This is verified behaviour,
+-- not a choice." A chat app's connector dialog has no header field, so the
+-- key rides in the URL; an editor or an agent framework cannot run a browser
+-- sign-in, so it sends a bearer. Both arrive at one validation function.
+--
+-- Only the SHA-256 digest is stored (§2 rule 4), so a stolen database yields
+-- no working key. `key_prefix` is the first few characters, kept so the list
+-- can show which key a row is without being able to reconstruct it.
+CREATE TABLE IF NOT EXISTS connections (
+    connection_id TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name          TEXT NOT NULL DEFAULT 'My AI',
+    key_hash      TEXT UNIQUE NOT NULL,
+    key_prefix    TEXT NOT NULL DEFAULT '',
+    last_call_at  DATETIME,
+    revoked       INTEGER NOT NULL DEFAULT 0,
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_connections_user ON connections(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id       TEXT PRIMARY KEY,
@@ -213,7 +271,51 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("audit_logs", "reasoning_trace", "ALTER TABLE audit_logs ADD COLUMN reasoning_trace TEXT NOT NULL DEFAULT ''"),
     ("ingestion_jobs", "reserved_files", "ALTER TABLE ingestion_jobs ADD COLUMN reserved_files INTEGER NOT NULL DEFAULT 0"),
     ("ingestion_jobs", "claims_extracted", "ALTER TABLE ingestion_jobs ADD COLUMN claims_extracted INTEGER NOT NULL DEFAULT 0"),
+    # §7.13's Account block: the name Brain calls the person on the home
+    # screen, and the language it speaks to them in.
+    ("users", "display_name", "ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"),
+    ("users", "locale", "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''"),
+    # §7.13's "What Brain does with new sources". §9.1 says steps 3 to 5
+    # honour these, so they are stored as what the pipeline reads — not as
+    # three switches that look wired and are not.
+    ("users", "want_summary", "ALTER TABLE users ADD COLUMN want_summary INTEGER NOT NULL DEFAULT 1"),
+    ("users", "want_rules", "ALTER TABLE users ADD COLUMN want_rules INTEGER NOT NULL DEFAULT 1"),
+    ("users", "want_skills", "ALTER TABLE users ADD COLUMN want_skills INTEGER NOT NULL DEFAULT 1"),
+    ("users", "write_in", "ALTER TABLE users ADD COLUMN write_in TEXT NOT NULL DEFAULT 'source'"),
+    # §7.7's `Fix this` tooltip "states the remedy" — "Make it public, then
+    # retry", "No text layer — retype or re-scan". A sentence written for the
+    # person cannot be matched on, so the provider's own reason code is kept
+    # beside it and the frame maps the code to the remedy.
+    ("ingestion_jobs", "error_reason", "ALTER TABLE ingestion_jobs ADD COLUMN error_reason TEXT NOT NULL DEFAULT ''"),
+    # §7.10's four columns — `STACK_AUDIT.md` §9.2 row 2, approved. The capture
+    # is what made the list exact: a row reads
+    #   `14:02 ● Claude Desktop search_rules "planning cycle" 180 ms [OK]`
+    # and expands to `Asked for` / `Returned` / `Payload` / `Connection`.
+    # Nothing in the shipped `audit_logs` could supply the latency, the size,
+    # the one-line result, or which connection made the call.
+    ("audit_logs", "latency_ms", "ALTER TABLE audit_logs ADD COLUMN latency_ms INTEGER"),
+    ("audit_logs", "payload_bytes", "ALTER TABLE audit_logs ADD COLUMN payload_bytes INTEGER"),
+    ("audit_logs", "result_summary", "ALTER TABLE audit_logs ADD COLUMN result_summary TEXT NOT NULL DEFAULT ''"),
+    ("audit_logs", "connection_id", "ALTER TABLE audit_logs ADD COLUMN connection_id TEXT NOT NULL DEFAULT ''"),
+    # `R-18` — credits replace media minutes as the account's one allowance.
+    # `credits_period` is the `YYYY-MM` the counter belongs to; a read in a
+    # later month zeroes it. Storing the period rather than a reset timestamp
+    # means no cron, no worker and no clock skew: the month a row names is
+    # either this one or it is not.
+    ("users", "credits_used", "ALTER TABLE users ADD COLUMN credits_used INTEGER NOT NULL DEFAULT 0"),
+    ("users", "credits_period", "ALTER TABLE users ADD COLUMN credits_period TEXT NOT NULL DEFAULT ''"),
+    ("ingestion_jobs", "charged_credits", "ALTER TABLE ingestion_jobs ADD COLUMN charged_credits INTEGER NOT NULL DEFAULT 0"),
+    # `R-18`'s opt-out. On by default, because the 30-day window exists so a
+    # failed read can be looked at — turning it off is the person choosing to
+    # give that up, not a default imposed on them.
+    ("users", "keep_uploads", "ALTER TABLE users ADD COLUMN keep_uploads INTEGER NOT NULL DEFAULT 1"),
 )
+
+#: Not a column: a value. `R-10` dropped Warm Sunset and `R-19` found the
+#: default had outlived it, so accounts exist sitting on a theme the picker
+#: does not offer. They are moved to Light, which is what they were seeing
+#: anyway — the page falls back to it when the stored name matches no theme.
+_THEME_FOLD = "UPDATE users SET theme_mode = 'light' WHERE theme_mode = 'warm_sunset'"
 
 
 def migrate(conn: sqlite3.Connection) -> list[str]:
@@ -227,6 +329,11 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
             continue
         conn.execute(statement)
         applied.append(f"{table}.{column}")
+    # Read before writing: `migrate` runs on every open, and this fold can
+    # only ever happen once. See the matching note in `tenant.migrate`.
+    if conn.execute("SELECT 1 FROM users WHERE theme_mode = 'warm_sunset' LIMIT 1").fetchone():
+        folded = conn.execute(_THEME_FOLD).rowcount
+        applied.append(f"users.theme_mode(warm_sunset->light, {folded} rows)")
     return applied
 
 
@@ -290,22 +397,80 @@ def get_user(conn: sqlite3.Connection, user_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def delete_user(conn: sqlite3.Connection, user_id: str) -> bool:
+    """§7.13's `Delete account`. One row, and the schema does the rest.
+
+    `oauth_sessions`, `ingestion_jobs` and `job_steps` all declare
+    `ON DELETE CASCADE` against this row, so they go with it — which is why
+    `PRAGMA foreign_keys = ON` is not optional here, and is asserted in
+    `tests/test_phase1_db_and_security.py`.
+
+    `audit_logs.user_id` carries no foreign key and is left behind on purpose:
+    the rows hold no content, and a deletion that erased its own record would
+    not be one the person could later show had happened.
+    """
+    cur = conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    return cur.rowcount > 0
+
+
+#: §7.13's "Write them in": the language summaries and rules come out in,
+#: whatever the source was.
+WRITE_IN_CHOICES = ("source", "en", "fr")
+
+
 def update_profile(
     conn: sqlite3.Connection,
     user_id: str,
     *,
     about_you_context: str | None = None,
     theme_mode: str | None = None,
+    display_name: str | None = None,
+    locale: str | None = None,
+    want_summary: bool | None = None,
+    want_rules: bool | None = None,
+    want_skills: bool | None = None,
+    keep_uploads: bool | None = None,
+    write_in: str | None = None,
 ) -> dict[str, Any] | None:
+    """Write the fields §7.13 lets the person change.
+
+    A value outside its allowed set raises rather than being dropped: the set
+    is this module's contract, and silently storing nothing would leave the
+    person looking at a switch that did not move.
+    """
     sets, params = [], []
     if about_you_context is not None:
         sets.append("about_you_context = ?")
         params.append(about_you_context[:20_000])
     if theme_mode is not None:
-        if theme_mode not in ("light", "dark", "warm_sunset"):
+        # `R-10`: two themes. A write of the third is refused rather than
+        # stored, because nothing would render it.
+        if theme_mode not in ("light", "dark"):
             raise ValueError(f"unknown theme_mode: {theme_mode}")
         sets.append("theme_mode = ?")
         params.append(theme_mode)
+    if display_name is not None:
+        sets.append("display_name = ?")
+        params.append(str(display_name).strip()[:120])
+    if locale is not None:
+        if locale not in ("", "en", "fr"):
+            raise ValueError(f"unknown locale: {locale}")
+        sets.append("locale = ?")
+        params.append(locale)
+    if write_in is not None:
+        if write_in not in WRITE_IN_CHOICES:
+            raise ValueError(f"unknown write_in: {write_in}")
+        sets.append("write_in = ?")
+        params.append(write_in)
+    for name, value in (
+        ("want_summary", want_summary),
+        ("want_rules", want_rules),
+        ("want_skills", want_skills),
+        ("keep_uploads", keep_uploads),
+    ):
+        if value is not None:
+            sets.append(f"{name} = ?")
+            params.append(1 if value else 0)
     if sets:
         params.append(user_id)
         conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE user_id = ?", params)
@@ -313,7 +478,191 @@ def update_profile(
 
 
 # ---------------------------------------------------------------------------
-# quotas  (reserved up-front, released when a job fails)
+# credits  (`R-18`) — the account's one allowance
+# ---------------------------------------------------------------------------
+# Characters of source text, spent at the single gate in `_ingest_content`
+# and reset on the first of the month.
+#
+# **Why a debit and not a reservation.** The quota machinery this replaces
+# reserved up-front and released on failure, which it had to: minutes were
+# guessable before the fetch (a flat provisional 15 for YouTube, nothing at
+# all for an article). Characters are not guessable — `normalize_url` knows
+# no duration, no byte count and no page count — but they ARE exactly known
+# the moment the fetch returns, which is still before every LLM call. So
+# there is nothing to reserve: one atomic debit at the one line where the
+# number is real, with the ceiling inside the `WHERE` clause so two
+# concurrent jobs cannot both cross it.
+#
+# **Why the period is a string and not a timestamp.** `credits_period` holds
+# the `YYYY-MM` the counter belongs to. A read in a later month zeroes it in
+# passing. No cron, no worker, no scheduled reset to miss during a redeploy,
+# and no clock-skew window: the month a row names is either this one or it
+# is not.
+
+
+def current_period(now: datetime | None = None) -> str:
+    """The `YYYY-MM` a charge belongs to. UTC, so it turns over once."""
+    return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+
+
+def _roll_period(conn: sqlite3.Connection, user_id: str, period: str) -> None:
+    """Zero the counter if it belongs to a month that is over. Idempotent."""
+    conn.execute(
+        "UPDATE users SET credits_used = 0, credits_period = ? "
+        "WHERE user_id = ? AND credits_period IS NOT ?",
+        (period, user_id, period),
+    )
+
+
+def credits_state(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    cfg: Settings | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Used, cap and left — after rolling the month if it has turned over."""
+    cfg = cfg or settings()
+    period = current_period(now)
+    with transaction(conn):
+        _roll_period(conn, user_id, period)
+        row = conn.execute(
+            "SELECT COALESCE(credits_used, 0) AS used FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    used = int(row["used"]) if row else 0
+    return {
+        "used": used,
+        "cap": cfg.quota_credits,
+        "left": max(0, cfg.quota_credits - used),
+        "period": period,
+    }
+
+
+def credits_left(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    cfg: Settings | None = None,
+    now: datetime | None = None,
+) -> int:
+    return credits_state(conn, user_id, cfg=cfg, now=now)["left"]
+
+
+def debit_credits(
+    conn: sqlite3.Connection,
+    user_id: str,
+    credits: int,
+    *,
+    cfg: Settings | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Spend `credits`, or return False and spend nothing.
+
+    The ceiling lives in the `WHERE` clause, so the check and the write are
+    one statement and two workers racing the same account cannot both pass.
+    A negative is clamped rather than trusted: the quota function this
+    replaces guarded with `if minutes and ...`, which a negative slipped
+    straight through as a silent refund.
+    """
+    cfg = cfg or settings()
+    credits = max(0, int(credits))
+    period = current_period(now)
+    with transaction(conn):
+        _roll_period(conn, user_id, period)
+        cursor = conn.execute(
+            "UPDATE users SET credits_used = credits_used + ? "
+            "WHERE user_id = ? AND credits_used + ? <= ?",
+            (credits, user_id, credits, cfg.quota_credits),
+        )
+        return cursor.rowcount == 1
+
+
+def refund_credits(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    credits: int,
+    now: datetime | None = None,
+) -> None:
+    """Give back exactly what a job charged, because a failure costs nothing.
+
+    The month is rolled first, which handles the one awkward case for free: a
+    job charged on the 31st and failed on the 1st refunds into a counter that
+    is already zero, and `MAX(0, ...)` leaves it there. The person starts the
+    new month whole either way.
+    """
+    credits = max(0, int(credits))
+    if not credits:
+        return
+    with transaction(conn):
+        _roll_period(conn, user_id, current_period(now))
+        conn.execute(
+            "UPDATE users SET credits_used = MAX(0, credits_used - ?) WHERE user_id = ?",
+            (credits, user_id),
+        )
+
+
+def set_job_charge(conn: sqlite3.Connection, job_id: str, credits: int) -> None:
+    conn.execute(
+        "UPDATE ingestion_jobs SET charged_credits = ? WHERE job_id = ?",
+        (max(0, int(credits)), job_id),
+    )
+
+
+def job_charge(conn: sqlite3.Connection, job_id: str) -> int:
+    """What this job spent, read from the ROW.
+
+    Never from the job dict a worker is holding: that is an in-memory copy
+    taken at claim time, and the charge is written after it.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(charged_credits, 0) AS c FROM ingestion_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def reap_exhausted_jobs(
+    conn: sqlite3.Connection, *, user_id: str | None = None, max_attempts: int = 3
+) -> list[dict[str, Any]]:
+    """Fail the jobs nothing will ever claim again, and refund what they spent.
+
+    `claim_next_job` filters on `attempts < max_attempts`, so a job that
+    crashed its last attempt simply stops being selected: it keeps a
+    non-terminal status forever and nothing ever runs the code that would
+    give its charge back. Before credits that leaked a reservation quietly;
+    with credits it would leak the person's allowance, which they can see.
+
+    So the reap runs at the top of every drain, which is the only loop
+    guaranteed to exist wherever jobs are processed at all.
+    """
+    where = "status NOT IN ('ready','failed','blocked_by_platform') AND attempts >= ?"
+    params: list[Any] = [max_attempts]
+    if user_id is not None:
+        where += " AND user_id = ?"
+        params.append(user_id)
+    rows = conn.execute(
+        f"SELECT job_id, user_id, COALESCE(charged_credits, 0) AS charged "
+        f"FROM ingestion_jobs WHERE {where}",
+        params,
+    ).fetchall()
+    reaped = []
+    for row in rows:
+        set_job_status(
+            conn,
+            row["job_id"],
+            "failed",
+            error_message="Brain tried this three times and could not finish it.",
+            error_reason="attempts_exhausted",
+        )
+        refund_credits(conn, row["user_id"], credits=row["charged"])
+        reaped.append({"job_id": row["job_id"], "refunded": int(row["charged"])})
+    return reaped
+
+
+# ---------------------------------------------------------------------------
+# quotas  (`R-18` fossils — superseded by credits above)
 # ---------------------------------------------------------------------------
 class QuotaExceeded(Exception):
     def __init__(self, kind: str, used: int, cap: int, requested: int) -> None:
@@ -496,8 +845,167 @@ def list_sessions(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# §7.11 connections — the key half
+# ---------------------------------------------------------------------------
+#: §7.11's own example: `https://brain.app/mcp?key=sk-brain-7Qd2xV9mTb4f2a`.
+KEY_PREFIX = "sk-brain-"
+
+
+def new_connection_key() -> str:
+    """A key with enough entropy that guessing is not a strategy.
+
+    `token_urlsafe(24)` is 192 bits. The prefix is there so that a key found
+    in a log or a pasted URL is recognisable as this product's — which is what
+    makes a leaked one reportable.
+    """
+    return f"{KEY_PREFIX}{secrets.token_urlsafe(24)}"
+
+
+def create_connection(
+    conn: sqlite3.Connection, user_id: str, *, name: str = "My AI"
+) -> tuple[dict[str, Any], str]:
+    """Return the row and **the key in plaintext, once**.
+
+    The caller shows it to the person and forgets it. Nothing stores it: only
+    the digest is written, so there is no second chance to read it and no way
+    for a stolen database to yield a working key.
+    """
+    key = new_connection_key()
+    connection_id = new_id("con")
+    conn.execute(
+        "INSERT INTO connections (connection_id, user_id, name, key_hash, key_prefix) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (connection_id, user_id, (name or "My AI")[:120], hash_token(key), key[:16]),
+    )
+    return get_connection(conn, connection_id), key  # type: ignore[return-value]
+
+
+def get_connection(conn: sqlite3.Connection, connection_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM connections WHERE connection_id = ?", (connection_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def connection_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
+    """Resolve a presented key to its connection, by digest.
+
+    The lookup is on the hash, so the plaintext is never compared against
+    anything stored and never has to be.
+    """
+    if not key:
+        return None
+    row = conn.execute(
+        "SELECT * FROM connections WHERE key_hash = ?", (hash_token(key),)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_connections(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM connections WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def touch_connection(conn: sqlite3.Connection, connection_id: str) -> None:
+    """§7.11's `last call …` column, and §7.10's reason for existing: "revoking
+    a key is only meaningful once you can see what it did"."""
+    conn.execute(
+        "UPDATE connections SET last_call_at = CURRENT_TIMESTAMP WHERE connection_id = ?",
+        (connection_id,),
+    )
+
+
+def rename_connection(conn: sqlite3.Connection, connection_id: str, name: str) -> bool:
+    cur = conn.execute(
+        "UPDATE connections SET name = ? WHERE connection_id = ?",
+        ((name or "")[:120], connection_id),
+    )
+    return cur.rowcount > 0
+
+
+def roll_connection_key(conn: sqlite3.Connection, connection_id: str) -> str | None:
+    """§7.11's `Roll the key`: the same connection, a new credential.
+
+    The old digest is overwritten, so the previous key stops working the
+    instant this returns — which is the point. The connection keeps its name
+    and its history, so §7.10's log still reads continuously across the roll.
+    """
+    if get_connection(conn, connection_id) is None:
+        return None
+    key = new_connection_key()
+    conn.execute(
+        "UPDATE connections SET key_hash = ?, key_prefix = ?, revoked = 0 "
+        "WHERE connection_id = ?",
+        (hash_token(key), key[:16], connection_id),
+    )
+    return key
+
+
+def revoke_connection(conn: sqlite3.Connection, connection_id: str) -> bool:
+    """§7.11: "One credential per connection. Revoking one leaves the others
+    working." """
+    cur = conn.execute(
+        "UPDATE connections SET revoked = 1 WHERE connection_id = ? AND revoked = 0",
+        (connection_id,),
+    )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
 # ingestion jobs
 # ---------------------------------------------------------------------------
+#: The pipeline, as the person sees it (§9.1). Fixed, ordered, and the same six
+#: for every source — a step that does not apply to this source type is marked
+#: `skipped` with a reason rather than quietly left out, because a list whose
+#: length changes cannot be read at a glance.
+JOB_STEPS: tuple[tuple[str, str], ...] = (
+    ("read", "Reading the source"),
+    ("transcribe", "Transcribing audio"),
+    ("summarise", "Writing the summary"),
+    ("extract", "Extracting rules"),
+    ("draft_skills", "Drafting skills"),
+    ("remember", "Updating memory"),
+)
+
+STEP_KEYS = tuple(key for key, _ in JOB_STEPS)
+STEP_LABELS = dict(JOB_STEPS)
+
+#: Step 2 is named after what the source actually is.
+#:
+#: It was "Transcribing audio" for everything, which on a text file produced a
+#: row reading `Transcribing audio — 300 words read — no audio in this source`:
+#: a label asserting one thing and its own detail denying it in the same
+#: breath. The step always happens — it is how the words come out of the
+#: source — so what changes between source types is the word for it, not
+#: whether it ran.
+TRANSCRIBE_LABELS = {
+    "youtube": "Transcribing audio",
+    "image": "Reading the image",
+}
+TRANSCRIBE_DEFAULT = "Reading the text"
+
+
+def step_label(step: str, source_type: str = "") -> str:
+    if step == "transcribe":
+        return TRANSCRIBE_LABELS.get(source_type, TRANSCRIBE_DEFAULT)
+    return STEP_LABELS.get(step, step)
+
+
+def seed_job_steps(conn: sqlite3.Connection, job_id: str) -> None:
+    """Lay all six down as `pending` the moment the job is queued.
+
+    The frame shows six rows from the first paint (§7.3), so they must exist
+    before any of them runs. `INSERT OR IGNORE` keeps a retried job's history.
+    """
+    conn.executemany(
+        "INSERT OR IGNORE INTO job_steps (job_id, ordinal, step) VALUES (?, ?, ?)",
+        [(job_id, i, key) for i, key in enumerate(STEP_KEYS)],
+    )
+
+
 def create_job(
     conn: sqlite3.Connection,
     user_id: str,
@@ -528,7 +1036,35 @@ def create_job(
             reserved_files,
         ),
     )
+    # Seeded here, at queue time, not when a worker claims the job. §7.3 draws
+    # six rows from the first paint, and a job sits `queued` for as long as the
+    # queue is busy — during which the work block would otherwise have nothing
+    # to show at all.
+    seed_job_steps(conn, job_id)
     return get_job(conn, job_id)  # type: ignore[return-value]
+
+
+def append_user_note(conn: sqlite3.Connection, job_id: str, text: str) -> str:
+    """§7.2's interjection, added to the instruction the pipeline reads.
+
+    "An interjection is acknowledged without restarting or stopping the
+    pipeline." Nothing is cancelled and no step is rewound: the note is
+    appended, and every step that has not yet read the instruction will read
+    the new one. Which steps those are is what makes the acknowledgement
+    honest rather than reassuring — see `op_add_instruction`.
+
+    Returns the instruction as it now stands.
+    """
+    job = get_job(conn, job_id)
+    if job is None:
+        return ""
+    joined = " ".join(part for part in (job["user_note"], text.strip()) if part)[:2000]
+    conn.execute(
+        "UPDATE ingestion_jobs SET user_note = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE job_id = ?",
+        (joined, job_id),
+    )
+    return joined
 
 
 def get_job(conn: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
@@ -550,6 +1086,29 @@ def list_jobs(
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def charged_jobs(
+    conn: sqlite3.Connection, user_id: str, *, limit: int = 10, period: str | None = None
+) -> list[dict[str, Any]]:
+    """`R-18`: what this account's credits were spent on, dearest first.
+
+    Scoped to the current period by default, because that is the one the
+    meter above it is counting — a list that spans months under a monthly
+    meter would not add up to what the meter says.
+    """
+    period = period or current_period()
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT job_id, source_id, source_type, charged_credits, created_at "
+            "FROM ingestion_jobs "
+            "WHERE user_id = ? AND charged_credits > 0 "
+            "  AND strftime('%Y-%m', created_at) = ? "
+            "ORDER BY charged_credits DESC, rowid DESC LIMIT ?",
+            (user_id, period, max(1, min(limit, 50))),
+        ).fetchall()
+    ]
+
+
 def count_active_jobs(conn: sqlite3.Connection, user_id: str) -> int:
     """Jobs that are queued or mid-pipeline — the Omni-Bar / receipt counter."""
     placeholders = ",".join("?" * len(TERMINAL_STATUSES))
@@ -561,12 +1120,40 @@ def count_active_jobs(conn: sqlite3.Connection, user_id: str) -> int:
     return int(row[0])
 
 
+def ingestion_defaults(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]:
+    """What the pipeline reads before steps 3, 4 and 5.
+
+    Defaults to doing everything, for a row written before these columns
+    existed: `COALESCE` rather than a Python fallback, so a NULL from an old
+    row and a missing row answer the same way.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(want_summary, 1) AS want_summary, "
+        "       COALESCE(want_rules, 1) AS want_rules, "
+        "       COALESCE(want_skills, 1) AS want_skills, "
+        "       COALESCE(keep_uploads, 1) AS keep_uploads, "
+        "       COALESCE(write_in, 'source') AS write_in "
+        "FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "want_summary": 1,
+            "want_rules": 1,
+            "want_skills": 1,
+            "keep_uploads": 1,
+            "write_in": "source",
+        }
+    return dict(row)
+
+
 def set_job_status(
     conn: sqlite3.Connection,
     job_id: str,
     status: str,
     *,
     error_message: str | None = None,
+    error_reason: str | None = None,
     claims_extracted: int | None = None,
 ) -> None:
     if status not in JOB_STATUSES:
@@ -576,6 +1163,9 @@ def set_job_status(
     if error_message is not None:
         sets.append("error_message = ?")
         params.append(error_message[:2000])
+    if error_reason is not None:
+        sets.append("error_reason = ?")
+        params.append(error_reason[:64])
     if claims_extracted is not None:
         sets.append("claims_extracted = ?")
         params.append(claims_extracted)
@@ -583,6 +1173,100 @@ def set_job_status(
         sets.append("locked_until = NULL")
     params.append(job_id)
     conn.execute(f"UPDATE ingestion_jobs SET {', '.join(sets)} WHERE job_id = ?", params)
+
+
+def start_step(conn: sqlite3.Connection, job_id: str, step: str) -> None:
+    if step not in STEP_KEYS:
+        raise ValueError(f"unknown pipeline step: {step}")
+    conn.execute(
+        "UPDATE job_steps SET state = 'running', detail = '', "
+        "started_at = CURRENT_TIMESTAMP, finished_at = NULL "
+        "WHERE job_id = ? AND step = ?",
+        (job_id, step),
+    )
+
+
+def finish_step(
+    conn: sqlite3.Connection,
+    job_id: str,
+    step: str,
+    *,
+    detail: str = "",
+    state: str = "done",
+) -> None:
+    """Close a step and record what it found.
+
+    `detail` is the only thing the frame shows beside a step's name, and §4.4
+    says it appears only once the step is done — so it is written here and
+    never while the step is running.
+    """
+    if step not in STEP_KEYS:
+        raise ValueError(f"unknown pipeline step: {step}")
+    if state not in ("done", "skipped", "failed"):
+        raise ValueError(f"not a terminal step state: {state}")
+    conn.execute(
+        "UPDATE job_steps SET state = ?, detail = ?, finished_at = CURRENT_TIMESTAMP, "
+        "started_at = COALESCE(started_at, CURRENT_TIMESTAMP) "
+        "WHERE job_id = ? AND step = ?",
+        (state, detail[:300], job_id, step),
+    )
+
+
+def abandon_steps(conn: sqlite3.Connection, job_id: str, *, reason: str = "") -> None:
+    """A job died. Everything still open stops, so no step spins forever.
+
+    The failing step has already recorded its own reason; the ones after it
+    never started, and saying "failed" of a step that never ran would be a
+    second lie on top of the first.
+    """
+    conn.execute(
+        "UPDATE job_steps SET state = 'failed', detail = ?, finished_at = CURRENT_TIMESTAMP "
+        "WHERE job_id = ? AND state = 'running'",
+        (reason[:300], job_id),
+    )
+    conn.execute(
+        "UPDATE job_steps SET state = 'skipped', finished_at = CURRENT_TIMESTAMP "
+        "WHERE job_id = ? AND state = 'pending'",
+        (job_id,),
+    )
+
+
+def latest_job_for_source(
+    conn: sqlite3.Connection, user_id: str, source_id: str
+) -> dict[str, Any] | None:
+    """The job behind a source page.
+
+    Scoped to `user_id` and not to `source_id` alone: a source id arrives from
+    the client, and §10.7 is explicit that every query filters on the user —
+    "the single most likely data-leak bug in this app".
+
+    Newest first, because a re-processed source has more than one.
+    """
+    row = conn.execute(
+        "SELECT * FROM ingestion_jobs WHERE user_id = ? AND source_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (user_id, source_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def job_steps(conn: sqlite3.Connection, job_id: str) -> list[dict[str, Any]]:
+    # The source type rides along because step 2's label depends on it: a
+    # text file is not having its audio transcribed.
+    rows = conn.execute(
+        "SELECT s.ordinal, s.step, s.state, s.detail, s.started_at, s.finished_at, "
+        "       COALESCE(j.source_type, '') AS source_type "
+        "FROM job_steps s LEFT JOIN ingestion_jobs j ON j.job_id = s.job_id "
+        "WHERE s.job_id = ? ORDER BY s.ordinal",
+        (job_id,),
+    ).fetchall()
+    return [
+        {
+            **{k: v for k, v in dict(row).items() if k != "source_type"},
+            "label": step_label(row["step"], row["source_type"]),
+        }
+        for row in rows
+    ]
 
 
 def claim_next_job(
@@ -634,12 +1318,25 @@ def audit(
     target_id: str | None = None,
     detail: Any = "",
     reasoning_trace: str = "",
+    latency_ms: int | None = None,
+    payload_bytes: int | None = None,
+    result_summary: str = "",
+    connection_id: str = "",
 ) -> None:
     """Append one immutable audit row.
 
     `reasoning_trace` is the plain-English "why" the owner reads in their
     Profile — "blocked: the skill text tried to override the host model's
     instructions" — rather than a machine-readable detail blob.
+
+    The last four are §7.10's row, collapsed and expanded: the `180 ms`, the
+    `1.2 kB`, the `3 rules returned`, and which connection made the call —
+    which is also the link from Activity to §7.11, because "revoking a key is
+    only meaningful once you can see what it did".
+
+    `latency_ms` and `payload_bytes` are nullable on purpose. A call that was
+    refused before it ran has no duration and no payload, and `0` would read
+    as "instant and empty" on a page whose whole job is being readable.
     """
     if surface not in ("mcp", "web_omnibar", "web_ui", "system"):
         surface = "system"
@@ -647,7 +1344,8 @@ def audit(
         detail = json.dumps(detail, default=str, ensure_ascii=False)[:2000]
     conn.execute(
         "INSERT INTO audit_logs (user_id, client_name, surface, action, target_id, status, "
-        "detail, reasoning_trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "detail, reasoning_trace, latency_ms, payload_bytes, result_summary, connection_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id,
             client_name,
@@ -657,8 +1355,46 @@ def audit(
             status,
             detail[:2000],
             (reasoning_trace or "")[:1000],
+            latency_ms,
+            payload_bytes,
+            (result_summary or "")[:300],
+            (connection_id or "")[:64],
         ),
     )
+
+
+def recent_calls(
+    conn: sqlite3.Connection, user_id: str, *, limit: int = 60
+) -> list[dict[str, Any]]:
+    """§7.10's `Calls` — the MCP log, and only it.
+
+    A row with a `connection_id` is a call a connection made. The operations
+    write their own rows too (§2's internal trail: every tool call is logged
+    with its action, target and status), and those are steps inside a call
+    rather than calls — listing them would make one `search` read as five
+    lines and the log unreadable, which is the opposite of §7.10's purpose.
+    """
+    rows = conn.execute(
+        "SELECT * FROM audit_logs WHERE user_id = ? AND connection_id != '' "
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, max(1, min(limit, 200))),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def calls_in_last_minute(conn: sqlite3.Connection, user_id: str) -> int:
+    """§7.10's `Calls a minute` meter, against the ceiling the limiter keeps.
+
+    Counted from the log rather than from the limiter's own window: the
+    limiter is per-process in-memory state, and the page has to be right
+    behind more than one uvicorn worker.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM audit_logs WHERE user_id = ? AND connection_id != '' "
+        "AND created_at >= datetime('now', '-60 seconds')",
+        (user_id,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def recent_audit(conn: sqlite3.Connection, user_id: str, limit: int = 20) -> list[dict[str, Any]]:

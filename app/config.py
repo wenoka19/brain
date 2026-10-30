@@ -102,10 +102,23 @@ class Settings:
     # ---- anti-abuse -------------------------------------------------------
     tool_calls_per_min: int = 30
     ingestions_per_min: int = 10
+    #: The web surface's own ceiling. §2's 30/min is for agents; a browser
+    #: spends two reads per navigation, so sharing that budget turned normal
+    #: use of the product into a 429. Still a ceiling — four a second, which
+    #: no person clicking produces and a script would exceed at once.
+    web_requests_per_min: int = 240
     duplicate_call_window_sec: float = 15.0
 
     # ---- ingestion caps ---------------------------------------------------
     max_upload_bytes: int = 20 * MB
+    #: `R-17`: how long a file the person uploaded is kept after it has been
+    #: read. Brain needs the bytes until the job finishes — and for a few
+    #: days after, so a failure can be looked at — but not forever. The
+    #: knowledge is in the tenant database by then; the file is a receipt.
+    #: Past this window `app/storage/retention.py` deletes it, which is why
+    #: §7.10 reports no storage figure: the bytes on disk measure this
+    #: window, not the person's use of the product.
+    upload_retention_days: int = 30
     max_docx_decompressed_bytes: int = 30 * MB
     max_zip_compression_ratio: int = 120
     max_pdf_pages: int = 200
@@ -172,6 +185,10 @@ class Settings:
     llm_timeout_sec: float = 60.0
     llm_max_retries: int = 2
     llm_max_output_tokens: int = 4096
+    #: How much of a source the summariser is shown. A 42-minute transcript is
+    #: well past any sensible context window, and a summary of the first part
+    #: with a truthful gist beats a truncation error that loses the source.
+    summary_input_chars: int = 24000
     #: All three are "unset" sentinels. What they resolve to depends on which
     #: keys exist — see `resolved_embedding_*`.
     embedding_base_url: str = ""
@@ -207,7 +224,32 @@ class Settings:
     #: convention off and require an explicit address.
     shard_instance_template: str = "shard-{index}"
 
-    # ---- per-user quotas --------------------------------------------------
+    # ---- the allowance ----------------------------------------------------
+    # `R-18`. One plan, one allowance, counted in characters of source text.
+    #
+    # `credit_chars` is the scale: 1 means the founder's "a character is a
+    # credit, kind of like how Eleven Labs does it". Set it to 1000 and every
+    # number in the product simply loses three zeros — the ledger, the column
+    # and the enforcement are characters either way, so nothing else changes.
+    credit_chars: int = 1
+    #: Per month, reset on the first. 500,000 characters is roughly nine
+    #: hours of captioned video, or ~150 PDF pages, or a few dozen articles.
+    quota_credits: int = 500_000
+    #: Under this, an upload is parsed and counted inside the request, so the
+    #: person is refused at the button with the real number instead of
+    #: discovering it in a failed job. Above it the parse would cost more
+    #: latency than the honesty is worth, and the gate in the worker decides.
+    credit_precount_max_bytes: int = 2 * MB
+    #: `R-18`: the classifier loop is the one unbounded cost in the pipeline —
+    #: up to `claims x link_top_k` LLM calls, which at maturity can dwarf the
+    #: extraction bill the credits are priced on. Not a second meter: an abuse
+    #: guard, so the credit price stays a loose bound on what a job can cost.
+    link_max_calls_per_job: int = 400
+
+    # ---- per-user quotas, superseded by credits (`R-18`) ------------------
+    # Fossils. `quota_media_minutes` metered YouTube only, and `quota_files`
+    # was incremented by uploads alone, so a URL ingestion consumed neither.
+    # Kept because the columns behind them are kept.
     quota_media_minutes: int = 300
     quota_files: int = 50
 
@@ -377,6 +419,20 @@ class Settings:
     def users_dir(self) -> Path:
         return self.data_dir / "users"
 
+    @property
+    def uploads_dir(self) -> Path:
+        """Where a received file waits to be read, and is swept from.
+
+        One subdirectory per *verified* user id, exactly as `users_dir` —
+        `uploads_dir_for` does the same check `tenant_db_path` does.
+        """
+        return self.data_dir / "uploads"
+
+    def uploads_dir_for(self, user_id: str) -> Path:
+        if not USER_ID_RE.match(user_id or ""):
+            raise ValueError(f"unsafe user_id: {user_id!r}")
+        return self.uploads_dir / user_id
+
     def tenant_db_path(self, user_id: str) -> Path:
         """Resolve a tenant database path from a *verified* user id.
 
@@ -391,6 +447,7 @@ class Settings:
     def ensure_dirs(self) -> None:
         self.users_dir.mkdir(parents=True, exist_ok=True)
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _env() -> BrainEnv:

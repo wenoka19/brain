@@ -7,22 +7,26 @@ cd "$(dirname "$0")/.."
 
 echo "[brain/setup] python: $(python3 --version)"
 
-PKGS=(
-  "rapidfuzz>=3.9"
-  "sqlite-vec>=0.1.6"
-  "pytest>=8.0"
-  "pytest-asyncio>=0.23"
-  "fastapi>=0.110"
-  "uvicorn>=0.27"
-  "httpx>=0.27"
-  "PyJWT>=2.8"
-  "pypdf>=4.0"
-  "python-docx>=1.1"
-  "beautifulsoup4>=4.12"
-  "lxml>=5.0"
-  "python-multipart>=0.0.9"
+# `pyproject.toml` is the single source of truth: read the dependency list,
+# never restate it here. The copy that used to live in this file had already
+# drifted from the image's — it was missing `mcp` and `yt-dlp` entirely, so a
+# fresh Cloud VM could not run the MCP tests and `cli doctor` warned about
+# YouTube ingestion.
+mapfile -t PKGS < <(python3 - <<'PYDEPS'
+import tomllib
+
+with open("pyproject.toml", "rb") as handle:
+    project = tomllib.load(handle)["project"]
+
+for spec in project["dependencies"]:
+    print(spec)
+for spec in project.get("optional-dependencies", {}).get("dev", []):
+    print(spec)
+PYDEPS
 )
 
+test "${#PKGS[@]}" -gt 0 || { echo "[brain/setup] read no dependencies from pyproject.toml" >&2; exit 1; }
+echo "[brain/setup] installing ${#PKGS[@]} declared dependencies"
 python3 -m pip install --quiet --disable-pip-version-check "${PKGS[@]}"
 
 # Verify the two native capabilities the whole stack depends on.
@@ -36,8 +40,20 @@ assert db.execute("select vec_version()").fetchone()
 assert db.execute(
     "select 1 from pragma_compile_options where compile_options like '%FTS5%'"
 ).fetchone(), "SQLite build is missing FTS5"
-print("[brain/setup] sqlite-vec + FTS5 OK")
+
+# `mcp` is imported by `app/main.py` and `app/mcp_server.py`, and this script
+# used to omit it, so the MCP tests failed here for a reason that looked like a
+# broken test rather than a broken setup.
+from mcp.server.mcpserver import MCPServer  # noqa: F401
+
+print("[brain/setup] sqlite-vec + FTS5 + mcp OK")
 PYCHECK
+
+# `yt-dlp` is run as a PATH executable, not imported, so an installed-but-not-on-PATH
+# wheel would still break YouTube ingestion. Say so here rather than at ingest time.
+command -v yt-dlp >/dev/null \
+  && echo "[brain/setup] yt-dlp on PATH" \
+  || echo "[brain/setup] WARNING: yt-dlp installed but not on PATH — YouTube ingestion will fail"
 
 mkdir -p .brain_data/users
 echo "[brain/setup] done"

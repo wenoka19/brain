@@ -1135,109 +1135,36 @@ class TestAuditLog:
             assert "Blocked a skill before saving" in blocked["reasoning_trace"]
         mcp_server.reset_server()
 
-    def test_the_profile_modal_hosts_the_log(self):
-        html = (ROOT / "app" / "static" / "index.html").read_text()
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        assert 'id="audit-log"' in html
-        assert "6 · Recent activity &amp; audit log" in html
-        assert "/api/audit-logs" in js
-        assert "reasoning_trace" in js
-        # It is rendered escaped, like every other piece of stored text.
-        assert "esc(entry.reasoning_trace)" in js
+    def test_the_owner_can_still_read_their_own_log(self):
+        """`R-19`: the old Profile modal had a sixth block rendering this.
+        §7.13 as the founder approved it has four blocks and no audit list,
+        so the cutover took the only surface that showed it.
+
+        What CLAUDE.md §2.5 actually requires — an immutable per-tenant log
+        the owner can read — still holds: the rows are written, the endpoint
+        is authenticated, person-only and live. That it has no screen is a
+        product question, recorded in PROGRESS.md under R-19, not a silently
+        dropped guarantee. This test holds the part that is not a question."""
+        from app import webapi
+
+        paths = {route.path for route in webapi.ROUTES}
+        assert "/api/audit-logs" in paths
+
+        source = inspect.getsource(webapi)
+        handler = source.split("async def api_audit_logs(")[1].split("\n@")[0]
+        assert "_context(request)" in handler, "scoped to the signed-in user"
+        assert "reasoning_trace" in inspect.getsource(E.op_audit_log)
 
 
 # ===========================================================================
 # PART B5 — the browser check the founder asked for
 # ===========================================================================
-class TestProfileModalInABrowser:
-    """Drives the real page: the Profile modal opens and renders the log.
+# `R-19`: `TestProfileModalInABrowser` opened the deleted modal through
+# Playwright. The strong form of its property — that a blocked skill import
+# is recorded with its reason, its steps and its version byte-identical — is
+# asserted above without a browser. The visibility half moved to
+# `tests/test_redesign_browser.py`.
 
-    Skipped rather than failed when node or playwright is absent, so the suite
-    still runs on a bare host — CI installs both.
-    """
-
-    SCRIPT = ROOT / "tests" / "browser" / "profile_audit.js"
-
-    @pytest.fixture
-    def server(self, cfg, tmp_path, monkeypatch):
-        import shutil
-        import socket
-        import subprocess
-        import time
-
-        if shutil.which("node") is None:
-            pytest.skip("node is not installed")
-        try:
-            subprocess.run(
-                ["node", "-e", "require('playwright')"],
-                check=True, capture_output=True, timeout=30,
-            )
-        except Exception:
-            pytest.skip("playwright is not installed for node")
-
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-
-        env = {
-            **__import__("os").environ,
-            "BRAIN_ENV": "test",
-            "BRAIN_DATA_DIR": str(tmp_path / "browserdata"),
-            "BRAIN_JWT_SECRET": "browser-test-secret-key-long-enough",
-            "BRAIN_ALLOWED_HOSTS": f"127.0.0.1:{port},localhost:{port}",
-        }
-        process = subprocess.Popen(
-            ["python3", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
-             "--port", str(port), "--log-level", "warning"],
-            cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        )
-        base = f"http://127.0.0.1:{port}"
-        try:
-            for _ in range(40):
-                if process.poll() is not None:
-                    pytest.skip("the server did not start")
-                try:
-                    httpx.get(f"{base}/healthz", timeout=1.0)
-                    break
-                except httpx.HTTPError:
-                    time.sleep(0.5)
-            else:
-                pytest.skip("the server did not become ready")
-            yield base
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except Exception:
-                process.kill()
-
-    def test_the_profile_modal_opens_and_renders_the_audit_log(self, server):
-        import os
-        import subprocess
-
-        result = subprocess.run(
-            ["node", str(self.SCRIPT)],
-            capture_output=True, text=True, timeout=180,
-            env={**os.environ, "BASE": server},
-            cwd=str(ROOT),
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        report = json.loads(result.stdout)
-
-        assert report["errors"] == [], report["errors"]
-        assert report["blockedStrip"] is True        # the linter refused it in the UI
-        assert report["modalVisible"] is True
-        assert [heading.split(" · ")[0] for heading in report["blocks"]] == [
-            "1", "2", "3", "4", "5", "6",
-        ]
-        assert "Recent activity" in report["blocks"][5]
-        assert report["auditRows"] >= 1
-        assert report["blockedHighlighted"] >= 1     # the refusal is visible to the owner
-        assert "Blocked an Omni-Bar skill edit" in report["auditText"]
-        assert report["auditScrolls"] is True
-        assert report["escapedNoHtml"] is True
-        # The blocked edit left the skill exactly as it was.
-        assert report["stepsIntact"][1] == "Write the whole sequence in one sitting"
 
 
 class TestEnvelopePolish:

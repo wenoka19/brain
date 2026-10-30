@@ -7,13 +7,37 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
+
+# `pyproject.toml` is the single source of truth: this stage READS the dependency
+# list rather than restating it. The restated copy that used to live here was the
+# only place `mcp` and `yt-dlp` were declared, and it asked for `mcp>=1.2` while
+# the code imports 2.x-only module paths — a build that resolved 1.x would go
+# green and then fail at import.
+#
+# The project itself is deliberately NOT installed: the runtime stage runs it from
+# `/app`, and a second copy in site-packages would shadow it for any entry point
+# whose `sys.path[0]` is not the working directory.
+#
+# Only `pyproject.toml` is copied, so this layer still caches across application
+# changes.
+RUN python3 <<'PYDEPS'
+import tomllib
+
+with open("pyproject.toml", "rb") as handle:
+    deps = tomllib.load(handle)["project"]["dependencies"]
+
+if not deps:
+    raise SystemExit("pyproject.toml declares no dependencies")
+
+with open("/tmp/requirements.txt", "w", encoding="utf-8") as out:
+    out.write("\n".join(deps) + "\n")
+
+print(f"resolved {len(deps)} dependencies from pyproject.toml")
+PYDEPS
+
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install \
-        "rapidfuzz>=3.9" "sqlite-vec>=0.1.6" "fastapi>=0.110" "uvicorn[standard]>=0.27" \
-        "httpx>=0.27" "PyJWT>=2.8" "pypdf>=4.0" "python-docx>=1.1" \
-        "beautifulsoup4>=4.12" "lxml>=5.0" "python-multipart>=0.0.9" "mcp>=1.2" \
-        "yt-dlp>=2024.8.6"
+    && /opt/venv/bin/pip install -r /tmp/requirements.txt
 
 # ---- runtime -------------------------------------------------------------
 FROM python:3.12-slim AS runtime

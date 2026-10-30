@@ -1,4 +1,4 @@
-"""`python -m app.cli doctor|selftest|preview-ax|preview-ui|worker|serve`
+"""`python -m app.cli doctor|selftest|preview-ax|dev|worker|serve`
 
 `doctor` answers "can this host run brain at all?", `selftest` answers "does the
 whole pipeline still work end to end?", and the two previews print or serve
@@ -122,12 +122,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         failures += 1
 
     static = Path(__file__).parent / "static"
-    missing = [name for name in ("index.html", "app.css", "app.js") if not (static / name).is_file()]
+    # `R-19`: the one app's four layers, its shell and its script. The
+    # consent card's two files are listed too, because the OAuth page is the
+    # one screen that renders outside the shell — and the one nobody would
+    # notice was broken until someone tried to connect an AI.
+    assets = (
+        "shell.html", "frames.js",
+        "tokens.css", "atoms.css", "molecules.css", "frames.css",
+        "consent.css", "consent.js",
+    )
+    missing = [name for name in assets if not (static / name).is_file()]
     if missing:
         line("bad", "web assets", f"missing {', '.join(missing)}")
         failures += 1
     else:
-        line("ok", "web assets", "index.html, app.css, app.js")
+        line("ok", "web assets", f"{len(assets)} files, shell and consent card")
 
     if cfg.is_test:
         line("ok", "providers", "deterministic (BRAIN_ENV=test)")
@@ -497,12 +506,12 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
         rescued = E.op_rescue_job(ctx, queued.data["job_id"], notes)
         assert rescued.ok and rescued.data["claims"] >= 1
 
-    @check("trash: deletion is gated on it, then irreversible")
+    @check("deletion: gated on being set aside first, then irreversible")
     def _trash():
         E.op_seed_demo(ctx)
         refused = E.op_permanent_delete(ctx, E.DEMO_SOURCE_VIDEO)
-        assert not refused.ok and refused.error_reason == "not_in_trash"
-        E.op_trash_item(ctx, "source", E.DEMO_SOURCE_VIDEO)
+        assert not refused.ok and refused.error_reason == "not_set_aside"
+        E.op_archive_item(ctx, "source", E.DEMO_SOURCE_VIDEO)
         assert E.op_permanent_delete(ctx, E.DEMO_SOURCE_VIDEO).ok
         assert tenant_db.get_source(ctx.tenant, E.DEMO_SOURCE_VIDEO) is None
 
@@ -578,7 +587,9 @@ def _selftest_inner(args: argparse.Namespace, workdir: Path) -> int:
         with TestClient(create_app(cfg)) as client:
             assert client.get("/healthz").json()["status"] == "ok"
             assert client.get("/").status_code == 200
-            assert client.get("/preview").status_code == 200
+            # `R-19`: a link made while the app lived under `/next` still works.
+            moved = client.get("/next/rules", follow_redirects=False)
+            assert moved.status_code == 302 and moved.headers["location"] == "/rules"
             headers = client.get("/").headers
             assert headers["X-Frame-Options"] == "DENY"
             login = client.post("/api/login", json={"email": "selftest@example.com"})
@@ -831,11 +842,11 @@ def _preview_ax_inner(args: argparse.Namespace, workdir: Path) -> int:
 
 
 # ===========================================================================
-# preview-ui / serve / worker
+# dev / serve / worker
 # ===========================================================================
-def cmd_preview_ui(args: argparse.Namespace) -> int:
+def cmd_dev(args: argparse.Namespace) -> int:
+    """Boot the app on a seeded throwaway library, for looking at it."""
     os.environ.setdefault("BRAIN_ENV", "test")
-    os.environ["BRAIN_PREVIEW"] = "1"
     os.environ.setdefault("BRAIN_JWT_SECRET", "preview-secret-key-long-enough-ok")
     os.environ.setdefault("BRAIN_ALLOWED_HOSTS", f"{args.host}:{args.port},localhost:{args.port}")
 
@@ -852,10 +863,9 @@ def cmd_preview_ui(args: argparse.Namespace) -> int:
         E.op_seed_demo(E.build_context(user["user_id"], surface="web_ui"))
         print(f"seeded the demo library for {args.seed_email}")
 
-    print(f"\n  design harness   http://{args.host}:{args.port}/preview")
-    print(f"  the app itself   http://{args.host}:{args.port}/")
+    print(f"\n  the app   http://{args.host}:{args.port}/")
     print(f"  data             {cfg.data_dir}\n")
-    print("  top bar: layout + edge-state switcher · bottom bar: theme & WCAG tuner\n")
+    print("  seeded with the demo library, so every screen has something on it\n")
 
     import uvicorn
 
@@ -890,6 +900,50 @@ def cmd_worker(args: argparse.Namespace) -> int:
     from app.worker import main as worker_main
 
     return worker_main()
+
+
+def cmd_sweep_uploads(args: argparse.Namespace) -> int:
+    """`R-17`'s sweep, by hand.
+
+    The worker runs it hourly on its own. This exists for the two cases the
+    worker does not cover: seeing what *would* go before it goes
+    (`--dry-run`), and clearing a deployment that ran before retention
+    existed, where there is a backlog nobody wants to wait an hour for.
+    """
+    import time
+    from dataclasses import replace
+
+    from app.config import settings
+    from app.storage import retention
+
+    cfg = settings()
+    days = cfg.upload_retention_days if args.days is None else args.days
+    cfg = replace(cfg, upload_retention_days=days)
+    print(f"uploads   {cfg.uploads_dir}")
+    print(f"keeping   {days} day(s)")
+
+    if args.dry_run:
+        cutoff = time.time() - max(0, days) * 86400.0
+        due = [
+            path
+            for user_dir in sorted(cfg.uploads_dir.glob("*"))
+            if user_dir.is_dir()
+            for path in sorted(user_dir.iterdir())
+            if path.is_file() and path.stat().st_mtime < cutoff
+        ]
+        for path in due:
+            age = (time.time() - path.stat().st_mtime) / 86400.0
+            print(f"  would delete  {path.name}  ({age:.0f} days old)")
+        print(f"\n{len(due)} file(s) due. Nothing was deleted (--dry-run).")
+        return 0
+
+    swept = retention.sweep_uploads(cfg=cfg)
+    print(f"\ndeleted   {swept.files} file(s), {swept.bytes} byte(s)")
+    print(f"folders   {swept.dirs} emptied folder(s) removed")
+    if swept.failed:
+        print(f"skipped   {len(swept.failed)}: {', '.join(swept.failed[:5])}")
+        return 1
+    return 0
 
 
 # ===========================================================================
@@ -1247,13 +1301,13 @@ def build_parser() -> argparse.ArgumentParser:
     ax.add_argument("--keep", action="store_true")
     ax.set_defaults(func=cmd_preview_ax)
 
-    ui = sub.add_parser("preview-ui", help="serve the Checkpoint B design harness")
+    ui = sub.add_parser("dev", help="serve the app on a seeded throwaway library")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8080)
     ui.add_argument("--log-level", default="info")
     ui.add_argument("--no-seed", dest="seed", action="store_false", default=True)
     ui.add_argument("--seed-email", default="founder@example.com")
-    ui.set_defaults(func=cmd_preview_ui)
+    ui.set_defaults(func=cmd_dev)
 
     serve = sub.add_parser("serve", help="run the production server")
     serve.add_argument("--host", default="0.0.0.0")
@@ -1263,6 +1317,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = sub.add_parser("worker", help="run the ingestion worker")
     worker.set_defaults(func=cmd_worker)
+
+    sweep = sub.add_parser(
+        "sweep-uploads", help="delete received files past their retention window"
+    )
+    sweep.add_argument(
+        "--days", type=int, default=None,
+        help="override the retention window for this run (default: config)",
+    )
+    sweep.add_argument(
+        "--dry-run", action="store_true", help="list what is due without deleting it"
+    )
+    sweep.set_defaults(func=cmd_sweep_uploads)
 
     calibrate = sub.add_parser(
         "calibrate", help="measure real cosine separation and derive the retrieval floors"

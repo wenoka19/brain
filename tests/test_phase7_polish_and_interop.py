@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import os
 import shutil
 import socket
@@ -72,9 +73,18 @@ class TestEntryDoor:
         payload = client.post("/api/login", json={"email": "brand-new@example.com"}).json()
         assert payload["seeded"] is True
         counts = client.get("/api/cards").json()["library_counts"]
-        assert counts == {
-            "sources": 2, "claims": 2, "skills": 1, "tensions": 1, "archived_claims": 0
-        }
+        # Asserted per key rather than as a whole dict: §5 added the five the
+        # navigation needs, and an equality check against a growing shape
+        # fails on every addition without ever naming what actually broke.
+        assert counts["sources"] == 2
+        assert counts["claims"] == 2
+        assert counts["skills"] == 1
+        assert counts["tensions"] == 1
+        assert counts["archived_claims"] == 0
+        # The demo library is three editable items, so the nav has nothing
+        # waiting and nothing set aside.
+        assert counts["needs_review"] == 0
+        assert counts["archive"] == 0
 
     def test_signing_back_in_does_not_duplicate_the_demo(self, client):
         client.post("/api/login", json={"email": "returning@example.com"})
@@ -115,24 +125,17 @@ class TestEntryDoor:
         with pytest.raises(auth.TokenRejected):
             auth.verify_access_token(grant["access_token"], cfg=cfg)
 
-    def test_the_sign_in_card_uses_the_theme_tokens(self):
-        """Hard-coded colours are how a second theme silently breaks."""
-        css = (ROOT / "app" / "static" / "app.css").read_text()
-        block = css.split(".enter-card{")[1].split("}")[0]
-        assert "var(--bg-card)" in block
-        assert "var(--border-subtle)" in block
-        assert "#" not in block, "no literal colours in the entry card"
-
-    def test_the_card_measures_against_the_visual_viewport(self):
-        css = (ROOT / "app" / "static" / "app.css").read_text()
-        assert "--vvh" in css
-        assert "100dvh" in css
-        assert "env(safe-area-inset-bottom)" in css
+    def test_the_sign_in_card_is_built_from_the_same_tokens(self):
+        """`R-19`: the sign-in card moved from the deleted `app.css` into the
+        app's own layers. One definition of `--accent` for the whole product
+        is the property; which file holds it is not."""
+        frames = (ROOT / "app" / "static" / "frames.css").read_text()
+        card = frames[frames.index(".signin") :]
+        card = card[: card.index("\n}", card.index("{"))]
+        assert "var(--" in card, "the card paints from tokens, not literals"
+        assert not re.search(r"#[0-9a-fA-F]{3,6}\b", card), "no raw colour here"
 
 
-# ===========================================================================
-# 2. the five frontend safeguards, as source and route contracts
-# ===========================================================================
 class TestSyncWatermark:
     def test_the_watermark_moves_for_every_kind_of_change(self, app_client, cfg):
         first = app_client.get("/api/sync-watermark").json()
@@ -172,65 +175,42 @@ class TestSyncWatermark:
     def test_it_needs_a_session_like_every_other_endpoint(self, client):
         assert client.get("/api/sync-watermark").status_code == 401
 
-    def test_the_page_restores_what_the_user_was_doing(self):
-        """A refresh that loses your filter, your scroll position or the
-        conflict you had open is worse than stale data."""
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        body = js.split("async function syncIfChanged()")[1].split("\n}")[0]
-        assert "visibilityState" in body
-        assert "/api/sync-watermark" in body
-        for preserved in ("filter", "scroll", "inspector", "rendered", "expanded"):
-            assert preserved in body, preserved
-        assert "window.scrollTo" in body
-        assert "reopenInspector" in body
-        assert 'document.addEventListener("visibilitychange", syncIfChanged)' in js
+    # `R-19`: the browser half of this — a tab noticing another surface
+    # changed the library, without discarding what the person was typing —
+    # went with `app.js`. The server half above is unchanged and still
+    # tested. The gap is recorded in PROGRESS.md under R-19.
 
 
-class TestDomCap:
-    def test_filtering_stays_over_the_full_arrays(self):
-        """The cap is about layout cost, not about what is searchable: a term
-        in claim 1,500 must still match."""
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        for fn in ("function visibleClaims()", "function visibleSkills()"):
-            body = js.split(fn)[1].split("\n}")[0]
-            assert "state.claims" in body or "state.skills" in body
-            assert "rendered" not in body, "the filter must not know about paging"
-
-    def test_only_a_bounded_number_of_cards_reaches_the_dom(self):
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        assert "const PAGE_SIZE = 100;" in js
-        body = js.split("function renderCards()")[1].split("\n}")[0]
-        assert "slice(0, state.rendered)" in body
-        assert "Show more" in body and "remaining" in body
-
-    def test_changing_the_filter_starts_the_list_over(self):
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        assert js.count("resetPaging()") >= 3
-        assert "function resetPaging()" in js
+# `R-19`: `TestDomCap` went with `app.js`. The new app renders every row it
+# is given and filters in the DOM, so neither half of the old property —
+# a bounded number of cards, and a filter that still sees the ones not
+# rendered — holds today. It is the one place the cutover is a net loss
+# rather than a redesign, it needs a paged API rather than a front-end
+# change, and it is recorded in PROGRESS.md under R-19 rather than left as a
+# test that quietly describes code nobody can run.
 
 
 class TestKeyboard:
-    def test_slash_is_ignored_while_typing_but_the_chord_is_not(self):
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        body = js.split('document.addEventListener("keydown"')[1].split("\n});")[0]
-        assert "isTyping()" in body
-        assert "metaKey || event.ctrlKey" in body
-        typing = js.split("function isTyping()")[1].split("\n}")[0]
-        for tag in ("INPUT", "TEXTAREA", "SELECT"):
-            assert tag in typing
-        assert "isContentEditable" in typing
+    def test_the_chord_focuses_the_bar_from_any_page(self):
+        """§7.1's shortcut is `Ctrl K`, not the old app's bare `/`. A chord
+        cannot be typed into a field by accident, which is why the old
+        `isTyping()` guard has nothing to guard here — but it must still
+        `preventDefault`, or the browser's own Ctrl-K wins."""
+        js = (ROOT / "app" / "static" / "frames.js").read_text()
+        # Anchored on the shell's own handler: several components attach their
+        # own keydown listener, and the first one in the file is a dialog's.
+        body = js[js.index('"Ctrl K focuses the omnibar from any page"') :]
+        body = body[: body.index("\n  });")]
+        assert "event.ctrlKey || event.metaKey" in body
+        assert 'event.key.toLowerCase() === "k"' in body
+        assert "event.preventDefault()" in body
+        assert "omni-input" in body
 
-    def test_escape_closes_one_layer_at_a_time(self):
-        """Escape in an open inspector means close this, not close this *and*
-        throw away what I typed in the bar."""
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        body = js.split('if (event.key === "Escape")')[1].split("return;\n  }")[0]
-        order = [
-            body.index("closeProfile()"),
-            body.index("closeInspector()"),
-            body.index("state.plan = null"),
-        ]
-        assert order == sorted(order), "profile, then inspector, then the bar"
+    # `R-19`: the old `test_escape_closes_one_layer_at_a_time` pinned an
+    # ordering inside one handler. The new app attaches Escape per layer
+    # instead — the dialog closes the dialog, the menu closes the menu — so
+    # there is no single order to assert. The one overlap it leaves (Escape
+    # in a dialog also folds the mobile nav) is noted in PROGRESS.md.
 
 
 class TestRequestHeaderGuard:
@@ -258,10 +238,16 @@ class TestRequestHeaderGuard:
         assert client.get("/api/cards").status_code == 200
 
     def test_the_page_sends_it_on_every_mutation(self):
-        js = (ROOT / "app" / "static" / "app.js").read_text()
-        body = js.split("async function api(")[1].split("\n}")[0]
-        assert '"X-Brain-Request"] = "1"' in body
-        assert '!== "GET"' in body
+        """`R-19`: the same guarantee, in the app that ships now. Both
+        helpers must carry the header — `api()` for reads, `post()` for every
+        mutation, which additionally carries the CSRF token."""
+        js = (ROOT / "app" / "static" / "frames.js").read_text()
+        read = js.split("export async function api(")[1].split("\n}")[0]
+        assert '"X-Brain-Request": "1"' in read
+
+        write = js.split("export async function post(")[1].split("\n}")[0]
+        assert '"X-Brain-Request": "1"' in write
+        assert '"X-Brain-CSRF": csrfToken()' in write
 
     def test_the_api_surface_is_not_cross_origin_callable(self, client):
         """Which is what makes the header unforgeable: setting it forces a
@@ -477,10 +463,26 @@ class TestConsentCard:
         assert 'id="consent-cancel"' in text
 
     def test_it_shares_the_product_stylesheet(self, client):
-        """One definition of `--accent` for the whole product."""
+        """One definition of `--accent` for the whole product.
+
+        `R-19` deleted `app.css`, so the card now loads the app's own token
+        and atom layers plus the few rules only it needs. The property is
+        unchanged: it declares no colour of its own."""
         text = self._page(client).text
-        assert '<link rel="stylesheet" href="/app.css">' in text
+        for sheet in ("/tokens.css", "/atoms.css", "/consent.css"):
+            assert f'<link rel="stylesheet" href="{sheet}">' in text, sheet
+        assert "app.css" not in text
         assert "<style" not in text
+
+        own = (ROOT / "app" / "static" / "consent.css").read_text()
+        assert not re.search(r"#[0-9a-fA-F]{3,6}\b", own), "no raw colour on this page"
+
+    def test_it_does_not_promise_a_feature_that_was_deleted(self, client):
+        """It used to say deletion "takes a human click in this web app,
+        after 30 days in Trash". `R-19` folded Trash into Archive."""
+        text = self._page(client).text
+        assert "Trash" not in text
+        assert "Archive" in text
 
     def test_its_script_is_external_because_the_csp_forbids_inline(self, client):
         text = self._page(client).text
@@ -838,108 +840,9 @@ def journey(journey_server):
     return json.loads(result.stdout)
 
 
-class TestHumanJourneyInABrowser:
-    def test_no_script_errors_anywhere_in_the_journey(self, journey):
-        assert journey["errors"] == [], journey["errors"]
-
-    def test_the_cold_door_is_a_card_and_nothing_else(self, journey):
-        door = journey["door"]
-        assert door["cardVisible"] is True
-        assert door["heading"] == "Sign in to brain"
-        assert door["sidebarHidden"] is True
-        assert door["omniHidden"] is True
-        assert door["points"] == 3
-        assert door["inlineError"] is True, "a bad address is answered on the card"
-
-    def test_the_card_is_painted_from_the_theme_token(self, journey):
-        """Not a hard-coded white, or the dark theme would show a white card."""
-        assert journey["door"]["cardBg"] == "rgb(255, 255, 255)"
-        assert journey["door"]["tokenBg"].upper() == "#FFFFFF"
-
-    def test_signing_up_lands_in_a_workspace_with_the_demo(self, journey):
-        workspace = journey["workspace"]
-        assert workspace["cards"] == 3
-        assert workspace["skills"] == 1
-        assert workspace["conflicts"] >= 1
-        assert workspace["signInGone"] is True
-
-    def test_connect_to_claude_shows_the_link_and_copies_it(self, journey):
-        connect = journey["connect"]
-        assert connect["endsWithMcp"] is True
-        assert connect["clipboard"] == connect["mcpUrl"]
-        assert connect["buttonText"] == "Copied ✓"
-        assert connect["textRestored"] is True, "the copied state is transient"
-        assert connect["closedByEscape"] is True
-
-    def test_the_consent_card_states_the_bargain(self, journey):
-        consent = journey["consent"]
-        assert consent["registerStatus"] == 201
-        assert consent["heading"] == "Connect Claude Desktop to brain"
-        joined = " ".join(consent["grants"])
-        assert "Cannot permanently delete" in joined
-        assert "soft archive only" in joined
-        assert "30 days" in joined
-        assert consent["hasCancel"] is True
-        # Already signed in here, so it does not ask again.
-        assert consent["identity"] is True and consent["emailPrompt"] is False
-        assert consent["theme"] in ("light", "dark", "warm_sunset")
-        assert consent["cardBg"] != "rgba(0, 0, 0, 0)", "the shared stylesheet loaded"
-
-    def test_approving_redirects_to_the_clients_ephemeral_port(self, journey):
-        assert "127.0.0.1:54321" in journey["consent"]["redirected"]
-        assert "code=" in journey["consent"]["redirected"]
-
-    def test_the_client_exchanges_the_code_for_a_30_day_grant(self, journey):
-        exchange = journey["consent"]["exchange"]
-        assert exchange["status"] == 200
-        assert exchange["hasToken"] is True
-        assert exchange["expiresIn"] == 3600
-
-    def test_the_new_session_is_visible_and_revocable_in_profile(self, journey):
-        session = journey["session"]
-        assert session["rows"] == 1
-        assert "Claude Desktop" in session["text"]
-        assert "Expires in 30 days" in session["text"]
-        assert session["hasRevoke"] == 1
-
-    def test_a_background_change_is_picked_up_without_losing_your_place(self, journey):
-        sync = journey["sync"]
-        assert sync["picked"] is True, sync
-        assert sync["filterKept"] is True, "and kept what the user had typed"
-
-    def test_the_xss_canary_never_fires(self, journey):
-        xss = journey["xss"]
-        assert xss["fired"] == "no", "an onerror payload executed"
-        assert xss["imgTags"] == 0, "the payload became a real element"
-        assert xss["visibleAsText"] is True, "it round-tripped and was escaped, not dropped"
-
-    def test_nothing_overflows_at_390_wide(self, journey):
-        failures = [
-            f"{row['where']}: scrollWidth={row['scrollWidth']} offenders={row['offenders']}"
-            for row in journey["mobile"]
-            if row["scrollWidth"] > MOBILE_WIDTH or row["offenders"]
-        ]
-        assert failures == [], "\n".join(failures)
-
-    def test_every_layout_and_state_was_measured_on_the_phone(self, journey):
-        where = {row["where"] for row in journey["mobile"]}
-        assert {"door", "workspace"} <= where
-        for layout in ("B1", "B2", "B3", "merged"):
-            for state in ("happy", "blocked", "zero-match", "first-run", "three-way",
-                          "long-quote", "ingesting", "empty", "offline"):
-                assert f"{layout}/{state}" in where
-
-    def test_the_tuner_starts_collapsed_on_a_phone(self, journey):
-        """160px of dev chrome over the bottom of the page is how a bottom
-        action becomes unreachable."""
-        tuner = journey["tuner"]
-        assert tuner["collapsed"] == "true"
-        assert tuner["handleVisible"] is True
-        assert tuner["height"] <= 40, tuner
-        assert tuner["expandedHeight"] > tuner["height"]
-
-    def test_the_consent_card_is_usable_on_a_phone(self, journey):
-        mobile = journey["consentMobile"]
-        assert mobile["scrollWidth"] <= MOBILE_WIDTH
-        assert mobile["offenders"] == []
-        assert mobile["buttonInView"]["covered"] is False
+# `R-19`: `TestHumanJourneyInABrowser` drove `index.html` through Playwright
+# and went with it. Its replacement is `tests/test_redesign_browser.py`,
+# which drives the app that ships now — written as a replacement rather than
+# a deletion, because this was one of only three suites pytest actually
+# spawned a browser for, and losing it would have left the new app looking
+# fully tested while nothing had ever opened it.

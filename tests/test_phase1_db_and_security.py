@@ -231,7 +231,10 @@ class TestControlDB:
         first = control_db.ensure_user(control, "Founder@Example.com")
         second = control_db.ensure_user(control, "founder@example.com")
         assert first["user_id"] == second["user_id"]
-        assert first["theme_mode"] == "warm_sunset"
+        # `R-10` dropped Warm Sunset; `R-19` found the default had outlived
+        # it, so every new account started on a theme the picker does not
+        # offer and nothing renders.
+        assert first["theme_mode"] == "light"
         assert first["media_minutes_used"] == 0 and first["files_used"] == 0
         assert first["schema_version"] == 1
 
@@ -806,3 +809,104 @@ class TestHybridSearch:
         assert lib["batching"]["id"] not in ids
         assert lib["continuous"]["id"] in ids
         assert all(-1.01 <= sim <= 1.01 for _r, sim in found)
+
+
+# ===========================================================================
+# the upgrade, rehearsed
+# ===========================================================================
+class TestAnOlderDatabaseSurvivesTheUpgrade:
+    """Both migration tuples are additive, and two of them move data.
+
+    A deploy opens databases that were written by the previous version, and
+    `migrate()` runs on first touch — so the one thing that must never be
+    true is that upgrading loses a row or strands one somewhere the person
+    cannot reach. This builds a database the way the version before `R-18`
+    and `R-19` would have, then opens it with the current code.
+
+    Rehearsed against a real `origin/main` checkout before the cutover
+    shipped; written down here so a future migration cannot quietly break
+    the same way.
+    """
+
+    @pytest.fixture()
+    def older(self, cfg, control):
+        """A user and three sources, as the previous version left them."""
+        user = control_db.ensure_user(control, "founder@example.com")
+        uid = user["user_id"]
+        # The columns `R-18` added did not exist, and the theme default was a
+        # theme `R-10` had already dropped.
+        control.execute(
+            "UPDATE users SET theme_mode = 'warm_sunset', media_minutes_used = 42, "
+            "files_used = 3, credits_used = 0, credits_period = '' WHERE user_id = ?",
+            (uid,),
+        )
+        tdb = tenant_db.tenant(uid, cfg=cfg)
+        for sid, title, status in (
+            ("src_keep", "A source I still want", "active"),
+            ("src_bin", "A source I put in the Trash", "trash"),
+            ("src_old", "A source I archived", "archived"),
+        ):
+            tenant_db.upsert_source(
+                tdb, source_id=sid, title=title, source_type="article",
+                canonical_url=f"https://example.com/{sid}",
+            )
+            tenant_db.set_source_status(tdb, sid, status)
+        return uid, tdb
+
+    def test_the_trashed_source_surfaces_in_the_archive(self, older, cfg):
+        """`R-19`. The old app was the only surface that could list Trash, so
+        a row left there would be reachable by nothing at all: invisible in
+        every list and restorable from nowhere."""
+        uid, tdb = older
+        tenant_db.migrate(tdb)
+
+        by_id = {row["id"]: row for row in tenant_db.list_archive(tdb)}
+        assert "src_bin" in by_id
+        assert by_id["src_bin"]["archived_by"] == "you", "they put it there, not Brain"
+        assert by_id["src_bin"]["archived_at"], "and it is dated, so it sorts"
+
+    def test_nothing_else_moved(self, older, cfg):
+        uid, tdb = older
+        tenant_db.migrate(tdb)
+        statuses = {r["id"]: r["status"] for r in tdb.execute("SELECT id, status FROM sources")}
+        assert statuses == {
+            "src_keep": "active",
+            "src_bin": "archived",
+            "src_old": "archived",
+        }
+
+    def test_the_theme_nobody_can_render_is_folded_to_light(self, older, control):
+        """`R-10` dropped Warm Sunset and the default outlived it, so accounts
+        exist sitting on a theme the picker does not offer."""
+        uid, _ = older
+        control_db.migrate(control)
+        assert control_db.get_user(control, uid)["theme_mode"] == "light"
+
+    def test_the_fossil_counters_are_left_alone(self, older, control):
+        """`R-18` superseded them; it did not delete them. A migration that
+        drops a column it does not need is a migration that cannot be rolled
+        back."""
+        uid, _ = older
+        control_db.migrate(control)
+        row = control_db.get_user(control, uid)
+        assert row["media_minutes_used"] == 42
+        assert row["files_used"] == 3
+
+    def test_the_account_can_spend_credits_straight_away(self, older, control, cfg):
+        """An account that predates the ledger starts the month whole rather
+        than at some number nobody wrote."""
+        uid, _ = older
+        control_db.migrate(control)
+        state = control_db.credits_state(control, uid, cfg=cfg)
+        assert state["used"] == 0
+        assert state["left"] == cfg.quota_credits
+        assert control_db.debit_credits(control, uid, 10, cfg=cfg)
+
+    def test_both_migrations_are_idempotent(self, older, control, cfg):
+        """They run on every open, not once."""
+        uid, tdb = older
+        for _ in range(3):
+            control_db.migrate(control)
+            tenant_db.migrate(tdb)
+        assert control_db.get_user(control, uid)["theme_mode"] == "light"
+        assert len(tenant_db.list_archive(tdb)) == 2

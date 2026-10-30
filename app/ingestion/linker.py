@@ -24,6 +24,10 @@ class LinkResult:
     created: list[dict[str, Any]]
     candidates_considered: int
     pairs_classified: int
+    #: `R-18`: the per-job classifier ceiling was reached and the remaining
+    #: pairs were left unclassified. Reported rather than hidden — §6 rule 11,
+    #: a control that cannot keep its promise should say so.
+    truncated: bool = False
 
 
 def link_claims(
@@ -39,10 +43,13 @@ def link_claims(
     created: list[dict[str, Any]] = []
     considered = 0
     classified = 0
+    truncated = False
     seen_pairs: set[tuple[str, str]] = set()
     new_ids = {claim["id"] for claim in new_claims}
 
     for claim in new_claims:
+        if truncated:
+            break
         vector = embeddings.get(claim["id"])
         if vector is None:
             continue
@@ -68,6 +75,15 @@ def link_claims(
             if other["id"] in new_ids and other["id"] < claim["id"]:
                 continue
 
+            # `R-18`: the one unbounded cost in the pipeline. Nothing here
+            # capped the classifier, so a job could spend up to
+            # `claims x link_top_k` LLM calls — at maturity several times the
+            # extraction bill the credit price is derived from. Not a second
+            # meter and not a charge: a ceiling, so the price a person was
+            # quoted stays a loose bound on what their job can actually cost.
+            if classified >= cfg.link_max_calls_per_job:
+                truncated = True
+                break
             classified += 1
             verdict = classifier.classify(_payload(conn, claim), _payload(conn, other))
             if not verdict:
@@ -83,7 +99,12 @@ def link_claims(
                 link["similarity"] = round(float(similarity), 4)
                 created.append(link)
 
-    return LinkResult(created=created, candidates_considered=considered, pairs_classified=classified)
+    return LinkResult(
+        created=created,
+        candidates_considered=considered,
+        pairs_classified=classified,
+        truncated=truncated,
+    )
 
 
 def _payload(conn: sqlite3.Connection, claim: dict[str, Any]) -> dict[str, Any]:
