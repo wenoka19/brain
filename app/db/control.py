@@ -956,6 +956,26 @@ JOB_STEPS: tuple[tuple[str, str], ...] = (
 STEP_KEYS = tuple(key for key, _ in JOB_STEPS)
 STEP_LABELS = dict(JOB_STEPS)
 
+#: Step 2 is named after what the source actually is.
+#:
+#: It was "Transcribing audio" for everything, which on a text file produced a
+#: row reading `Transcribing audio — 300 words read — no audio in this source`:
+#: a label asserting one thing and its own detail denying it in the same
+#: breath. The step always happens — it is how the words come out of the
+#: source — so what changes between source types is the word for it, not
+#: whether it ran.
+TRANSCRIBE_LABELS = {
+    "youtube": "Transcribing audio",
+    "image": "Reading the image",
+}
+TRANSCRIBE_DEFAULT = "Reading the text"
+
+
+def step_label(step: str, source_type: str = "") -> str:
+    if step == "transcribe":
+        return TRANSCRIBE_LABELS.get(source_type, TRANSCRIBE_DEFAULT)
+    return STEP_LABELS.get(step, step)
+
 
 def seed_job_steps(conn: sqlite3.Connection, job_id: str) -> None:
     """Lay all six down as `pending` the moment the job is queued.
@@ -1214,12 +1234,22 @@ def latest_job_for_source(
 
 
 def job_steps(conn: sqlite3.Connection, job_id: str) -> list[dict[str, Any]]:
+    # The source type rides along because step 2's label depends on it: a
+    # text file is not having its audio transcribed.
     rows = conn.execute(
-        "SELECT ordinal, step, state, detail, started_at, finished_at "
-        "FROM job_steps WHERE job_id = ? ORDER BY ordinal",
+        "SELECT s.ordinal, s.step, s.state, s.detail, s.started_at, s.finished_at, "
+        "       COALESCE(j.source_type, '') AS source_type "
+        "FROM job_steps s LEFT JOIN ingestion_jobs j ON j.job_id = s.job_id "
+        "WHERE s.job_id = ? ORDER BY s.ordinal",
         (job_id,),
     ).fetchall()
-    return [{**dict(row), "label": STEP_LABELS[row["step"]]} for row in rows]
+    return [
+        {
+            **{k: v for k, v in dict(row).items() if k != "source_type"},
+            "label": step_label(row["step"], row["source_type"]),
+        }
+        for row in rows
+    ]
 
 
 def claim_next_job(

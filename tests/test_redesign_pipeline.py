@@ -92,15 +92,59 @@ class TestTheLedgerIsTheSixSteps:
 
     def test_a_step_that_does_not_apply_says_so_rather_than_vanishing(self, cfg, user):
         """A list whose length changes with the source type cannot be read at
-        a glance. A PDF has no audio, so step 2 is `skipped` with the reason —
-        still six rows."""
+        a glance, so a step the person turned off is `skipped` with the
+        reason — still six rows."""
+        E.op_update_profile(E.build_context(user["user_id"], surface="web_ui"), want_summary=False)
         job_id, _ = ingest(user, cfg, "https://example.com/an-article")
         rows = steps_of(job_id)
         assert len(rows) == 6
 
-        transcribe = next(s for s in rows if s["step"] == "transcribe")
-        assert transcribe["state"] == "skipped"
-        assert "no audio" in transcribe["detail"]
+        summarise = next(s for s in rows if s["step"] == "summarise")
+        assert summarise["state"] == "skipped"
+        assert "settings" in summarise["detail"]
+
+    def test_step_two_is_named_after_what_the_source_is(self, cfg, user):
+        """It was "Transcribing audio" for every source, so a text file got a
+        row denying its own label: `Transcribing audio — 300 words read — no
+        audio in this source`. The step always runs, because it is how a
+        source becomes words; only the word for it changes."""
+        video, _ = ingest(user, cfg, YOUTUBE)
+        article, _ = ingest(user, cfg, "https://example.com/an-article")
+
+        def step_two(job_id):
+            return next(s for s in steps_of(job_id) if s["step"] == "transcribe")
+
+        assert step_two(video)["label"] == "Transcribing audio"
+        assert step_two(video)["detail"].endswith("words captured")
+
+        assert step_two(article)["label"] == "Reading the text"
+        assert step_two(article)["detail"].endswith("words read")
+        assert "audio" not in step_two(article)["label"].lower()
+        assert "audio" not in step_two(article)["detail"].lower()
+
+    def test_an_image_is_described_rather_than_read_or_transcribed(self, cfg, user, tmp_path):
+        """Its words come from a vision model looking at it, which is neither
+        of the other two."""
+        path = tmp_path / "chart.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 512)
+        ctx = E.build_context(user["user_id"], surface="web_ui")
+        queued = E.op_ingest_file(ctx, path)
+        E.run_pending_jobs_sync(user["user_id"], cfg=cfg)
+
+        step = next(s for s in steps_of(queued.data["job_id"]) if s["step"] == "transcribe")
+        assert step["label"] == "Reading the image"
+        assert step["detail"].endswith("words described")
+
+    def test_the_interjection_reply_names_the_steps_the_same_way(self, cfg, user):
+        """§7.2 lists what a note will still reach. Two different names for
+        one step, depending on which screen you are looking at, is how a
+        person stops trusting either."""
+        ctx = E.build_context(user["user_id"], surface="web_ui")
+        queued = E.op_ingest_source(ctx, "https://example.com/an-article")
+        reply = E.op_add_instruction(ctx, queued.data["source_id"], "focus on pricing")
+        named = reply.data["will_affect"] + reply.data["already_done"]
+        assert "Reading the text" in named
+        assert "Transcribing audio" not in named
 
     def test_no_step_is_a_placeholder_any_more(self, cfg, user):
         """All six have a producer now, and this is the assertion that says so.

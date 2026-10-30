@@ -1165,22 +1165,20 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
         control, job_id, "read", detail=_step_detail_read(job, content)
     )
 
-    # ---- step 2: transcribing audio ---------------------------------------
-    # The same fetch produced it, so there is no second call to make: what the
-    # person is told is what actually happened. A source with no spoken audio
-    # says so rather than claiming a transcription that never ran.
+    # ---- step 2: getting the words out of the source ----------------------
+    # The same fetch produced them, so there is no second call to make: what
+    # the person is told is what actually happened. The step runs for every
+    # source — it is how a source becomes words — so it is the *word* for it
+    # that changes, not whether it ran. It used to be "Transcribing audio"
+    # for everything, and a text file got a row that denied its own label:
+    # `Transcribing audio — 300 words read — no audio in this source`.
     control_db.start_step(control, job_id, "transcribe")
     words = len(content.full_text.split())
-    if job["source_type"] == "youtube":
-        control_db.finish_step(
-            control, job_id, "transcribe", detail=f"{words:,} words captured"
-        )
-    else:
-        control_db.finish_step(
-            control, job_id, "transcribe",
-            detail=f"{words:,} words read — no audio in this source",
-            state="skipped",
-        )
+    captured = {
+        "youtube": f"{words:,} words captured",
+        "image": f"{words:,} words described",
+    }.get(job["source_type"], f"{words:,} words read")
+    control_db.finish_step(control, job_id, "transcribe", detail=captured)
 
     # A GitHub markdown file is usually a `SKILL.md` — procedural text the user
     # intends to *run*. Unlike a transcript, which is only ever quoted back
@@ -2770,8 +2768,12 @@ def op_add_instruction(ctx: Context, source_id: str, text: str) -> OpResult:
             "job_id": job["job_id"],
             "instruction": instruction,
             # What the note will reach, and what it is too late for.
-            "will_affect": [control_db.STEP_LABELS.get(step, step) for step in pending],
-            "already_done": [control_db.STEP_LABELS.get(step, step) for step in done],
+            "will_affect": [
+                control_db.step_label(step, job["source_type"]) for step in pending
+            ],
+            "already_done": [
+                control_db.step_label(step, job["source_type"]) for step in done
+            ],
         },
     )
 
