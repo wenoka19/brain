@@ -227,12 +227,14 @@ class TestTheUsageScreenSaysNothingAboutStorage:
         ctx = E.build_context(user["user_id"], surface="web_ui")
         usage = E.op_activity(ctx).data["usage"]
         assert "storage" not in usage
-        assert set(usage) == {"sources", "minutes", "calls"}
+        assert set(usage) == {"sources", "credits", "calls"}
         for key, meter in usage.items():
             # Not a ban on byte-valued meters for all time — a ban on the one
             # the ruling was about. A future byte meter would have to argue
             # with `R-17` to get past this line, which is the point.
             assert meter["unit"] != "bytes", f"{key} reports bytes"
+        # `R-18` replaced the minutes meter with credits; storage stayed out.
+        assert usage["credits"]["unit"] == "credits"
 
     def test_the_engine_no_longer_stats_the_tenant_database(self):
         """It used to report `path.stat().st_size`. If that returns, so does

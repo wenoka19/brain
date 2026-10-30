@@ -45,8 +45,16 @@ CREATE TABLE IF NOT EXISTS users (
     about_you_context  TEXT NOT NULL DEFAULT '',
     theme_mode         TEXT NOT NULL DEFAULT 'warm_sunset'
                        CHECK (theme_mode IN ('light','dark','warm_sunset')),
+    -- `R-18` fossils. Credits replaced them; neither MIGRATIONS tuple has a
+    -- DROP precedent and a column nothing reads costs nothing, so they stay
+    -- rather than being removed from under an existing control.db.
     media_minutes_used INTEGER NOT NULL DEFAULT 0,
     files_used         INTEGER NOT NULL DEFAULT 0,
+    -- `R-18`: the one allowance. Characters of source text, spent at the
+    -- gate in `_ingest_content`, reset on the first of the month.
+    credits_used       INTEGER NOT NULL DEFAULT 0,
+    credits_period     TEXT NOT NULL DEFAULT '',
+    keep_uploads       INTEGER NOT NULL DEFAULT 1,
     schema_version     INTEGER NOT NULL DEFAULT 1,
     created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -78,6 +86,10 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
     error_message    TEXT NOT NULL DEFAULT '',
     reserved_minutes INTEGER NOT NULL DEFAULT 0,
     reserved_files   INTEGER NOT NULL DEFAULT 0,
+    -- `R-18`: what this job actually spent. It is what makes a retry charge
+    -- once and a refund exact — both read it from the ROW, never from the
+    -- job dict, which a worker holds as a stale in-memory copy.
+    charged_credits  INTEGER NOT NULL DEFAULT 0,
     claims_extracted INTEGER NOT NULL DEFAULT 0,
     attempts         INTEGER NOT NULL DEFAULT 0,
     locked_until     DATETIME,
@@ -281,6 +293,18 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("audit_logs", "payload_bytes", "ALTER TABLE audit_logs ADD COLUMN payload_bytes INTEGER"),
     ("audit_logs", "result_summary", "ALTER TABLE audit_logs ADD COLUMN result_summary TEXT NOT NULL DEFAULT ''"),
     ("audit_logs", "connection_id", "ALTER TABLE audit_logs ADD COLUMN connection_id TEXT NOT NULL DEFAULT ''"),
+    # `R-18` — credits replace media minutes as the account's one allowance.
+    # `credits_period` is the `YYYY-MM` the counter belongs to; a read in a
+    # later month zeroes it. Storing the period rather than a reset timestamp
+    # means no cron, no worker and no clock skew: the month a row names is
+    # either this one or it is not.
+    ("users", "credits_used", "ALTER TABLE users ADD COLUMN credits_used INTEGER NOT NULL DEFAULT 0"),
+    ("users", "credits_period", "ALTER TABLE users ADD COLUMN credits_period TEXT NOT NULL DEFAULT ''"),
+    ("ingestion_jobs", "charged_credits", "ALTER TABLE ingestion_jobs ADD COLUMN charged_credits INTEGER NOT NULL DEFAULT 0"),
+    # `R-18`'s opt-out. On by default, because the 30-day window exists so a
+    # failed read can be looked at — turning it off is the person choosing to
+    # give that up, not a default imposed on them.
+    ("users", "keep_uploads", "ALTER TABLE users ADD COLUMN keep_uploads INTEGER NOT NULL DEFAULT 1"),
 )
 
 
@@ -390,6 +414,7 @@ def update_profile(
     want_summary: bool | None = None,
     want_rules: bool | None = None,
     want_skills: bool | None = None,
+    keep_uploads: bool | None = None,
     write_in: str | None = None,
 ) -> dict[str, Any] | None:
     """Write the fields §7.13 lets the person change.
@@ -424,6 +449,7 @@ def update_profile(
         ("want_summary", want_summary),
         ("want_rules", want_rules),
         ("want_skills", want_skills),
+        ("keep_uploads", keep_uploads),
     ):
         if value is not None:
             sets.append(f"{name} = ?")
@@ -435,7 +461,191 @@ def update_profile(
 
 
 # ---------------------------------------------------------------------------
-# quotas  (reserved up-front, released when a job fails)
+# credits  (`R-18`) — the account's one allowance
+# ---------------------------------------------------------------------------
+# Characters of source text, spent at the single gate in `_ingest_content`
+# and reset on the first of the month.
+#
+# **Why a debit and not a reservation.** The quota machinery this replaces
+# reserved up-front and released on failure, which it had to: minutes were
+# guessable before the fetch (a flat provisional 15 for YouTube, nothing at
+# all for an article). Characters are not guessable — `normalize_url` knows
+# no duration, no byte count and no page count — but they ARE exactly known
+# the moment the fetch returns, which is still before every LLM call. So
+# there is nothing to reserve: one atomic debit at the one line where the
+# number is real, with the ceiling inside the `WHERE` clause so two
+# concurrent jobs cannot both cross it.
+#
+# **Why the period is a string and not a timestamp.** `credits_period` holds
+# the `YYYY-MM` the counter belongs to. A read in a later month zeroes it in
+# passing. No cron, no worker, no scheduled reset to miss during a redeploy,
+# and no clock-skew window: the month a row names is either this one or it
+# is not.
+
+
+def current_period(now: datetime | None = None) -> str:
+    """The `YYYY-MM` a charge belongs to. UTC, so it turns over once."""
+    return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+
+
+def _roll_period(conn: sqlite3.Connection, user_id: str, period: str) -> None:
+    """Zero the counter if it belongs to a month that is over. Idempotent."""
+    conn.execute(
+        "UPDATE users SET credits_used = 0, credits_period = ? "
+        "WHERE user_id = ? AND credits_period IS NOT ?",
+        (period, user_id, period),
+    )
+
+
+def credits_state(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    cfg: Settings | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Used, cap and left — after rolling the month if it has turned over."""
+    cfg = cfg or settings()
+    period = current_period(now)
+    with transaction(conn):
+        _roll_period(conn, user_id, period)
+        row = conn.execute(
+            "SELECT COALESCE(credits_used, 0) AS used FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    used = int(row["used"]) if row else 0
+    return {
+        "used": used,
+        "cap": cfg.quota_credits,
+        "left": max(0, cfg.quota_credits - used),
+        "period": period,
+    }
+
+
+def credits_left(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    cfg: Settings | None = None,
+    now: datetime | None = None,
+) -> int:
+    return credits_state(conn, user_id, cfg=cfg, now=now)["left"]
+
+
+def debit_credits(
+    conn: sqlite3.Connection,
+    user_id: str,
+    credits: int,
+    *,
+    cfg: Settings | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Spend `credits`, or return False and spend nothing.
+
+    The ceiling lives in the `WHERE` clause, so the check and the write are
+    one statement and two workers racing the same account cannot both pass.
+    A negative is clamped rather than trusted: the quota function this
+    replaces guarded with `if minutes and ...`, which a negative slipped
+    straight through as a silent refund.
+    """
+    cfg = cfg or settings()
+    credits = max(0, int(credits))
+    period = current_period(now)
+    with transaction(conn):
+        _roll_period(conn, user_id, period)
+        cursor = conn.execute(
+            "UPDATE users SET credits_used = credits_used + ? "
+            "WHERE user_id = ? AND credits_used + ? <= ?",
+            (credits, user_id, credits, cfg.quota_credits),
+        )
+        return cursor.rowcount == 1
+
+
+def refund_credits(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    credits: int,
+    now: datetime | None = None,
+) -> None:
+    """Give back exactly what a job charged, because a failure costs nothing.
+
+    The month is rolled first, which handles the one awkward case for free: a
+    job charged on the 31st and failed on the 1st refunds into a counter that
+    is already zero, and `MAX(0, ...)` leaves it there. The person starts the
+    new month whole either way.
+    """
+    credits = max(0, int(credits))
+    if not credits:
+        return
+    with transaction(conn):
+        _roll_period(conn, user_id, current_period(now))
+        conn.execute(
+            "UPDATE users SET credits_used = MAX(0, credits_used - ?) WHERE user_id = ?",
+            (credits, user_id),
+        )
+
+
+def set_job_charge(conn: sqlite3.Connection, job_id: str, credits: int) -> None:
+    conn.execute(
+        "UPDATE ingestion_jobs SET charged_credits = ? WHERE job_id = ?",
+        (max(0, int(credits)), job_id),
+    )
+
+
+def job_charge(conn: sqlite3.Connection, job_id: str) -> int:
+    """What this job spent, read from the ROW.
+
+    Never from the job dict a worker is holding: that is an in-memory copy
+    taken at claim time, and the charge is written after it.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(charged_credits, 0) AS c FROM ingestion_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def reap_exhausted_jobs(
+    conn: sqlite3.Connection, *, user_id: str | None = None, max_attempts: int = 3
+) -> list[dict[str, Any]]:
+    """Fail the jobs nothing will ever claim again, and refund what they spent.
+
+    `claim_next_job` filters on `attempts < max_attempts`, so a job that
+    crashed its last attempt simply stops being selected: it keeps a
+    non-terminal status forever and nothing ever runs the code that would
+    give its charge back. Before credits that leaked a reservation quietly;
+    with credits it would leak the person's allowance, which they can see.
+
+    So the reap runs at the top of every drain, which is the only loop
+    guaranteed to exist wherever jobs are processed at all.
+    """
+    where = "status NOT IN ('ready','failed','blocked_by_platform') AND attempts >= ?"
+    params: list[Any] = [max_attempts]
+    if user_id is not None:
+        where += " AND user_id = ?"
+        params.append(user_id)
+    rows = conn.execute(
+        f"SELECT job_id, user_id, COALESCE(charged_credits, 0) AS charged "
+        f"FROM ingestion_jobs WHERE {where}",
+        params,
+    ).fetchall()
+    reaped = []
+    for row in rows:
+        set_job_status(
+            conn,
+            row["job_id"],
+            "failed",
+            error_message="Brain tried this three times and could not finish it.",
+            error_reason="attempts_exhausted",
+        )
+        refund_credits(conn, row["user_id"], credits=row["charged"])
+        reaped.append({"job_id": row["job_id"], "refunded": int(row["charged"])})
+    return reaped
+
+
+# ---------------------------------------------------------------------------
+# quotas  (`R-18` fossils — superseded by credits above)
 # ---------------------------------------------------------------------------
 class QuotaExceeded(Exception):
     def __init__(self, kind: str, used: int, cap: int, requested: int) -> None:
@@ -839,6 +1049,29 @@ def list_jobs(
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def charged_jobs(
+    conn: sqlite3.Connection, user_id: str, *, limit: int = 10, period: str | None = None
+) -> list[dict[str, Any]]:
+    """`R-18`: what this account's credits were spent on, dearest first.
+
+    Scoped to the current period by default, because that is the one the
+    meter above it is counting — a list that spans months under a monthly
+    meter would not add up to what the meter says.
+    """
+    period = period or current_period()
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT job_id, source_id, source_type, charged_credits, created_at "
+            "FROM ingestion_jobs "
+            "WHERE user_id = ? AND charged_credits > 0 "
+            "  AND strftime('%Y-%m', created_at) = ? "
+            "ORDER BY charged_credits DESC, rowid DESC LIMIT ?",
+            (user_id, period, max(1, min(limit, 50))),
+        ).fetchall()
+    ]
+
+
 def count_active_jobs(conn: sqlite3.Connection, user_id: str) -> int:
     """Jobs that are queued or mid-pipeline — the Omni-Bar / receipt counter."""
     placeholders = ",".join("?" * len(TERMINAL_STATUSES))
@@ -861,12 +1094,19 @@ def ingestion_defaults(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]
         "SELECT COALESCE(want_summary, 1) AS want_summary, "
         "       COALESCE(want_rules, 1) AS want_rules, "
         "       COALESCE(want_skills, 1) AS want_skills, "
+        "       COALESCE(keep_uploads, 1) AS keep_uploads, "
         "       COALESCE(write_in, 'source') AS write_in "
         "FROM users WHERE user_id = ?",
         (user_id,),
     ).fetchone()
     if row is None:
-        return {"want_summary": 1, "want_rules": 1, "want_skills": 1, "write_in": "source"}
+        return {
+            "want_summary": 1,
+            "want_rules": 1,
+            "want_skills": 1,
+            "keep_uploads": 1,
+            "write_in": "source",
+        }
     return dict(row)
 
 

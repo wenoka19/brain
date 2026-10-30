@@ -893,7 +893,9 @@ class TestEngineIngestion:
             assert result.error_message
         assert control_db.list_jobs(ctx.control, ctx.user_id) == []
 
-    def test_a_failed_job_releases_the_quota_it_reserved(self, ctx):
+    def test_a_fetch_that_fails_costs_no_credits(self, ctx):
+        """`R-18`. The fetch is free — the charge happens after it, at the
+        gate — so a source that never arrives has nothing to give back."""
         class Failing:
             def fetch_url(self, target, *, cfg):
                 raise ProviderError("no_transcript", "That video has no captions.")
@@ -902,15 +904,43 @@ class TestEngineIngestion:
                 raise ProviderError("no_transcript", "n/a")
 
         E.op_ingest_source(ctx, YOUTUBE_URL)
-        before = control_db.get_user(ctx.control, ctx.user_id)["media_minutes_used"]
-        assert before > 0  # a provisional reservation was taken
+        assert control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"] == 0
 
         ctx.prov.fetcher = Failing()
         processed = E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
         assert processed[0]["status"] == "failed"
         assert "no captions" in processed[0]["message"]
-        after = control_db.get_user(ctx.control, ctx.user_id)["media_minutes_used"]
-        assert after == 0, "a failure must not cost the user quota"
+        assert control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"] == 0
+
+    def test_a_job_that_fails_after_the_gate_is_refunded_exactly(self, ctx):
+        """The harder half: the charge is already taken when the failure
+        happens, so something has to give it back — and give back exactly
+        what was taken, read from the job row rather than recomputed."""
+        E.op_ingest_source(ctx, YOUTUBE_URL)
+        E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
+        charged = control_db.list_jobs(ctx.control, ctx.user_id)[0]["charged_credits"]
+        assert charged > 0
+        assert control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"] == charged
+
+        # Fail the same job the way `finish` would, after the gate.
+        job = control_db.list_jobs(ctx.control, ctx.user_id)[0]
+        control_db.refund_credits(
+            ctx.control, ctx.user_id, credits=control_db.job_charge(ctx.control, job["job_id"])
+        )
+        assert control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"] == 0
+
+    def test_a_retry_charges_once(self, ctx):
+        """`charged_credits` on the row is what makes this true: a second
+        pass through the gate sees the job has already paid."""
+        E.op_ingest_source(ctx, YOUTUBE_URL)
+        E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
+        once = control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"]
+        assert once > 0
+
+        job = control_db.list_jobs(ctx.control, ctx.user_id)[0]
+        control_db.set_job_status(ctx.control, job["job_id"], "queued")
+        E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
+        assert control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"] == once
 
     def test_a_platform_block_is_reported_distinctly(self, ctx):
         class Blocked:
@@ -924,14 +954,25 @@ class TestEngineIngestion:
         ctx.prov.fetcher = Blocked()
         assert E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)[0]["status"] == "blocked_by_platform"
 
-    def test_real_duration_reconciles_the_provisional_reservation(self, ctx):
+    def test_queueing_charges_nothing_and_the_gate_charges_the_real_text(self, ctx):
+        """`R-18` replaced the provisional reservation with a single debit at
+        the one line where the number is real. A queued job has spent
+        nothing; a finished one has spent exactly the characters its text
+        chunked to."""
         E.op_ingest_source(ctx, YOUTUBE_URL)
-        provisional = control_db.get_user(ctx.control, ctx.user_id)["media_minutes_used"]
+        assert control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"] == 0
+
         E.run_pending_jobs_sync(ctx.user_id, cfg=ctx.cfg)
-        actual = control_db.get_user(ctx.control, ctx.user_id)["media_minutes_used"]
-        # The fixture video is 1860s = 31 minutes, not the 15 provisionally booked.
-        assert provisional == 15
-        assert actual == 31
+        used = control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)["used"]
+
+        from app.ingestion.extractor import chunk_content
+        from app.ingestion.providers import providers
+
+        content = providers(ctx.cfg).fetcher.fetch_url(
+            gatekeeper.normalize_url(YOUTUBE_URL, cfg=ctx.cfg), cfg=ctx.cfg
+        )
+        expected = sum(len(c.text) for c in chunk_content(content))
+        assert used == expected, "billed the text the extractor actually chunks"
 
     def test_a_video_over_the_ceiling_fails_at_the_duration_gate(self, ctx):
         class TooLong:
@@ -1281,14 +1322,48 @@ class TestEngineContext:
         result = E.op_ingest_source(ctx, YOUTUBE_URL, run_now=True)
         assert result.data["processed"][0]["status"] == "ready"
 
-    def test_the_media_quota_blocks_a_new_ingestion(self, ctx, cfg):
-        control_db.reserve_quota(ctx.control, ctx.user_id, minutes=cfg.quota_media_minutes)
+    def test_a_spent_balance_blocks_a_new_url(self, ctx, cfg):
+        """A URL can only be checked against an empty balance, never a price:
+        nothing knows a link's size before fetching it."""
+        control_db.debit_credits(ctx.control, ctx.user_id, cfg.quota_credits, cfg=cfg)
         result = E.op_ingest_source(ctx, YOUTUBE_URL)
-        assert not result.ok and result.error_reason == "quota_exceeded"
-        assert "300" in result.error_message
+        assert not result.ok and result.error_reason == "out_of_credits"
+        assert f"{cfg.quota_credits:,}" in result.error_message
+        assert "first" in result.error_message, "says when they come back"
 
-    def test_the_file_quota_blocks_a_new_upload(self, ctx, cfg, tmp_path):
-        control_db.reserve_quota(ctx.control, ctx.user_id, files=cfg.quota_files)
+    def test_an_upload_is_refused_at_the_button_with_its_real_price(self, ctx, cfg, tmp_path):
+        """The one case where the price IS knowable before the work: the
+        bytes are already on local disk and parsing them costs no LLM call.
+        So the person is told the number instead of finding out from a failed
+        job minutes later."""
         path = tmp_path / "n.txt"
-        path.write_text("some notes")
-        assert E.op_ingest_file(ctx, path).error_reason == "quota_exceeded"
+        path.write_text("some notes that are long enough to chunk into something" * 20)
+
+        from app.ingestion import gatekeeper as gk
+
+        price = E._upload_price(gk.validate_file(path, cfg=cfg), cfg=cfg)
+        assert price > 0
+
+        control_db.debit_credits(ctx.control, ctx.user_id, cfg.quota_credits - price + 1, cfg=cfg)
+        result = E.op_ingest_file(ctx, path)
+        assert not result.ok and result.error_reason == "out_of_credits"
+        assert f"{price:,}" in result.error_message, "the real number, not a guess"
+
+    def test_an_image_has_no_price_until_it_is_read(self, ctx, cfg, tmp_path):
+        """Honest `None`, not a guessed flat rate. The vision call IS the
+        fetch, so an image has no characters until the money is spent — and
+        the overdraw is bounded by one response."""
+        path = tmp_path / "shot.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 256)
+
+        from app.ingestion import gatekeeper as gk
+
+        assert E._upload_price(gk.validate_file(path, cfg=cfg), cfg=cfg) is None
+
+    def test_a_file_over_the_precount_ceiling_has_no_price_either(self, ctx, cfg, tmp_path):
+        path = tmp_path / "big.txt"
+        path.write_text("x" * (cfg.credit_precount_max_bytes + 1))
+
+        from app.ingestion import gatekeeper as gk
+
+        assert E._upload_price(gk.validate_file(path, cfg=cfg), cfg=cfg) is None

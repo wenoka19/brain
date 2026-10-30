@@ -102,7 +102,16 @@ class TestTheArchive:
 class TestTheProfileWritesWhatThePipelineReads:
     def test_the_defaults_are_everything_on(self, cfg, user, control):
         wants = control_db.ingestion_defaults(control, user["user_id"])
-        assert wants == {"want_summary": 1, "want_rules": 1, "want_skills": 1, "write_in": "source"}
+        assert wants == {
+            "want_summary": 1,
+            "want_rules": 1,
+            "want_skills": 1,
+            # `R-18`: on by default. The 30-day window exists so a failed
+            # read can be looked at; turning it off is the person choosing
+            # to give that up, not a default imposed on them.
+            "keep_uploads": 1,
+            "write_in": "source",
+        }
 
     def test_a_switch_that_is_off_actually_stops_the_work(self, cfg, user, control):
         """§9.1: "Steps 3-5 honour the person's ingestion defaults." Three

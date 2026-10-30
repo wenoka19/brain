@@ -26,7 +26,7 @@ from app.db import control as control_db
 from app.db import tenant as tenant_db
 from app.db.search import SearchResults, hybrid_search
 from app.ingestion import gatekeeper
-from app.ingestion.extractor import extract_grounded_claims
+from app.ingestion.extractor import chunk_content, extract_grounded_claims
 from app.ingestion.gatekeeper import GatekeeperError
 from app.ingestion.linker import link_claims
 from app.ingestion.providers import FetchedContent, ProviderError, Providers, providers
@@ -388,20 +388,20 @@ def op_ingest_source(
             },
         )
 
-    # Media minutes are only reserved once the real duration is known, so a
-    # queued YouTube job books a provisional slot it can give back.
-    reserved_minutes = 0
-    if target.source_type == "youtube":
-        reserved_minutes = min(ctx.cfg.max_media_minutes, 15)
-        try:
-            control_db.reserve_quota(ctx.control, ctx.user_id, minutes=reserved_minutes, cfg=ctx.cfg)
-        except control_db.QuotaExceeded as exc:
-            ctx.audit("ingest_source", "quota_exceeded", detail={"kind": exc.kind})
-            return _fail(
-                "ingest_source",
-                "quota_exceeded",
-                f"You have used {exc.used} of your {exc.cap} media minutes.",
-            )
+    # `R-18`: a URL can only be checked against an empty balance here, never
+    # against a price. `normalize_url` knows no duration, no byte count and
+    # no page count — `NormalizedTarget.estimated_minutes` is a field nothing
+    # in the repo ever assigns — so the real charge waits for the gate in
+    # `_ingest_content`, after the fetch. What this catches is the case worth
+    # catching: a spent account queueing work that is certain to be refused.
+    if control_db.credits_left(ctx.control, ctx.user_id, cfg=ctx.cfg) <= 0:
+        ctx.audit("ingest_source", "out_of_credits")
+        return _fail(
+            "ingest_source",
+            "out_of_credits",
+            f"Your {ctx.cfg.quota_credits:,} credits for this month are spent. "
+            f"They come back on the first.",
+        )
 
     source_id = control_db.new_id("src")
 
@@ -430,7 +430,6 @@ def op_ingest_source(
         input_target=target.canonical_url,
         source_type=target.source_type,
         user_note=clean_text(user_note or "")[:2000],
-        reserved_minutes=reserved_minutes,
     )
     ctx.audit("ingest_source", "queued", target_id=job["job_id"], detail={"url": target.canonical_url})
 
@@ -454,33 +453,95 @@ def op_ingest_source(
     return result
 
 
+def _upload_price(validated, *, cfg: Settings) -> int | None:
+    """What this upload will cost, or None when it cannot be known yet.
+
+    None for an image (the vision call *is* the fetch, so there are no
+    characters to count until the money is spent — bounded at one response,
+    so the overdraw is a few credits against the thousands a text file can
+    cost), for a file over the pre-count ceiling, and for anything the local
+    parsers cannot open. Never a guess: a number here is the same number the
+    gate will charge, counted the same way, or there is no number.
+    """
+    from app.ingestion import fetchers
+
+    if validated.source_type == "image" or validated.size_bytes > cfg.credit_precount_max_bytes:
+        return None
+    parse = {
+        "text": fetchers.parse_text_file,
+        "pdf": fetchers.parse_pdf_file,
+        "docx": fetchers.parse_docx_file,
+    }.get(validated.source_type)
+    if parse is None:
+        return None
+    try:
+        content = parse(validated, cfg=cfg)
+    except Exception:
+        # A file the parser chokes on is the fetch's problem to report, with
+        # its own remedy. Pricing is not the place to turn that into a
+        # different error.
+        return None
+    billable = sum(len(chunk.text) for chunk in chunk_content(content))
+    return math.ceil(billable / max(1, cfg.credit_chars))
+
+
 def op_ingest_file(
     ctx: Context, path: str | Path, *, filename: str | None = None, user_note: str | None = None
 ) -> OpResult:
-    """Queue an uploaded file (web surface only — never exposed over MCP)."""
+    """Queue an uploaded file (web surface only — never exposed over MCP).
+
+    `R-18`: every path out of here that does *not* queue a job has to let go
+    of the staged bytes itself. Only a job row maps a source back to its
+    file, so a refusal or a duplicate leaves one nothing in the product can
+    reach — the 30-day sweep would eventually get it, but a person who asked
+    Brain not to keep their files should not have to wait out a window they
+    turned off.
+    """
+    def _drop_unqueued() -> None:
+        _release_upload(
+            ctx.control, ctx.user_id, {"input_target": str(path)}, cfg=ctx.cfg
+        )
+
     try:
         validated = gatekeeper.validate_file(path, filename=filename, cfg=ctx.cfg)
     except GatekeeperError as exc:
         ctx.audit("ingest_file", "rejected", detail={"reason": exc.reason})
+        _drop_unqueued()
         return _fail("ingest_file", exc.reason, exc.message)
 
     existing = tenant_db.find_source_by_hash(ctx.tenant, validated.content_hash)
     if existing:
         ctx.audit("ingest_file", "duplicate", target_id=existing["id"])
+        _drop_unqueued()
         return OpResult(
             ok=True,
             action="ingest_file",
             data={"duplicate": True, "source_id": existing["id"], "title": existing["title"]},
         )
 
-    try:
-        control_db.reserve_quota(ctx.control, ctx.user_id, files=1, cfg=ctx.cfg)
-    except control_db.QuotaExceeded as exc:
-        ctx.audit("ingest_file", "quota_exceeded", detail={"kind": exc.kind})
+    # `R-18`: an upload is the one case where the price can be known at the
+    # button. The bytes are already on local disk and parsing them is pure
+    # Python, so a file that cannot be afforded is refused with the real
+    # number instead of the person discovering it in a failed job minutes
+    # later. Above `credit_precount_max_bytes` the parse would cost more
+    # latency than the honesty is worth, and an image has no characters at
+    # all until the vision call — both fall through to the empty-balance
+    # check and let the gate decide.
+    left = control_db.credits_left(ctx.control, ctx.user_id, cfg=ctx.cfg)
+    price = _upload_price(validated, cfg=ctx.cfg)
+    if (price is not None and price > left) or (price is None and left <= 0):
+        ctx.audit("ingest_file", "out_of_credits", detail={"price": price})
+        _drop_unqueued()
         return _fail(
             "ingest_file",
-            "quota_exceeded",
-            f"You have used {exc.used} of your {exc.cap} file slots.",
+            "out_of_credits",
+            (
+                f"`{validated.filename}` needs {price:,} credits and you have "
+                f"{left:,} left this month. They come back on the first."
+                if price is not None
+                else f"Your {ctx.cfg.quota_credits:,} credits for this month are spent. "
+                f"They come back on the first."
+            ),
         )
 
     source_id = control_db.new_id("src")
@@ -491,7 +552,6 @@ def op_ingest_file(
         input_target=str(validated.path),
         source_type=validated.source_type,
         user_note=clean_text(user_note or "")[:2000],
-        reserved_files=1,
     )
     ctx.audit("ingest_file", "queued", target_id=job["job_id"], detail={"file": validated.filename})
     return OpResult(
@@ -1041,13 +1101,18 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
                 tenant_db.set_source_status(
                     tenant_db.tenant(user_id, cfg=cfg), job["source_id"], "blocked"
                 )
-            # Give back whatever the queue booked, so a failure costs no quota.
-            control_db.release_quota(
-                control,
-                user_id,
-                minutes=job["reserved_minutes"],
-                files=job["reserved_files"],
+            # `R-18`: a failure costs nothing. Read from the row, not from
+            # `job`, which is the copy a worker took at claim time — the
+            # charge was written after it.
+            control_db.refund_credits(
+                control, user_id, credits=control_db.job_charge(control, job_id)
             )
+        # `R-18`'s opt-out, on every terminal exit — success and failure
+        # alike. `finish` is the single one: `process_job` returns through it
+        # from every fetch failure and hands the same closure to
+        # `_ingest_content` for the success path, and `claim_next_job` never
+        # re-leases a terminal job, so nothing can need the file afterwards.
+        _release_upload(control, user_id, job, cfg=cfg)
         control_db.audit(
             control,
             user_id=user_id,
@@ -1142,33 +1207,90 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
     return _ingest_content(job, content, cfg=cfg, finish=finish)
 
 
+def _release_upload(control, user_id: str, job: dict[str, Any], *, cfg: Settings) -> bool:
+    """Delete the received file now, if the person asked not to keep it.
+
+    `R-18`. The default is to keep it for `upload_retention_days`, because
+    the reason for the window is that a failed read can be looked at. Turning
+    the switch off is the person giving that up on purpose, so this runs on
+    the failure path too — a file they asked not to keep is not kept because
+    Brain had trouble with it.
+
+    The path comes from `ingestion_jobs.input_target`, which is free text and
+    holds a URL for link sources, so it is checked for containment inside the
+    person's own uploads folder before anything is unlinked. That check is
+    what stops a crafted or stale `input_target` from reaching a file that is
+    not theirs — or not an upload at all.
+    """
+    target = str(job.get("input_target") or "")
+    if not target:
+        return False
+    try:
+        if control_db.ingestion_defaults(control, user_id).get("keep_uploads", 1):
+            return False
+        path = Path(target).resolve()
+        if not path.is_relative_to(cfg.uploads_dir_for(user_id).resolve()):
+            return False
+        path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        # Housekeeping. A file that will not delete is swept in 30 days
+        # anyway, and must not turn a finished job into a failed one.
+        return False
+    return True
+
+
 def _ingest_content(job, content, *, cfg, finish):
-    """Everything after a successful fetch: reconcile quota, store, extract,
-    ground, link. Shared by the normal pipeline and by a rescue."""
+    """Everything after a successful fetch: charge, store, extract, ground,
+    link. Shared by the normal pipeline and by a rescue."""
     control = control_db.control()
     user_id = job["user_id"]
     tdb = tenant_db.tenant(user_id, cfg=cfg)
     prov = providers(cfg)
     job_id = job["job_id"]
 
-    # True duration is only known now, so reconcile the provisional reservation.
+    # The 120-minute admission ceiling — not the allowance. A video longer
+    # than this is out of V1 scope whatever the person's balance is, and the
+    # true duration is only knowable now.
     if content.duration_sec:
         try:
-            actual_minutes = gatekeeper.check_duration(content.duration_sec, cfg=cfg)
+            gatekeeper.check_duration(content.duration_sec, cfg=cfg)
         except GatekeeperError as exc:
             return finish("failed", message=exc.message)
-        delta = actual_minutes - job["reserved_minutes"]
-        if delta > 0:
-            try:
-                control_db.reserve_quota(control, user_id, minutes=delta, cfg=cfg)
-            except control_db.QuotaExceeded as exc:
-                return finish(
-                    "failed",
-                    message=f"You have used {exc.used} of your {exc.cap} media minutes.",
-                )
-        elif delta < 0:
-            control_db.release_quota(control, user_id, minutes=-delta)
-        job["reserved_minutes"] = actual_minutes
+
+    # ---- `R-18`: THE GATE -------------------------------------------------
+    # The one line in the product where the full text exists and nothing
+    # expensive has run. Below it sit the summariser, the extractor, the
+    # embedder and the linker; above it sits only the fetch, which costs no
+    # credits. Both callers pass through here — the normal pipeline and
+    # `op_rescue_job`'s pasted text — so one charge covers every source type
+    # on both paths, images included.
+    #
+    # The billed number is the text the extractor will actually chunk, NOT
+    # `content.full_text`. They are the same string for most sources, but
+    # `clean_text` truncates `full_text` at 2,000,000 characters while
+    # applying itself to each cue separately, leaving the cues uncapped — so
+    # billing `full_text` would charge a 20MB text file for a tenth of what
+    # it costs. Chunking is pure local Python with no LLM call.
+    billable = sum(len(chunk.text) for chunk in chunk_content(content))
+    credits = math.ceil(billable / max(1, cfg.credit_chars))
+    # A retry charges once. `charged_credits` is read from the row, because
+    # the job dict is a copy taken at claim time.
+    already = control_db.job_charge(control, job_id)
+    if not already and credits:
+        if not control_db.debit_credits(control, user_id, credits, cfg=cfg):
+            state = control_db.credits_state(control, user_id, cfg=cfg)
+            return finish(
+                "failed",
+                reason="out_of_credits",
+                message=(
+                    f"Reading this needs {credits:,} credits and you have "
+                    f"{state['left']:,} left this month. Nothing was read, and "
+                    f"nothing was charged."
+                ),
+            )
+        control_db.set_job_charge(control, job_id, credits)
+        already = credits
+    job["charged_credits"] = already
 
     source = tenant_db.upsert_source(
         tdb,
@@ -1519,6 +1641,129 @@ def op_get_source(ctx: Context, source_id: str) -> OpResult:
             "skills": [tenant_db.hydrate_skill(row) for row in skills],
             "has_transcript": tenant_db.get_source_content(ctx.tenant, source["id"]) is not None,
             "progress": progress.data if progress.ok else None,
+            # `R-18`: whether the file the person sent is still on disk, so
+            # §7.3 can offer to delete it now rather than wait out the 30
+            # days. Never the path — that is a staging location inside the
+            # server and the filename is the person's own; the page needs to
+            # know only that there is something to delete.
+            "file": _held_file(ctx, source["id"]),
+        },
+    )
+
+
+#: The source types whose `input_target` is a file on disk rather than a URL.
+_UPLOADED = ("pdf", "docx", "text", "image")
+
+
+def _upload_path(ctx: Context, source_id: str) -> Path | None:
+    """The received file for a source, or None — containment-checked.
+
+    `ingestion_jobs.input_target` is free text that holds a URL for link
+    sources and an arbitrary path in tests, so a path taken from it is only
+    ever used after it is shown to live inside this person's own uploads
+    folder. That check is what keeps a stale or crafted value from reaching
+    a file that is not theirs, or not an upload at all.
+    """
+    job = control_db.latest_job_for_source(ctx.control, ctx.user_id, source_id)
+    if not job or job["source_type"] not in _UPLOADED:
+        return None
+    try:
+        path = Path(str(job["input_target"] or "")).resolve()
+        if not path.is_relative_to(ctx.cfg.uploads_dir_for(ctx.user_id).resolve()):
+            return None
+    except (OSError, ValueError):
+        return None
+    return path
+
+
+def _purge_uploads(ctx: Context) -> int:
+    """Everything this person sent us, gone now. Returns how many files.
+
+    Used by the two doors in §7.13 that end something — clearing the library
+    and closing the account. Neither touched the uploads folder before
+    `R-18`, so both left staged files behind for the sweeper to find weeks
+    later, which is not what either button says it does.
+    """
+    folder = ctx.cfg.uploads_dir_for(ctx.user_id)
+    if not folder.is_dir():
+        return 0
+    removed = 0
+    for entry in folder.iterdir():
+        try:
+            if entry.is_file():
+                entry.unlink()
+                removed += 1
+        except OSError:
+            continue
+    with contextlib.suppress(OSError):
+        folder.rmdir()
+    return removed
+
+
+def _held_file(ctx: Context, source_id: str) -> dict[str, Any] | None:
+    path = _upload_path(ctx, source_id)
+    if path is None or not path.exists():
+        return None
+    # The staged name carries an `up_…_` prefix the person never chose.
+    return {
+        "held": True,
+        "filename": gatekeeper.unstage(path.name),
+        "days": ctx.cfg.upload_retention_days,
+    }
+
+
+@_syncs_tenant
+def op_delete_upload(ctx: Context, source_id: str) -> OpResult:
+    """§7.3's `Delete the file now` — `R-18`, the founder's third control.
+
+    *"Yes the person should be able to delete an upload sooner than 30 days."*
+
+    What goes is the file Brain was sent, not the source: the claims, the
+    summary and the transcript stay, because those are the knowledge and the
+    file was only ever the receipt. Nothing is refunded — the credits paid
+    for reading the text, not for keeping the bytes — and the dialog says so
+    rather than leaving the person to find out.
+
+    No MCP tool, by §2: an agent archives, a person deletes.
+    """
+    refusal = _person_only(
+        ctx,
+        "delete_upload",
+        "Deleting the file Brain was sent is the person's own call.",
+    )
+    if refusal:
+        return refusal
+
+    source = _visible(ctx, tenant_db.get_source(ctx.tenant, (source_id or "").strip()))
+    if source is None:
+        return _fail("delete_upload", "not_found", f"No source has the id `{source_id}`.")
+
+    path = _upload_path(ctx, source["id"])
+    if path is None:
+        return _fail(
+            "delete_upload",
+            "nothing_held",
+            f"`{source['title']}` came from a link, so there is no file to delete.",
+        )
+    if not path.exists():
+        return _fail(
+            "delete_upload",
+            "nothing_held",
+            f"Brain is no longer holding a file for `{source['title']}`.",
+        )
+    try:
+        path.unlink()
+    except OSError as exc:
+        return _fail("delete_upload", "error", f"Brain could not delete it: {exc}")
+
+    ctx.audit("delete_upload", "ok", target_id=source["id"])
+    return OpResult(
+        ok=True,
+        action="delete_upload",
+        data={
+            "source_id": source["id"],
+            "message": f"Deleted the file Brain was sent for `{source['title']}`. "
+            f"Everything it read from it is still here.",
         },
     )
 
@@ -1825,7 +2070,7 @@ def op_reprocess_source(ctx: Context, source_id: str) -> OpResult:
     refusal = _person_only(
         ctx,
         "reprocess_source",
-        "Re-reading a source spends the person's quota, so they ask for it themselves.",
+        "Re-reading a source spends the person's credits, so they ask for it themselves.",
     )
     if refusal:
         return refusal
@@ -1962,12 +2207,28 @@ def run_pending_jobs_sync(
     """
     cfg = cfg or settings()
     control = control_db.control()
+    control_db.reap_exhausted_jobs(control, user_id=user_id)
     processed: list[dict[str, Any]] = []
     for _ in range(max(1, limit)):
         job = control_db.claim_next_job(control, user_id=user_id)
         if job is None:
             break
-        processed.append(process_job(job, cfg=cfg))
+        try:
+            processed.append(process_job(job, cfg=cfg))
+        except Exception as exc:
+            # `R-18`: the same guard `Worker.drain_once` has had all along.
+            # Without it a crash here leaves the job non-terminal with its
+            # charge booked, and the third crash makes that permanent.
+            LOGGER.exception("job %s crashed", job["job_id"])
+            control_db.set_job_status(
+                control, job["job_id"], "failed", error_message=f"Worker error: {exc}"
+            )
+            control_db.refund_credits(
+                control, job["user_id"], credits=control_db.job_charge(control, job["job_id"])
+            )
+            processed.append(
+                {"job_id": job["job_id"], "status": "failed", "claims": 0, "message": str(exc)}
+            )
     return processed
 
 
@@ -2018,10 +2279,22 @@ def op_rescue_job(ctx: Context, job_id: str, pasted_text: str) -> OpResult:
         locator_type="section",
     ).finalise()
 
-    def finish(status: str, *, message: str = "", claims: int = 0) -> dict[str, Any]:
+    def finish(status: str, *, message: str = "", reason: str = "", claims: int = 0) -> dict[str, Any]:
         control_db.set_job_status(
-            ctx.control, job_id, status, error_message=message, claims_extracted=claims
+            ctx.control,
+            job_id,
+            status,
+            error_message=message,
+            error_reason=reason,
+            claims_extracted=claims,
         )
+        if status in ("failed", "blocked_by_platform"):
+            # `R-18`, same rule on this path: a rescue that fails costs
+            # nothing. The gate it goes through is the same one.
+            control_db.refund_credits(
+                ctx.control, ctx.user_id, credits=control_db.job_charge(ctx.control, job_id)
+            )
+        _release_upload(ctx.control, ctx.user_id, dict(job), cfg=ctx.cfg)
         control_db.audit(
             ctx.control,
             user_id=ctx.user_id,
@@ -2355,6 +2628,7 @@ def tenant_watermark(ctx: Context) -> dict[str, Any]:
 def op_profile(ctx: Context) -> OpResult:
     """Everything the Profile modal's five blocks need, in one call."""
     user = control_db.get_user(ctx.control, ctx.user_id) or {}
+    credits = control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)
     sessions = []
     for record in control_db.list_sessions(ctx.control, ctx.user_id):
         if record["revoked"]:
@@ -2382,10 +2656,20 @@ def op_profile(ctx: Context) -> OpResult:
             "about_you_context": user.get("about_you_context", ""),
             "theme_mode": user.get("theme_mode", "warm_sunset"),
             "quotas": {
-                "media_minutes_used": user.get("media_minutes_used", 0),
-                "media_minutes_cap": ctx.cfg.quota_media_minutes,
-                "files_used": user.get("files_used", 0),
-                "files_cap": ctx.cfg.quota_files,
+                "credits_used": credits["used"],
+                "credits_cap": credits["cap"],
+                "credits_left": credits["left"],
+                "credits_period": credits["period"],
+            },
+            # `R-18`: what Brain does with the file it was sent, and the
+            # person's say in it. The day count comes from the setting the
+            # sweeper actually reads, so the sentence cannot drift from the
+            # behaviour it describes.
+            "retention": {
+                "upload_days": ctx.cfg.upload_retention_days,
+                "keep_uploads": bool(
+                    control_db.ingestion_defaults(ctx.control, ctx.user_id)["keep_uploads"]
+                ),
             },
             "sessions": sessions,
             "mcp_url": ctx.cfg.audience,
@@ -2532,7 +2816,26 @@ def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
         return refusal
 
     user = control_db.get_user(ctx.control, ctx.user_id) or {}
+    credits = control_db.credits_state(ctx.control, ctx.user_id, cfg=ctx.cfg)
     counts = tenant_db.counts(ctx.tenant)
+
+    # `R-18`: the spend list. Titles come from the tenant database, because
+    # `ingestion_jobs.input_target` holds a staging path for an upload and
+    # that path must not reach a page — §2's isolation rule, and the
+    # filename would be the person's own.
+    spend = []
+    for row in control_db.charged_jobs(ctx.control, ctx.user_id, limit=10):
+        source = tenant_db.get_source(ctx.tenant, row["source_id"])
+        spend.append(
+            {
+                "source_id": row["source_id"],
+                "title": (source or {}).get("title") or "A source that is gone",
+                "source_type": row["source_type"],
+                "credits": row["charged_credits"],
+                "at": row["created_at"],
+                "still_here": source is not None,
+            }
+        )
 
     calls = [
         {
@@ -2563,14 +2866,20 @@ def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
                 "sources": {
                     "label": "Sources",
                     "used": counts["sources"],
-                    "cap": ctx.cfg.quota_files,
+                    # `R-18`: no cap. It used to be measured against
+                    # `quota_files`, which counted uploads only — so this
+                    # could read `3 of 50` while the number actually enforced
+                    # was 0 of 50, two figures under one ceiling. Credits are
+                    # the allowance now; this is a true count of the library.
+                    "cap": None,
                     "unit": "count",
                 },
-                "minutes": {
-                    "label": "Minutes of media",
-                    "used": user.get("media_minutes_used", 0),
-                    "cap": ctx.cfg.quota_media_minutes,
-                    "unit": "minutes",
+                "credits": {
+                    "label": "Credits",
+                    "used": credits["used"],
+                    "cap": credits["cap"],
+                    "unit": "credits",
+                    "period": credits["period"],
                 },
                 "calls": {
                     "label": "Calls a minute",
@@ -2580,6 +2889,10 @@ def op_activity(ctx: Context, *, limit: int = 60) -> OpResult:
                 },
                 # No `storage` key. `R-17`, above.
             },
+            # `R-18`: where the credits went. A meter says how much is left;
+            # this says what it was spent on, which is the only form in which
+            # the number is actionable.
+            "spend": spend,
             "calls": calls,
         },
     )
@@ -2834,6 +3147,7 @@ def op_update_profile(
     want_summary: bool | None = None,
     want_rules: bool | None = None,
     want_skills: bool | None = None,
+    keep_uploads: bool | None = None,
     write_in: str | None = None,
 ) -> OpResult:
     """§7.13's four sections write through here.
@@ -2853,6 +3167,7 @@ def op_update_profile(
             want_summary=want_summary,
             want_rules=want_rules,
             want_skills=want_skills,
+            keep_uploads=keep_uploads,
             write_in=write_in,
         )
     except ValueError as exc:
@@ -3156,7 +3471,13 @@ def op_delete_library(ctx: Context, *, typed: str = "") -> OpResult:
         # they were written by hand, so they are cleared explicitly.
         ctx.tenant.execute("DELETE FROM sources")
         ctx.tenant.execute("DELETE FROM skills")
-    ctx.audit("delete_library", "ok", detail=before)
+    # `R-18`: and the files Brain was sent. Without this, "removes every
+    # source and everything made from it" left the person's uploads sitting
+    # in staging for up to 30 days with nothing in the product able to reach
+    # them — the one case where the sweep's window was not a promise but a
+    # delay the person had not agreed to.
+    files = _purge_uploads(ctx)
+    ctx.audit("delete_library", "ok", detail={**before, "files": files})
     return OpResult(
         ok=True,
         action="delete_library",
@@ -3191,7 +3512,8 @@ def op_delete_account(ctx: Context, *, typed: str = "") -> OpResult:
     # Audited BEFORE the row goes: the foreign key on `audit_logs.user_id` is
     # nullable by design, but the row has to be written while there is still a
     # user to attribute it to.
-    ctx.audit("delete_account", "ok", detail={"sessions": sessions, **counts})
+    files = _purge_uploads(ctx)
+    ctx.audit("delete_account", "ok", detail={"sessions": sessions, "files": files, **counts})
 
     tenant_db.close_tenant(user_id, cfg=ctx.cfg)
     path = ctx.cfg.tenant_db_path(user_id)

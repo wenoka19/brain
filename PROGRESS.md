@@ -1218,5 +1218,74 @@ caption-less video is refused, a scanned PDF is refused. What costs money is
 characters of source text (one extraction call per ~1,400 characters: ~7 for
 a 10-minute video, 39 for an hour, 200–600 for a 200-page PDF, ~35,000 for a
 20MB `.txt`), and above that, tension classification at up to `claims × 8`
-calls per ingestion with nothing capping it. `OPEN-4` holds the lever choice;
-the full ranking is in `MASTER_PLAN.md` §17 under `R-17`.
+calls per ingestion with nothing capping it. The founder's answer is `R-18` below — characters, which is the unit this
+points at; the full ranking is in `MASTER_PLAN.md` §17 under `R-17`.
+
+## R-18 — credits, one plan, and the person's say in what Brain keeps (30 Oct 2026)
+
+The founder's answer to the lever question, and it is the one the measurement
+pointed at: *"we should not use video minutes but some kind of credit thing…
+A character is a credit, kind of like how Eleven Labs does it… In usage we
+will replace that."* Plus a ruling that kept the scope small: *"it should be
+just one plan, the free plan… It's not an urgency right now."* No tier, no
+billing period beyond the monthly reset, no price, no payment code.
+
+### One debit, at the one line where the number is real
+
+Minutes had to be reserved up front and released on failure, because a
+minute was guessable before the fetch — a flat provisional 15 for YouTube,
+and nothing at all for an article. Characters are not guessable (`normalize_url`
+knows no duration, no bytes, no page count, and `NormalizedTarget.estimated_minutes`
+is a field nothing in the repo assigns) but they are *exactly known* the
+moment the fetch returns, which is still above every LLM call. So there is
+nothing to reserve: one atomic debit at the entry to `_ingest_content`, with
+the ceiling inside the `WHERE` clause so two workers racing the same account
+cannot both cross it.
+
+**The billed number is what the extractor chunks, never `content.full_text`.**
+`clean_text` truncates `full_text` at 2,000,000 characters while applying
+itself to each cue *separately*, leaving the cues uncapped — and the chunker
+consumes the cues. Billing `full_text` would have charged a 20MB text file
+for a tenth of what it costs to read.
+
+### What the mapping found that had to be fixed too
+
+- **A job that burned its last attempt leaked forever.** `claim_next_job`
+  filters on `attempts < max_attempts`, so such a job kept a non-terminal
+  status and nothing ever ran the code that releases what it booked.
+  `reap_exhausted_jobs` now runs at the top of every drain. **A docstring in
+  `app/storage/retention.py`, written earlier the same day, asserted the
+  opposite** — that such a job "is released rather than left pending". It was
+  wrong, and it is corrected in place rather than quietly deleted.
+- **`run_pending_jobs_sync` had no `try/except`** around `process_job`, unlike
+  `Worker.drain_once`. Three crashes there made the leak permanent.
+- **The `Sources` meter measured a different number from the one enforced** —
+  a tenant source count against `quota_files`, which only uploads ever
+  incremented — so it could read `3 of 50` while the enforced figure was
+  `0 of 50`. It is now a true count with no cap.
+- **The agent hint for a spent allowance told the agent to have the person
+  archive sources to free room.** Nothing in the product has ever returned an
+  allowance for removed content. A remedy that does nothing is worse than
+  none, because the agent spends the person's time on it.
+- **The classifier loop had no ceiling** — up to `claims × link_top_k` LLM
+  calls, which at maturity dwarfs the extraction bill the price is derived
+  from. `link_max_calls_per_job` bounds it, and reports when it truncates.
+
+### The three retention controls
+
+*"We should tell the people that we keep their thing there, somewhere in the
+profile… People should also be able to say, 'Okay I don't want you to keep
+it.'"* And: *"the person should be able to delete an upload sooner than 30
+days."*
+
+No new category was needed — the Profile already has **Your data**, and all
+three belong there or on the source they concern. The day count comes from
+`cfg.upload_retention_days`, the same setting the sweeper reads, so the
+sentence cannot drift from the behaviour. The opt-out deletes on the failure
+path too: a file someone asked not to keep is not kept because Brain had
+trouble with it. And `op_delete_library` and `op_delete_account` now take the
+uploads with them — before this, closing an account left the person's files
+in staging for up to 30 days with nothing in the product able to reach them.
+
+Deleting a file returns no credits, and all three dialogs say so: the credits
+paid for reading the text, which is already done.

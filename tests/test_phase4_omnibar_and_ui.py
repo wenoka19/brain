@@ -540,15 +540,16 @@ class TestWebApiSurface:
         assert signed_in.get("/api/trash").json()["items"] == []
         assert signed_in.get("/api/cards?view=library").json()["claims"]
 
-    def test_profile_serves_all_five_blocks(self, signed_in):
+    def test_profile_serves_all_five_blocks(self, signed_in, cfg):
         signed_in.post("/api/demo/seed", json={})
         profile = signed_in.get("/api/profile").json()
         assert profile["about_you_context"] == ""           # block 1
         assert profile["mcp_url"].endswith("/mcp")          # block 2
         assert "sessions" in profile                        # block 2
         assert profile["theme_mode"] in ("light", "dark", "warm_sunset")  # block 3
-        assert profile["quotas"]["media_minutes_cap"] == 300             # block 4
-        assert profile["quotas"]["files_cap"] == 50                      # block 4
+        assert profile["quotas"]["credits_cap"] == cfg.quota_credits     # block 4 (`R-18`)
+        assert profile["retention"]["upload_days"] == cfg.upload_retention_days
+        assert "files_cap" not in profile["quotas"], "`R-18`: one allowance, not three"
         assert signed_in.get("/api/trash").status_code == 200            # block 5
 
     def test_about_you_and_theme_persist(self, signed_in):

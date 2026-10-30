@@ -601,6 +601,16 @@ async def api_rename_source(request: Request) -> Response:
 
 
 @endpoint
+async def api_delete_upload(request: Request) -> Response:
+    """§7.3's `Delete the file now` — `R-18`'s third retention control."""
+    ctx = _context(request, surface="web_ui")
+    _require_csrf(request)
+    source_id = request.path_params["source_id"]
+    _rate_limit(ctx, "delete_upload", {"source_id": source_id})
+    return _result(E.op_delete_upload(ctx, source_id), status_on_error=404)
+
+
+@endpoint
 async def api_reprocess_source(request: Request) -> Response:
     """§7.3's overflow `Re-process`: read the same address again."""
     ctx = _context(request)
@@ -844,6 +854,7 @@ async def api_profile(request: Request) -> Response:
             want_summary=flag("want_summary"),
             want_rules=flag("want_rules"),
             want_skills=flag("want_skills"),
+            keep_uploads=flag("keep_uploads"),
             write_in=payload.get("write_in"),
         )
     )
@@ -1098,6 +1109,7 @@ ROUTES = [
     Route("/api/summaries", api_summaries, methods=["GET"]),
     Route("/api/summaries/{summary_id}", api_summary, methods=["GET"]),
     Route("/api/sources/{source_id}/rename", api_rename_source, methods=["POST"]),
+    Route("/api/sources/{source_id}/file", api_delete_upload, methods=["DELETE"]),
     Route("/api/sources/{source_id}/reprocess", api_reprocess_source, methods=["POST"]),
     Route("/api/sources/{source_id}/summarise", api_generate_summary, methods=["POST"]),
     Route("/api/archive/{item_type}/{item_id}", api_archive, methods=["POST"]),

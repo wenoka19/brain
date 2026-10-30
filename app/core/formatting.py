@@ -783,9 +783,22 @@ def save_skill_envelope(result: OpResult) -> str:
 #: What the agent should do next, per refusal reason. A tool error that does not
 #: say "stop" is an invitation for a reasoning model to retry in a loop.
 REFUSAL_HINTS = {
+    # `R-18`. The old wording told the agent to have the user archive sources
+    # to free room, which never worked: nothing in the product has ever
+    # returned an allowance for removed content, and credits are spent on
+    # reading the text, not on keeping it. A remedy that does nothing is
+    # worse than none, because the agent spends the user's time on it.
+    "out_of_credits": (
+        "The user's credits for this month are spent. Do not retry, and do not suggest "
+        "archiving, deleting or exporting anything — none of that returns credits, "
+        "because credits pay for reading a source, not for storing it. Tell them the "
+        "number in the error and that their allowance comes back on the first of the "
+        "month, then carry on with what you already have."
+    ),
     "quota_exceeded": (
-        "The user is out of quota. Do not retry. Tell them the number and that they can "
-        "archive sources in the web app to free room."
+        "The user is out of quota. Do not retry, and do not suggest archiving, deleting "
+        "or exporting anything — none of it returns an allowance. Tell them the number "
+        "in the error and carry on with what you already have."
     ),
     "playlist_blocked": "Out of scope. Ask the user for a single video link instead of retrying.",
     "livestream_blocked": "Out of scope. Do not retry — ask them to send it once published.",

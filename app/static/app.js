@@ -259,7 +259,15 @@ function renderJobs() {
           job.status === "blocked_by_platform" ? "Platform refused this source" : "This source failed"
         }</div>
         <p class="banner-stats">${esc(job.error_message || label)}<br>
-          Nothing was charged to your quota.</p>
+          ${
+            // `R-18`: true either way, but for two different reasons — the
+            // fetch never charged, or the gate charged and `finish` gave it
+            // back. Saying "nothing was charged" unconditionally was a
+            // promise this page could not check.
+            job.charged_credits
+              ? `The ${Number(job.charged_credits).toLocaleString()} credits this cost have been refunded.`
+              : "Nothing was charged."
+          }</p>
         <div class="card-actions">
           <button class="btn btn-sm" data-rescue="${esc(job.job_id)}">${icon("edit")} Paste transcript / notes ▾</button>
           <label class="btn btn-sm">${icon("ingest")} Drop file instead
@@ -619,13 +627,15 @@ async function openProfile() {
       </div>`).join("")
     : '<p class="row-sub">No clients connected yet. Paste the link above into Claude, ChatGPT or Cursor.</p>';
 
+  // `R-18`: one allowance, so one meter. This page and `/next` have to name
+  // the same currency — they are both routed and both live.
   const quotas = data.quotas || {};
   $("#quotas").innerHTML = [
-    ["Media minutes", quotas.media_minutes_used, quotas.media_minutes_cap, "min"],
-    ["Files", quotas.files_used, quotas.files_cap, "files"],
+    ["Credits", quotas.credits_used, quotas.credits_cap, "this month"],
   ].map(([label, used, cap, unit]) => {
     const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : 0;
-    return `<div><div class="row-sub">${label} — ${used} / ${cap} ${unit}</div>
+    return `<div><div class="row-sub">${label} — ${Number(used || 0).toLocaleString()} / ${
+      Number(cap || 0).toLocaleString()} ${unit}</div>
       <div class="meter${pct > 85 ? " warn" : ""}"><span style="width:${pct}%"></span></div></div>`;
   }).join("");
 

@@ -303,14 +303,15 @@ class TestTheActivityLogIsALogOfCalls:
     def test_the_meters_read_the_numbers_the_product_enforces(self, web):
         """§7.10's capture shows `Calls 1,284 of 5,000` and `2.1 GB of 10 GB`;
         neither cap exists here. A meter against a number nothing checks is
-        decoration, so every meter the page draws has a real ceiling behind
-        it."""
+        decoration — so a figure either has the ceiling it names, or no bar.
+
+        `R-18` moved `sources` into the second camp: its cap was
+        `quota_files`, which only uploads ever incremented, so the same page
+        could read `3 of 50` while the enforced figure was `0 of 50`."""
         usage = E.op_activity(web).data["usage"]
-        assert usage["sources"]["cap"] == web.cfg.quota_files
-        assert usage["minutes"]["cap"] == web.cfg.quota_media_minutes
+        assert usage["credits"]["cap"] == web.cfg.quota_credits
         assert usage["calls"]["cap"] == web.cfg.tool_calls_per_min
-        for key, meter in usage.items():
-            assert meter["cap"] is not None, f"{key} draws a meter with no ceiling"
+        assert usage["sources"]["cap"] is None
 
     def test_the_strip_draws_no_storage_card(self):
         """`R-17`. The founder struck storage as a lever — "in the usage screen

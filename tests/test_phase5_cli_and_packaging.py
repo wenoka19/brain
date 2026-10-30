@@ -124,10 +124,17 @@ class TestWorker:
         claimed = [first.drain_once(), second.drain_once()]
         assert sum(1 for outcome in claimed if outcome is not None) == 1
 
-    def test_a_crashing_job_fails_cleanly_and_refunds_the_quota(self, cfg, user, monkeypatch):
+    def test_a_crashing_job_fails_cleanly_and_refunds_the_credits(self, cfg, user, monkeypatch):
+        """`R-18` kept the guarantee and changed the currency. A crash inside
+        `process_job` happens after the gate may already have charged, so the
+        worker reads the charge off the job ROW and gives back exactly it."""
         ctx = E.build_context(user["user_id"])
         E.op_ingest_source(ctx, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        assert control_db.get_user(ctx.control, user["user_id"])["media_minutes_used"] > 0
+        job = control_db.list_jobs(ctx.control, user["user_id"])[0]
+        # Charge it the way the gate would, then crash the pipeline.
+        control_db.debit_credits(ctx.control, user["user_id"], 4_000, cfg=cfg)
+        control_db.set_job_charge(ctx.control, job["job_id"], 4_000)
+        assert control_db.credits_state(ctx.control, user["user_id"], cfg=cfg)["used"] == 4_000
 
         def explode(job, *, cfg=None):
             raise RuntimeError("the parser exploded")
@@ -136,7 +143,29 @@ class TestWorker:
         outcome = worker.Worker(cfg=cfg).drain_once()
         assert outcome["status"] == "failed"
         assert "exploded" in outcome["message"]
-        assert control_db.get_user(ctx.control, user["user_id"])["media_minutes_used"] == 0
+        assert control_db.credits_state(ctx.control, user["user_id"], cfg=cfg)["used"] == 0
+
+    def test_a_job_that_burns_its_last_attempt_is_reaped_and_refunded(self, cfg, user):
+        """The leak `R-18` found: `claim_next_job` filters on
+        `attempts < max_attempts`, so a job that crashed its last attempt was
+        never selected again — it kept a non-terminal status forever and
+        nothing ever ran the code that gives its charge back."""
+        ctx = E.build_context(user["user_id"])
+        E.op_ingest_source(ctx, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        job = control_db.list_jobs(ctx.control, user["user_id"])[0]
+        control_db.debit_credits(ctx.control, user["user_id"], 2_500, cfg=cfg)
+        control_db.set_job_charge(ctx.control, job["job_id"], 2_500)
+        ctx.control.execute(
+            "UPDATE ingestion_jobs SET attempts = ?, status = 'fetching' WHERE job_id = ?",
+            (worker.MAX_ATTEMPTS, job["job_id"]),
+        )
+        assert control_db.claim_next_job(ctx.control) is None, "unclaimable, as designed"
+
+        assert worker.Worker(cfg=cfg).drain_once() is None  # nothing left to run
+        assert control_db.credits_state(ctx.control, user["user_id"], cfg=cfg)["used"] == 0
+        reaped = control_db.list_jobs(ctx.control, user["user_id"])[0]
+        assert reaped["status"] == "failed"
+        assert reaped["error_reason"] == "attempts_exhausted"
 
     def test_an_expired_lease_is_recovered(self, cfg, user):
         ctx = E.build_context(user["user_id"])

@@ -154,12 +154,12 @@ class TestReprocess:
         again = E.op_reprocess_source(ctx, source_id)
         assert not again.ok and again.error_reason == "already_running"
 
-    def test_an_agent_cannot_spend_the_persons_quota(self, ingested, user):
+    def test_an_agent_cannot_spend_the_persons_credits(self, ingested, user):
         ctx, source_id = ingested
         agent = E.build_context(user["user_id"], surface="mcp")
         refused = E.op_reprocess_source(agent, source_id)
         assert not refused.ok and refused.error_reason == "person_only"
-        assert "quota" in refused.error_message
+        assert "credits" in refused.error_message
 
     def test_it_round_trips_over_http(self, ingested, client):
         _, source_id = ingested

@@ -25,12 +25,27 @@ becomes a file server.
 **Why age alone decides, with no look at `ingestion_jobs`.** A file is
 needed until its job reaches a terminal status, and a job cannot outlive
 this window: the lease is 180 seconds and `attempts` is bounded at 3
-(`app/worker.py`), so a live job resolves in minutes, and a job past its
-attempts is released rather than left pending. `blocked_by_platform` can sit
-indefinitely waiting for a human, but §7.3's rescue takes *pasted text* —
-`op_rescue_job` never re-reads the file. So the sweep needs no coupling to
-`control.db`, which keeps it runnable from anywhere: the worker loop, the
-CLI, a test.
+(`app/worker.py`), so a live job resolves in minutes.
+`blocked_by_platform` can sit indefinitely waiting for a human, but §7.3's
+rescue takes *pasted text* — `op_rescue_job` never re-reads the file. So the
+sweep needs no coupling to `control.db`, which keeps it runnable from
+anywhere: the worker loop, the CLI, a test.
+
+An earlier version of this paragraph claimed that a job past its attempts
+"is released rather than left pending". That was false. `claim_next_job`
+filters on `attempts < max_attempts`, so such a job was simply never
+selected again and nothing ever ran the code that would release it —
+`control_db.reap_exhausted_jobs` (`R-18`) is what makes the sentence true,
+and it runs at the top of every drain. The conclusion above survives either
+way, because it rests on the 30-day window being far longer than any job,
+not on how a dead job is cleaned up.
+
+**`R-18`** adds a second path to deletion that is not a sweep: a person can
+turn off `keep_uploads`, and then `engine._release_upload` deletes the file
+the moment its job reaches a terminal status. They can also delete one
+upload by hand from its source page. Neither changes this module; both mean
+a file can be gone before its 30 days are up, which is the person's choice
+to make.
 
 A deletion here is permanent and has no trash buffer, which is the one place
 in this product where that is right: the 30-day window *is* the buffer, and

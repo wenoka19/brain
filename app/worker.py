@@ -51,6 +51,12 @@ class Worker:
     def drain_once(self) -> dict[str, Any] | None:
         """Claim and run exactly one job. Returns its outcome, or None if idle."""
         control = control_db.control()
+        # `R-18`: a job that burned its last attempt is never selected again,
+        # so without this it keeps a non-terminal status forever and its
+        # charge is never given back. Before credits that leaked a
+        # reservation quietly; now it would leak something the person can see
+        # on their own usage screen.
+        control_db.reap_exhausted_jobs(control, max_attempts=MAX_ATTEMPTS)
         job = control_db.claim_next_job(
             control, lease_seconds=LEASE_SECONDS, max_attempts=MAX_ATTEMPTS
         )
@@ -64,11 +70,11 @@ class Worker:
             control_db.set_job_status(
                 control, job["job_id"], "failed", error_message=f"Worker error: {exc}"
             )
-            control_db.release_quota(
+            # `R-18`: whatever the gate charged, read from the row.
+            control_db.refund_credits(
                 control,
                 job["user_id"],
-                minutes=job["reserved_minutes"],
-                files=job["reserved_files"],
+                credits=control_db.job_charge(control, job["job_id"]),
             )
             outcome = {"job_id": job["job_id"], "status": "failed", "claims": 0, "message": str(exc)}
         LOGGER.info("job %s -> %s (%s claims)", outcome["job_id"], outcome["status"], outcome["claims"])

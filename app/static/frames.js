@@ -1997,6 +1997,10 @@ FRAMES.source = async function source(params) {
           { act: "rename", label: "Rename" },
           src.canonical_url && { act: "reprocess", label: "Re-process" },
           { sep: true },
+          // `R-18`: only when there is actually a file to delete. A link
+          // source has nothing held, and an upload whose 30 days are up is
+          // already gone — the server decides, not the page.
+          data.file && data.file.held && { act: "delete-file", label: "Delete the file now" },
           { act: "archive", label: "Archive" },
         ])}
       </header>
@@ -2091,6 +2095,25 @@ FRAMES.source = async function source(params) {
         await post(`/api/sources/${encodeURIComponent(id)}/reprocess`, {});
       } catch (error) {
         toast(error.message || "Could not read it again.");
+        return;
+      }
+      window.location.reload();
+    },
+    "delete-file": async (id) => {
+      const ok = await confirmDialog({
+        title: "Delete the file Brain was sent?",
+        body:
+          `Brain deletes “${data.file.filename}” now instead of in ` +
+          `${data.file.days} days. The rules, the summary and the transcript stay — ` +
+          `the file was only what Brain read them from. This returns no credits: ` +
+          `they paid for the reading, which is already done.`,
+        confirmLabel: "Delete the file",
+      });
+      if (!ok) return;
+      try {
+        await post(`/api/sources/${encodeURIComponent(id)}/file`, {}, "DELETE");
+      } catch (error) {
+        toast(error.message || "Could not delete it.");
         return;
       }
       window.location.reload();
@@ -2212,9 +2235,9 @@ function summaryMarkdown(data) {
 }
 
 
-export async function post(path, body) {
+export async function post(path, body, method = "POST") {
   const response = await fetch(path, {
-    method: "POST",
+    method,
     credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
@@ -2857,7 +2880,18 @@ function meterCard(meter) {
                      style="width:${pct}%"></span>
              </span>
              <p class="meter-note">${esc(
-               unit === "rate" ? "Resets every minute." : `${100 - pct}% left.`
+               unit === "rate"
+                 ? "Resets every minute."
+                 : unit === "credits"
+                   // `R-18`: the count, not a percentage. Against a 500,000
+                   // allowance a real month's use rounds to 0%, so the card
+                   // read "1,919 of 500,000" and "100% left." in the same
+                   // breath. And the number is the useful one anyway: it
+                   // answers "can I send this PDF". The reset is named
+                   // because a monthly allowance that does not say it comes
+                   // back reads as a wall.
+                   ? `${(cap - used).toLocaleString()} left. Back to full on the 1st.`
+                   : `${100 - pct}% left.`
              )}</p>`
       }
     </article>`;
@@ -2871,9 +2905,40 @@ FRAMES.activity = async function activity() {
   // `R-17`: no storage meter. §7.10's capture shows `Storage 2.1 GB of
   // 10 GB`; the founder struck it, and what the person sends us is swept
   // after 30 days anyway, so the bytes on disk say nothing about their use.
-  const metersHtml = ["sources", "minutes", "calls"]
+  // `R-18`: credits, not minutes. Minutes metered YouTube and nothing else,
+  // so an article or a PDF moved no meter at all; credits are characters of
+  // source text, which every source type has.
+  const metersHtml = ["sources", "credits", "calls"]
     .map((key) => meterCard(data.usage[key]))
     .join("");
+
+  // `R-18`: a meter says how much is left, which is only actionable once
+  // you know where it went. Dearest first, this period, because that is the
+  // period the meter above is counting.
+  const spendHtml = (data.spend || []).length
+    ? `<section class="section">
+         <h2 class="section-title">Where your credits went</h2>
+         <p class="section-note">This month, dearest first. A credit is one character Brain read.</p>
+         <div class="card-group">
+           ${data.spend
+             .map(
+               (item) => `
+             <div class="setting-row">
+               <span class="setting-text">
+                 <span class="setting-label">${esc(item.title)}</span>
+                 <span class="setting-help">${esc(item.source_type)}${
+                   item.still_here ? "" : " · no longer in your library"
+                 }</span>
+               </span>
+               <span class="setting-control"><span class="chip">${esc(
+                 Number(item.credits).toLocaleString()
+               )}</span></span>
+             </div>`
+             )
+             .join("")}
+         </div>
+       </section>`
+    : "";
 
   const row = (call) => `
     <div class="call" data-open="false">
@@ -2927,6 +2992,8 @@ FRAMES.activity = async function activity() {
           ${metersHtml}
         </div>
       </section>
+
+      ${spendHtml}
 
       <section class="section">
         <h2 class="section-title">Calls</h2>
@@ -3604,6 +3671,21 @@ FRAMES.profile = async function profile() {
         <h2 class="section-title">Your data</h2>
         <p class="section-note">Everything Brain holds is yours to take or to remove.</p>
         <div class="card-group">
+          <!-- R-18. Nothing in the app told anyone that the file they
+               dropped in was kept at all. The day count comes from the
+               server, which reads it from the same setting the sweeper
+               does, so the sentence cannot drift from the behaviour.
+               (No backticks in an HTML comment: it sits inside a template
+               literal, so one would end the string.) -->
+          ${settingRow({
+            label: "Keep the file Brain receives",
+            help: data.retention.keep_uploads
+              ? `On. Brain holds the file you send for ${data.retention.upload_days} days, then deletes it — ` +
+                `long enough to look at if a source comes out wrong. What Brain read from it stays either way.`
+              : `Off. Brain deletes the file the moment it finishes reading it. If a source comes out ` +
+                `wrong there will be nothing left to check it against.`,
+            controlHtml: switchHtml("keep_uploads", data.retention.keep_uploads),
+          })}
           ${settingRow({
             label: "Export everything",
             help: "Sources, transcripts, summaries, rules and skills, as Markdown in a zip.",
@@ -3678,9 +3760,12 @@ FRAMES.profile = async function profile() {
       const whole = button.dataset.wipe === "account";
       const yes = await confirmDialog({
         title: whole ? "Delete your account?" : "Delete your library?",
+        // `R-18`: the last clause is the one people get wrong. Credits pay
+        // for reading a source, not for keeping it, so clearing the library
+        // returns none of them — and an agent used to be told the opposite.
         body: whole
-          ? "Your library, your connections and your keys are destroyed. Export first if you want to keep anything. This cannot be undone."
-          : "Every source, transcript, summary, rule and skill is destroyed. Your account and your settings stay. This cannot be undone.",
+          ? "Your library, your connections, your keys and every file you sent are destroyed. Export first if you want to keep anything. This cannot be undone."
+          : "Every source, transcript, summary, rule and skill is destroyed, along with every file you sent. Your account and your settings stay. Your credits stay spent — they paid for the reading, which is already done. This cannot be undone.",
         confirmLabel: whole ? "Delete account" : "Delete library",
         word: "DELETE",
       });

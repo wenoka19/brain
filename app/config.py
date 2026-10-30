@@ -224,7 +224,32 @@ class Settings:
     #: convention off and require an explicit address.
     shard_instance_template: str = "shard-{index}"
 
-    # ---- per-user quotas --------------------------------------------------
+    # ---- the allowance ----------------------------------------------------
+    # `R-18`. One plan, one allowance, counted in characters of source text.
+    #
+    # `credit_chars` is the scale: 1 means the founder's "a character is a
+    # credit, kind of like how Eleven Labs does it". Set it to 1000 and every
+    # number in the product simply loses three zeros — the ledger, the column
+    # and the enforcement are characters either way, so nothing else changes.
+    credit_chars: int = 1
+    #: Per month, reset on the first. 500,000 characters is roughly nine
+    #: hours of captioned video, or ~150 PDF pages, or a few dozen articles.
+    quota_credits: int = 500_000
+    #: Under this, an upload is parsed and counted inside the request, so the
+    #: person is refused at the button with the real number instead of
+    #: discovering it in a failed job. Above it the parse would cost more
+    #: latency than the honesty is worth, and the gate in the worker decides.
+    credit_precount_max_bytes: int = 2 * MB
+    #: `R-18`: the classifier loop is the one unbounded cost in the pipeline —
+    #: up to `claims x link_top_k` LLM calls, which at maturity can dwarf the
+    #: extraction bill the credits are priced on. Not a second meter: an abuse
+    #: guard, so the credit price stays a loose bound on what a job can cost.
+    link_max_calls_per_job: int = 400
+
+    # ---- per-user quotas, superseded by credits (`R-18`) ------------------
+    # Fossils. `quota_media_minutes` metered YouTube only, and `quota_files`
+    # was incremented by uploads alone, so a URL ingestion consumed neither.
+    # Kept because the columns behind them are kept.
     quota_media_minutes: int = 300
     quota_files: int = 50
 
