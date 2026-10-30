@@ -810,3 +810,59 @@
   border-radius: var(--radius-full);
   background: var(--danger);
 }
+
+/* ======================================================================
+   controls that answer
+   ====================================================================== */
+.menu-wrap { position: relative; flex: 0 0 auto; }
+
+.match-count {
+  position: absolute;
+  right: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.search:has(.match-count) .input { padding-right: var(--space-10); }
+
+/* The in-page highlight of §7.5. */
+mark {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+}
+
+.search-note {
+  margin: calc(var(--space-6) * -1 + var(--space-2)) 0 var(--space-6);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* The sentinel that tells the sticky bar when it has stuck (§7.5). */
+.stick-sentinel { display: block; height: 1px; }
+
+/* §7.6's Full view. */
+.chapters { margin-top: var(--space-8); }
+
+.chapter { padding: var(--space-4) 0; }
+.chapter + .chapter { border-top: var(--border-width) solid var(--border-subtle); }
+
+.chapter-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.chapter-range {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chapter-text {
+  margin: var(--space-2) 0 0;
+  color: var(--text-secondary);
+  line-height: var(--leading-read);
+}

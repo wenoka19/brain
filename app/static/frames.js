@@ -569,7 +569,7 @@ FRAMES.transcripts = async function transcripts() {
     ),
   }));
 
-  return listFrame({
+  const node = listFrame({
     title: "Transcripts",
     search: "Search transcripts",
     controlsHtml: `<button class="btn" data-variant="secondary">${icon("filter")}Newest</button>`,
@@ -580,6 +580,8 @@ FRAMES.transcripts = async function transcripts() {
       href: "/",
     },
   });
+  wireListSearch(node);
+  return node;
 };
 
 FRAMES.summaries = async function summaries() {
@@ -600,7 +602,7 @@ FRAMES.summaries = async function summaries() {
     ),
   }));
 
-  return listFrame({
+  const node = listFrame({
     title: "Summaries",
     search: "Search summaries",
     controlsHtml: `<button class="btn" data-variant="secondary">${icon("filter")}Newest</button>`,
@@ -611,6 +613,8 @@ FRAMES.summaries = async function summaries() {
       href: "/",
     },
   });
+  wireListSearch(node);
+  return node;
 };
 
 FRAMES.sources = async function sources() {
@@ -625,21 +629,51 @@ FRAMES.sources = async function sources() {
       if (row.skill_count) yielded.push(`${row.skill_count} skill${row.skill_count > 1 ? "s" : ""}`);
 
       const host = (row.canonical_url || "").replace(/^https?:\/\//, "").split("/")[0];
+
+      // §7.7's three states. The data was in the payload and the frame was
+      // throwing it away, so a queued source and a blocked one looked
+      // identical to one sitting happily in memory.
+      const pill =
+        row.status === "processing"
+          ? { state: "pending", label: "Processing" }
+          : row.status === "blocked"
+            ? { state: "pending", label: "Needs you" }
+            : null;
+
+      // §7.7: "then what matters for that type" — a domain and a duration for
+      // a link, a format and a page count for a document, dimensions for an
+      // image. One meta line for every type was the plan's "never a platform
+      // name" rule kept and its other half dropped.
+      const kind = TYPE_WORD[row.source_type] || "Document";
+      const specifics =
+        kind === "Link"
+          ? [host, duration(row.duration_sec)]
+          : kind === "Document"
+            ? [FORMAT_WORD[row.source_type] || "", row.word_count ? `${Number(row.word_count).toLocaleString()} words` : ""]
+            : [row.word_count ? `${Number(row.word_count).toLocaleString()} words` : ""];
+
       return itemCard({
         href: `/sources/${row.id}`,
         icon: TYPE_ICON[row.source_type] || "doc",
         title: row.title,
         meta: [
-          TYPE_WORD[row.source_type] || "Document",
-          host,
-          duration(row.duration_sec),
+          kind,
+          ...specifics,
           yielded.length ? { cls: "item-yield", text: yielded.join(" · ") } : null,
         ],
+        pill,
+        // §7.7: a blocked row carries a `Fix this` button, and its label says
+        // the remedy rather than restating the problem.
+        actions:
+          row.status === "blocked"
+            ? `<button class="btn" data-size="sm" data-variant="secondary"
+                       data-fix="${esc(row.id)}">Fix this</button>`
+            : "",
       });
     }),
   }));
 
-  return listFrame({
+  const node = listFrame({
     title: "Sources",
     search: "Search sources",
     controlsHtml: `<button class="btn" data-variant="secondary">${icon("filter")}Newest</button>
@@ -651,6 +685,18 @@ FRAMES.sources = async function sources() {
       href: "/",
     },
   });
+
+  wireListSearch(node);
+  for (const button of node.querySelectorAll("[data-fix]")) {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      // §6 rule 11: the button says the remedy. Retrying is the remedy once
+      // the person has made the thing reachable.
+      answer(event.currentTarget, "Make it reachable, then retry");
+    });
+  }
+  return node;
 };
 
 /* ---------------------------------------------------------------------- */
@@ -684,7 +730,7 @@ FRAMES.transcript = async function transcript(params) {
     )
     .join("");
 
-  return el(`
+  const node = el(`
     <div class="wrap" data-read>
       <a class="action-link back" href="/library/transcripts">${icon("caret", "icon back-caret")}Transcripts</a>
       <h1 class="read-title">${esc(source.title)}</h1>
@@ -695,48 +741,188 @@ FRAMES.transcript = async function transcript(params) {
         `added ${dateLabel(source.created_at).toLowerCase()}`,
       ])}</p>
       ${derivedStrip([
-        data.has_summary && { href: `/sources/${source.id}`, icon: "summaries", label: "Summary" },
-        { href: "/rules", icon: "rules", label: "Rules" },
-        { href: "/skills", icon: "skills", label: "Skills" },
+        // The chip is named Summary and went to the source page. §7.5's strip
+        // links what this transcript produced, so it goes to the summary.
+        data.summary_id && {
+          href: `/summaries/${data.summary_id}`, icon: "summaries", label: "Summary",
+        },
+        // Counts, and only when there are any: a chip reading "Rules" that
+        // lands on an unfiltered library is a link, not a derived strip.
+        data.rule_count && {
+          href: `/sources/${source.id}`, icon: "rules",
+          label: `${data.rule_count} rule${data.rule_count > 1 ? "s" : ""}`,
+        },
+        data.skill_count && {
+          href: `/sources/${source.id}`, icon: "skills",
+          label: `${data.skill_count} skill${data.skill_count > 1 ? "s" : ""}`,
+        },
         source.canonical_url && { href: source.canonical_url, icon: "video", label: "Original source" },
       ])}
       <div class="read-bar">
         <span class="search">${slot("search")}
           <input class="input" id="in-page" placeholder="Search in this transcript"
                  aria-label="Search in this transcript">
+          <span class="match-count" id="matches" hidden></span>
         </span>
         <button class="btn" data-variant="secondary" id="copy">${icon("copy")}Copy</button>
-        <button class="btn" data-variant="secondary">${icon("download")}Download</button>
+        ${downloadMenu("tx-download", ["txt", "md", "srt"])}
       </div>
       <div class="transcript-body" id="body">${bodyHtml}</div>
     </div>`);
+
+  wireReadBar(node);
+  wireMenus(node);
+
+  const plain = data.turns
+    .map((turn) => (turn.t_ms !== null ? `[${stamp(turn.t_ms)}] ${turn.text}` : turn.text))
+    .join("\n\n");
+
+  node.querySelector("#copy").addEventListener("click", (event) =>
+    copyText(event.currentTarget, plain)
+  );
+
+  for (const item of node.querySelectorAll("#tx-download .menu-item")) {
+    item.addEventListener("click", () => {
+      const format = item.dataset.format;
+      const title = source.title;
+      if (format === "txt") download(fileName(title, "txt"), plain);
+      else if (format === "md") {
+        download(
+          fileName(title, "md"),
+          `# ${title}\n\n` +
+            data.turns
+              .map((turn) =>
+                turn.t_ms !== null
+                  ? `**${stamp(turn.t_ms)}** — ${turn.text}`
+                  : turn.text
+              )
+              .join("\n\n")
+        );
+      } else download(fileName(title, "srt"), toSrt(data.turns), "application/x-subrip");
+      node.querySelector("#tx-download").hidden = true;
+    });
+  }
+
+  // §7.5: "a timestamp opens the source at that second".
+  return node;
 };
+
+/** SubRip, from the turns we already have. A transcript with no moments
+ *  cannot become subtitles, and says so rather than writing an empty file. */
+function toSrt(turns) {
+  const timed = turns.filter((turn) => turn.t_ms !== null);
+  if (!timed.length) return "This source has no timeline, so it has no subtitles.\n";
+  const clock = (ms) => {
+    const total = Math.max(0, Math.round(ms / 1000));
+    const h = String(Math.floor(total / 3600)).padStart(2, "0");
+    const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+    const sec = String(total % 60).padStart(2, "0");
+    return `${h}:${m}:${sec},000`;
+  };
+  return timed
+    .map((turn, index) => {
+      const next = timed[index + 1];
+      const end = next ? next.t_ms : turn.t_ms + 4000;
+      return `${index + 1}\n${clock(turn.t_ms)} --> ${clock(end)}\n${turn.text}\n`;
+    })
+    .join("\n");
+}
+
+/** §7.5's in-page search: a live `<mark>` highlight and a match count.
+ *
+ *  Rebuilt from the text each time rather than patched: a highlight applied
+ *  over a previous highlight is how a search box starts eating its own
+ *  markup.
+ */
+function wireReadBar(node) {
+  const field = node.querySelector("#in-page");
+  const count = node.querySelector("#matches");
+  const bar = node.querySelector(".read-bar");
+  if (!field) return;
+
+  const paragraphs = [...node.querySelectorAll(".turn-text, .point-text")];
+  const originals = paragraphs.map((p) => p.textContent);
+
+  field.addEventListener("input", () => {
+    const needle = field.value.trim();
+    let hits = 0;
+    paragraphs.forEach((paragraph, index) => {
+      const text = originals[index];
+      if (!needle) {
+        paragraph.textContent = text;
+        return;
+      }
+      const parts = text.split(new RegExp(`(${escapeRe(needle)})`, "ig"));
+      paragraph.replaceChildren(
+        ...parts.map((part, i) => {
+          if (i % 2 === 0) return document.createTextNode(part);
+          hits += 1;
+          const mark = document.createElement("mark");
+          mark.textContent = part;
+          return mark;
+        })
+      );
+    });
+    count.hidden = !needle;
+    count.textContent = needle ? (hits ? `${hits} match${hits > 1 ? "es" : ""}` : "none") : "";
+  });
+
+  // §7.5: "The bar gains its bottom border only once stuck."
+  const sentinel = el('<span class="stick-sentinel"></span>');
+  bar.before(sentinel);
+  new IntersectionObserver(
+    ([entry]) => {
+      bar.dataset.stuck = String(!entry.isIntersecting);
+    },
+    { threshold: 1 }
+  ).observe(sentinel);
+}
+
+function escapeRe(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 FRAMES.summary = async function summary(params) {
   const data = await api(`/api/summaries/${encodeURIComponent(params.id)}`);
   const { summary: record, source } = data;
 
-  const pointsHtml = data.points
-    .map(
-      (point) => `
+  // A point's time cell is conditioned on having a MOMENT, not on having an
+  // off-site link: a document has moments and no URL, and conditioning on the
+  // link meant every non-video summary lost all its timestamps.
+  const pointHtml = (point) => `
       <li class="point">
         <span class="point-text">${esc(point.text)}</span>
         <span class="point-time">${
-          point.deep_link
-            ? `<a href="${esc(point.deep_link)}" target="_blank" rel="noopener">${esc(stamp(point.t_ms))}</a>`
-            : ""
+          point.t_ms === null || point.t_ms === undefined
+            ? ""
+            : point.deep_link
+              ? `<a href="${esc(point.deep_link)}" target="_blank" rel="noopener">${esc(stamp(point.t_ms))}</a>`
+              : esc(stamp(point.t_ms))
         }</span>
-      </li>`
+      </li>`;
+
+  const pointsHtml = data.points.map(pointHtml).join("");
+
+  const chaptersHtml = (record.chapters || [])
+    .map(
+      (chapter) => `
+      <section class="chapter">
+        <h3 class="chapter-title">${esc(chapter.title)}</h3>
+        <span class="chapter-range">${esc(stamp(chapter.from_ms))} – ${esc(stamp(chapter.to_ms))}</span>
+        <p class="chapter-text">${esc(chapter.text)}</p>
+      </section>`
     )
     .join("");
 
-  return el(`
+  const node = el(`
     <div class="wrap" data-read>
       <a class="action-link back" href="/library/summaries">${icon("caret", "icon back-caret")}Summaries</a>
       <h1 class="read-title">${esc(source.title || "")}</h1>
       <p class="read-meta">${metaHtml([
         FORMAT_WORD[source.source_type] || source.source_type,
-        `${duration(source.duration_sec)} of video`,
+        // "42:18 of video" for a PDF, and " of video" when there is no
+        // duration at all — the fragment is dropped unless there is one.
+        source.duration_sec ? `${duration(source.duration_sec)} of video` : null,
         `${record.read_minutes} min read`,
         dateLabel(record.created_at).toLowerCase(),
       ])}</p>
@@ -754,14 +940,253 @@ FRAMES.summary = async function summary(params) {
           <button class="segment" aria-pressed="false" data-view="full">Full</button>
         </span>
         <span class="read-bar-spacer"></span>
-        <button class="btn" data-variant="secondary">${icon("copy")}Copy</button>
-        <button class="btn" data-variant="secondary">${icon("download")}Download</button>
+        <button class="btn" data-variant="secondary" id="sum-copy">${icon("copy")}Copy</button>
+        ${downloadMenu("sum-download", ["txt", "md"])}
       </div>
       <p class="gist">${esc(record.gist)}</p>
       <span class="field-label">Key points</span>
-      <ol class="points">${pointsHtml}</ol>
+      <ol class="points" id="points">${pointsHtml}</ol>
+      <div class="chapters" id="chapters" hidden>
+        <span class="field-label">Chapter by chapter</span>
+        ${chaptersHtml || "<p class=\"section-note\">This source has no timeline, so it has no chapters.</p>"}
+      </div>
     </div>`);
+
+  wireMenus(node);
+
+  /* §7.6: "The read time in the meta updates with the control — the control
+     must change something real." Brief is the gist and the first five points;
+     Full adds the rest and the chapter walkthrough. Both readings come from
+     the same stored record, so switching re-renders rather than re-fetches. */
+  const BRIEF_POINTS = 5;
+  const list = node.querySelector("#points");
+  const chapters = node.querySelector("#chapters");
+  const readCell = [...node.querySelectorAll(".read-meta span")].find((cell) =>
+    cell.textContent.includes("min read")
+  );
+
+  function show(view) {
+    const points = view === "brief" ? data.points.slice(0, BRIEF_POINTS) : data.points;
+    list.innerHTML = points.map(pointHtml).join("");
+    chapters.hidden = view === "brief" || !(record.chapters || []).length;
+
+    const words =
+      record.gist.split(/\s+/).length +
+      points.reduce((n, point) => n + String(point.text).split(/\s+/).length, 0) +
+      (view === "full"
+        ? (record.chapters || []).reduce((n, c) => n + String(c.text).split(/\s+/).length, 0)
+        : 0);
+    if (readCell) readCell.textContent = `${Math.max(1, Math.round(words / 220))} min read`;
+  }
+
+  /* §6 rule 11, applied to a control that is wired and still has nothing to
+     do: a short source yields five points or fewer and no chapters, so Full
+     and Brief are the same page. Rather than let the person click and watch
+     nothing move, `Full` says why for two seconds and leaves `Brief` set. */
+  const nothingMore =
+    data.points.length <= BRIEF_POINTS && !(record.chapters || []).length;
+
+  for (const segment of node.querySelectorAll(".segment")) {
+    segment.addEventListener("click", () => {
+      if (segment.dataset.view === "full" && nothingMore) {
+        answer(segment, "That is the whole summary");
+        return;
+      }
+      for (const other of node.querySelectorAll(".segment")) {
+        other.setAttribute("aria-pressed", String(other === segment));
+      }
+      show(segment.dataset.view);
+    });
+  }
+  show("brief");
+
+  const plain = () => {
+    const shown = [...list.querySelectorAll(".point-text")].map((p) => p.textContent);
+    return `${source.title || ""}\n\n${record.gist}\n\n${shown
+      .map((text, i) => `${i + 1}. ${text}`)
+      .join("\n")}\n`;
+  };
+
+  node.querySelector("#sum-copy").addEventListener("click", (event) =>
+    copyText(event.currentTarget, plain())
+  );
+  for (const item of node.querySelectorAll("#sum-download .menu-item")) {
+    item.addEventListener("click", () => {
+      const title = source.title || "summary";
+      if (item.dataset.format === "txt") download(fileName(title, "txt"), plain());
+      else {
+        const shown = [...list.querySelectorAll(".point-text")].map((p) => p.textContent);
+        download(
+          fileName(title, "md"),
+          `# ${title}\n\n${record.gist}\n\n## Key points\n\n` +
+            shown.map((text) => `- ${text}`).join("\n") +
+            "\n"
+        );
+      }
+      node.querySelector("#sum-download").hidden = true;
+    });
+  }
+  return node;
 };
+
+/* ---------------------------------------------------------------------- */
+/* controls that do something, or say why not                              */
+/*                                                                          */
+/* §6 rule 11: "An unavailable control says what is missing and offers to    */
+/* fix it, rather than greying out. Clicking Copy with nothing to copy       */
+/* answers 'Generate your link first' for 2s, then returns to 'Copy'."       */
+/*                                                                          */
+/* A button that is drawn and does nothing is worse than one that is not     */
+/* drawn: it is a promise the page cannot keep, and the person finds out by  */
+/* clicking it.                                                              */
+/* ---------------------------------------------------------------------- */
+
+/** Say something on a button for two seconds, then give it back. */
+export function answer(button, message) {
+  if (button.dataset.answering) return;
+  const original = button.innerHTML;
+  button.dataset.answering = "1";
+  button.textContent = message;
+  setTimeout(() => {
+    button.innerHTML = original;
+    delete button.dataset.answering;
+  }, 2000);
+}
+
+export async function copyText(button, text) {
+  if (!text) {
+    answer(button, "Nothing to copy yet");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    answer(button, "Copied");
+  } catch {
+    // A denied clipboard is not a crash, and silence is not an answer.
+    answer(button, "Your browser blocked the copy");
+  }
+}
+
+export function download(name, text, type = "text/plain") {
+  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** A file name from a title, safe on every filesystem. */
+export function fileName(title, extension) {
+  const stem = String(title || "brain")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return `${stem || "brain"}.${extension}`;
+}
+
+/** §7.5's `Download ▾`. Only the formats that can actually be produced here:
+ *  §6 rule 11 again — offering `.pdf` and then doing nothing when it is
+ *  chosen is the dead control one layer down. */
+function downloadMenu(id, formats) {
+  return `
+    <span class="menu-wrap">
+      <button class="btn" data-variant="secondary" data-menu-for="${esc(id)}"
+              aria-haspopup="true" aria-expanded="false">
+        ${icon("download")}Download${icon("chevron-down")}
+      </button>
+      <span class="menu" id="${esc(id)}" hidden role="menu">
+        ${formats
+          .map(
+            (format) =>
+              `<button class="menu-item" role="menuitem" data-format="${esc(format)}">
+                 .${esc(format)}
+               </button>`
+          )
+          .join("")}
+      </span>
+    </span>`;
+}
+
+/** §4.7. Closes on outside click and on Escape, both of which the plan names
+ *  and neither of which happens by itself. */
+function wireMenus(node) {
+  // Outside click and Escape are document-level, and the frame they belong to
+  // is replaced on every navigation. Left attached, each visit would add two
+  // more listeners that keep the whole detached frame alive; so the first
+  // event after the frame leaves the document takes them off.
+  const scope = new AbortController();
+  const close = () => {
+    if (!node.isConnected) {
+      scope.abort();
+      return;
+    }
+    for (const menu of node.querySelectorAll(".menu:not([hidden])")) {
+      menu.hidden = true;
+      node
+        .querySelector(`[data-menu-for="${menu.id}"]`)
+        ?.setAttribute("aria-expanded", "false");
+    }
+  };
+
+  for (const trigger of node.querySelectorAll("[data-menu-for]")) {
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const menu = node.querySelector(`#${CSS.escape(trigger.dataset.menuFor)}`);
+      const opening = menu.hidden;
+      close();
+      menu.hidden = !opening;
+      trigger.setAttribute("aria-expanded", String(opening));
+    });
+  }
+
+  document.addEventListener("click", close, { signal: scope.signal });
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Escape") close();
+    },
+    { signal: scope.signal }
+  );
+  return close;
+}
+
+/** Live filtering for a list's own search field.
+ *
+ *  §7.4, §7.7, §7.8, §7.9 and §7.12 all draw one. Drawing a field that
+ *  filters nothing is the same broken promise as a dead button.
+ */
+function wireListSearch(node, { rowSelector = ".item-card, .exp-card" } = {}) {
+  const field = node.querySelector(".search .input");
+  if (!field) return;
+  const empty = node.querySelector(".empty");
+
+  field.addEventListener("input", () => {
+    const needle = field.value.trim().toLowerCase();
+    let shown = 0;
+    for (const row of node.querySelectorAll(rowSelector)) {
+      const match = !needle || row.textContent.toLowerCase().includes(needle);
+      row.hidden = !match;
+      if (match) shown += 1;
+    }
+    // §6 rule 13: a section with nothing left in it hides itself, title too.
+    for (const group of node.querySelectorAll(".date-group, .section")) {
+      const rows = [...group.querySelectorAll(rowSelector)];
+      if (rows.length) group.hidden = !rows.some((row) => !row.hidden);
+    }
+    let note = node.querySelector(".search-note");
+    if (!note) {
+      note = el('<p class="search-note"></p>');
+      node.querySelector(".toolbar").after(note);
+    }
+    note.hidden = !needle;
+    note.textContent = needle && !shown ? `Nothing here matches “${field.value.trim()}”.` : "";
+    if (empty) empty.hidden = Boolean(needle);
+  });
+}
 
 /* ---------------------------------------------------------------------- */
 /* §7.3 SOURCE DETAIL — the work block                                     */
@@ -1094,6 +1519,7 @@ FRAMES.rules = async function rules() {
     </div>`);
 
   wireExpanders(node);
+  wireListSearch(node);
   return node;
 };
 
@@ -1168,6 +1594,7 @@ FRAMES.skills = async function skills() {
 
   wireExpanders(node);
   wireApprovals(node);
+  wireListSearch(node);
   for (const button of node.querySelectorAll("[data-dismiss]")) {
     button.addEventListener("click", async () => {
       button.disabled = true;
@@ -1272,6 +1699,7 @@ FRAMES.archive = async function archive() {
     </div>`);
 
   wireExpanders(node);
+  wireListSearch(node);
 
   // The filter exists here and nowhere else, because this is the only
   // heterogeneous list in the app (§7.12).

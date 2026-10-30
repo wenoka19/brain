@@ -1522,6 +1522,15 @@ def op_get_transcript(ctx: Context, source_id: str) -> OpResult:
         # A document has no cues. The body is still readable, as one turn.
         turns = [{"text": record["full_text"], "t_ms": None, "label": "", "deep_link": ""}]
 
+    # §7.5's derived strip names what this transcript produced, so it needs
+    # the summary's id and the two counts rather than a boolean.
+    summary = tenant_db.get_summary(ctx.tenant, source_id=source["id"])
+    skill_count = ctx.tenant.execute(
+        "SELECT COUNT(*) AS n FROM skills WHERE source_id = ? "
+        "AND status IN ('active','proposed')",
+        (source["id"],),
+    ).fetchone()["n"]
+
     ctx.audit("get_transcript", "ok", target_id=source["id"])
     return OpResult(
         ok=True,
@@ -1531,7 +1540,9 @@ def op_get_transcript(ctx: Context, source_id: str) -> OpResult:
             "word_count": record["word_count"],
             "turns": turns,
             "full_text": record["full_text"],
-            "has_summary": tenant_db.get_summary(ctx.tenant, source_id=source["id"]) is not None,
+            "summary_id": summary["id"] if summary else "",
+            "rule_count": len(tenant_db.claims_for_source(ctx.tenant, source["id"], limit=200)),
+            "skill_count": skill_count,
         },
     )
 
