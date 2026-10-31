@@ -48,28 +48,25 @@ ENV PYTHONUNBUFFERED=1 \
     BRAIN_DATA_DIR=/data \
     PORT=8080
 
-# ca-certificates for outbound HTTPS; litestream for replication; deno because
-# yt-dlp needs a JavaScript runtime to read YouTube.
+# ca-certificates for outbound HTTPS; litestream for replication.
 #
-# That last one is not optional any more. Without it yt-dlp logs "No supported
-# JavaScript runtime could be found ... YouTube extraction without a JS runtime
-# has been deprecated" and then "No title found in player response", and every
-# single video fails. Measured on production: three of the most public videos
-# on YouTube, all refused, with nothing in the image to explain it. `deno` is
-# the one runtime yt-dlp enables by default.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+# The JavaScript runtime YouTube needs is deliberately NOT here any more. It
+# is `deno` in `pyproject.toml`, which the build stage installs into the venv
+# with pip, so it arrives with the `COPY --from=build` below.
+#
+# What stood here was a hand-rolled download: `dpkg --print-architecture`, a
+# case statement mapping it to a Deno release target, a curl of a hardcoded
+# `v2.1.4` zip, and `deno --version` to prove the binary ran. It did run. It
+# was also below yt-dlp's minimum supported version (2.3.0), which no step in
+# that pipeline knew, so the image passed its own check and every video still
+# failed with "No supported JavaScript runtime could be found". Two guesses in
+# one RUN — the architecture and the version — and pip knows both: the Deno
+# authors publish manylinux wheels for x86_64 and aarch64, and yt-dlp's own
+# `deno` extra states the version it will accept.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && curl -sSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
        | tar -xz -C /usr/local/bin litestream \
-    && DENO_ARCH="$(dpkg --print-architecture)" \
-    && case "$DENO_ARCH" in \
-         amd64) DENO_TARGET=x86_64-unknown-linux-gnu ;; \
-         arm64) DENO_TARGET=aarch64-unknown-linux-gnu ;; \
-         *) echo "no deno build for $DENO_ARCH" >&2; exit 1 ;; \
-       esac \
-    && curl -sSL "https://github.com/denoland/deno/releases/download/v2.1.4/deno-${DENO_TARGET}.zip" -o /tmp/deno.zip \
-    && unzip -q /tmp/deno.zip -d /usr/local/bin && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
-    && deno --version \
-    && apt-get purge -y curl unzip && apt-get autoremove -y \
+    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/venv /opt/venv
@@ -89,6 +86,14 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN useradd --system --create-home --uid 10001 brainuser \
     && mkdir -p /data/users /data/uploads /data/snapshots \
     && chown -R brainuser:brainuser /data /app
+
+# The image refuses to exist if yt-dlp cannot read YouTube. It asks yt-dlp
+# itself — which runtime it will use, whether it considers that runtime
+# supported, and whether the challenge-solver scripts are installed — offline,
+# with no URL, no credentials and no network. Both deploys before this one
+# printed "0 failure(s). Ready." and could not read a single video; a check
+# that runs in the build is the only one nobody is waiting on.
+RUN python -m app.cli youtube-check
 
 # `VOLUME ["/data"]` is deliberately NOT declared. Railway rejects a build that
 # contains it: there, the volume is attached to the service in the dashboard and

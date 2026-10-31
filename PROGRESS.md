@@ -1534,3 +1534,134 @@ connection never reaches `_open` at all.
 The guard runs five rounds of eight concurrent opens, each on a fresh file,
 because the race only exists while the schema is being built. One round caught
 the regression about two times in three; five catch it six times out of six.
+
+
+---
+
+## R-22 — The runtime that was there, ran, and was refused (31 October 2026)
+
+Third deploy, same symptom, and this one left both halves of the answer in
+one paste. The boot said:
+
+```
+[ ok ] yt-dlp on PATH
+[ ok ] yt-dlp JavaScript runtime — deno 2.1.4 (stable, release, x86_64-unknown-linux-gnu)
+0 failure(s), 1 warning(s). Ready.
+```
+
+and the job said:
+
+```
+yt-dlp has no JavaScript runtime, so YouTube cannot be read at all — install deno in the image.
+job job_efc04cd162304ac4a311 -> failed (0 claims)
+```
+
+Both true. deno was installed, built for the right architecture, and exited 0
+on `--version` — and yt-dlp refused it.
+
+### What was actually wrong
+
+`yt_dlp/utils/_jsruntime.py`, read in the installed 2026.10.26:
+
+```python
+class DenoJsRuntime(JsRuntime):
+    MIN_SUPPORTED_VERSION = (2, 3, 0)
+    ...
+    supported=vt >= self.MIN_SUPPORTED_VERSION
+```
+
+and `EJSBaseJCP.runtime_info` drops anything with `supported is False`, which
+makes `is_available()` false, which sends `_get_requested_clients` to
+`_DEFAULT_JSLESS_CLIENTS` — printing the "No supported JavaScript runtime
+could be found" warning and then, with no player response to read, "No title
+found in player response". Measured against the library itself:
+
+| deno | `DenoJsRuntime(...).info.supported` |
+|---|---|
+| 2.1.4 (what the image carried) | **False** |
+| 2.9.8 | True |
+
+The image hardcoded 2.1.4. yt-dlp's own `deno` extra asks for `deno>=2.9.8`.
+One minor version, and every video in the queue.
+
+**There was a second missing piece, which no deploy had reached yet.** The
+wheel vendors the solver's *core* script (`yt.solver.core.js`) but not its
+*lib* script, so with a supported runtime and no `yt-dlp-ejs` package the only
+remaining sources are an NPM or GitHub download that yt-dlp refuses unless
+`--remote-components` allows it. Measured in a venv built with `yt-dlp[deno]`
+and no `default` extra: `JS runtimes: deno-2.9.8`, `Optional libraries:
+sqlite3-3.53.1`, and no challenge can be solved. Fixing only the version would
+have produced a fourth failing deploy with a fourth stderr.
+
+### The shape of the mistake, three times over
+
+- `which yt-dlp` — true while every video failed.
+- `which deno` — true while every video failed.
+- `deno --version` exits 0 — true while every video failed.
+
+Each one was a fact about the filesystem standing in for a capability of the
+program, and each new check was one layer deeper into the same error. The
+program was right there the whole time and will answer:
+
+```
+$ yt-dlp --no-config -v
+[debug] Optional libraries: ..., yt_dlp_ejs-0.8.0
+[debug] JS runtimes: deno-2.9.8
+```
+
+No URL, no network, no credentials; exits 2 because there is no URL, and
+writes the header to stderr, which is why the probe ignores the return code.
+`deno-2.1.4 (unsupported)` is what the production image would have printed.
+
+### What changed
+
+- **`pyproject.toml`** declares `yt-dlp[default,deno]>=2026.10.26`. The
+  `deno` extra is the Deno authors' own PyPI redistribution
+  (`support@deno.com`, MIT, manylinux wheels for x86_64 and aarch64), so pip
+  picks the architecture and yt-dlp picks the version; `default` carries
+  `yt-dlp-ejs==0.8.0`, pinned by yt-dlp to the script version its wheel
+  vendors. Both numbers stop being ours to get wrong.
+- **`Dockerfile`** loses the hand-rolled download — `dpkg
+  --print-architecture`, the case statement, the hardcoded zip URL, `unzip` —
+  and gains `RUN python -m app.cli youtube-check`, so an image that cannot
+  read YouTube does not build. `entrypoint.sh` deliberately continues when
+  `doctor` complains, so the build is the only place where failing costs
+  nobody anything.
+- **`app/ingestion/fetchers.py`** gains `youtube_readiness()`, which asks
+  yt-dlp and reads those two lines, and a `js_solver_missing` refusal for the
+  case where the runtime is fine and there is nothing to run. Both say "a tool
+  is missing on the server. Nothing you can fix" — ours, not YouTube's.
+- **`doctor`** and **`.claude/setup.sh`** report what yt-dlp says instead of
+  what `which` found.
+
+### Guards
+
+Verified end to end against real binaries before any test was written — the
+real yt-dlp, three provisionings:
+
+| what | `youtube-check` |
+|---|---|
+| `yt-dlp[default,deno]` | `[ ok ] runtime deno-2.9.8, solver yt_dlp_ejs-0.8.0` |
+| the same, forced onto deno 2.1.4 | `[fail] refuses it as too old` |
+| `yt-dlp[deno]`, no solver scripts | `[fail] challenge-solver scripts are missing` |
+
+`TestReadinessIsAskedOfYtDlpNotGuessedFromDisk` feeds the probe yt-dlp's real
+debug header for each case; the doctor tests that used to assert
+`[ok] ... deno 2.1.4` now assert that exact string is a failure. The packaging
+tests fail if the Dockerfile downloads deno by hand again, if the gate is
+dropped, or if either extra leaves `pyproject.toml`.
+
+### Left undone, deliberately
+
+- **Whether a datacentre IP can read YouTube at all.** A JS runtime is
+  necessary, not sufficient: Railway's egress may still meet "Sign in to
+  confirm you're not a bot", which `R-20`'s classifier already names
+  correctly as `platform_blocked_caller`. That cannot be measured from the
+  Cloud VM, whose proxy refuses YouTube outright (403 on the tunnel). The next
+  deploy's logs will say, and the sentence the person reads is already written
+  for either outcome.
+- **The demo row's job poll.** The same log shows eight
+  `GET /api/sources/src_demo_video/job → 404`: the first-run demo source is
+  seeded directly, with no `ingestion_jobs` row, and the page polls it anyway.
+  Harmless and cosmetic, in the web app rather than the pipeline, and not what
+  this entry is about.

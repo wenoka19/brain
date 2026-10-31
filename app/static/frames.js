@@ -778,6 +778,7 @@ const REMEDY = {
   image_too_large: "That image is over the size cap — shrink it and try again",
   tool_missing: "Brain is missing a tool for this type. Nothing you can fix",
   js_runtime_missing: "The server is missing a tool YouTube needs. Nothing you can fix",
+  js_solver_missing: "The server is missing a tool YouTube needs. Nothing you can fix",
   vision_unavailable: "Reading images is not switched on for this Brain. Nothing you can fix",
 
   /* The model host, not the source. These reach the person through the same
