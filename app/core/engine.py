@@ -1063,13 +1063,247 @@ def _step_detail_read(job: dict[str, Any], content: Any) -> str:
     return target if len(target) <= 48 else target[:45] + "…"
 
 
-def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str, Any]:
-    """Run one leased job all the way through: fetch -> extract -> link."""
+# ---------------------------------------------------------------------------
+# `R-23`: the fetch that happens on another machine
+# ---------------------------------------------------------------------------
+#: What the person is told when a video could not be read, whatever the cause.
+#: One sentence, by the founder's decision: the causes differ (the platform
+#: refused the reader, the reader's tooling is behind, nothing picked it up)
+#: and none of them is anything they can act on. The precise reason is kept on
+#: the job row and in the audit log, where the operator reads it.
+VIDEO_UNAVAILABLE = "Video unavailable right now, try later."
+
+#: Reasons where trying again changes nothing, so the job ends now rather than
+#: waiting out its attempts. Each already has a sentence of its own that tells
+#: the person something true and actionable, which is why they are not
+#: flattened into `VIDEO_UNAVAILABLE`.
+PERMANENT_FETCH_REASONS = frozenset(
+    {
+        "no_transcript",        # no captions exist; later will not create them
+        "blocked_by_platform",  # private, members-only, age-restricted
+        "too_long",             # past the 120-minute admission ceiling
+        "youtube_id_not_found",
+        "raw_media_blocked",
+        "unsupported_content_type",
+    }
+)
+
+#: The locator kinds the schema allows. Taken from the job's own medium, never
+#: from the reader's word for it.
+_LOCATOR_TYPES = frozenset({"timestamp", "page", "section", "none"})
+
+
+def remote_fetch_wanted(source_type: str, *, cfg: Settings | None = None) -> bool:
+    """Is this a source type whose fetch leaves the server?"""
+    cfg = cfg or settings()
+    return source_type in (cfg.remote_fetch_types or ())
+
+
+def lease_fetch_job(*, user_id: str | None = None, cfg: Settings | None = None):
+    """Hand a reader the next video to fetch, or nothing.
+
+    Three fields go out and no more: the job id, the canonical URL the
+    gatekeeper already validated, and the medium. Not the user id, not the
+    note that steers extraction, not a database path — the reader has no use
+    for them, and least privilege is cheaper to keep than to retrofit.
+
+    The lease spends no attempt. A reader that goes offline between leasing
+    and reporting has told us nothing about the video, and a closed laptop
+    must not be able to fail someone's source.
+    """
+    cfg = cfg or settings()
+    if not cfg.remote_fetch_types:
+        return None
+    control = control_db.control()
+    job = control_db.claim_next_job(
+        control,
+        user_id=user_id,
+        lease_seconds=cfg.fetch_lease_sec,
+        max_attempts=cfg.fetch_max_attempts,
+        source_types=cfg.remote_fetch_types,
+        count_attempt=False,
+    )
+    if job is None:
+        return None
+    # The work block shows the read as started, exactly as the in-process
+    # path does, so the thread looks the same whoever is doing the reading.
+    control_db.seed_job_steps(control, job["job_id"])
+    control_db.start_step(control, job["job_id"], "read")
+    control_db.audit(
+        control,
+        user_id=job["user_id"],
+        action="lease_fetch",
+        status="leased",
+        surface="system",
+        target_id=job["job_id"],
+        detail={"source_type": job["source_type"]},
+    )
+    return {
+        "job_id": job["job_id"],
+        "url": job["input_target"],
+        "source_type": job["source_type"],
+    }
+
+
+def _content_from_payload(payload: dict[str, Any], job: dict[str, Any]) -> FetchedContent:
+    """Rebuild a `FetchedContent` from what a reader posted.
+
+    Everything here is untrusted input from a machine on someone's desk, so
+    every field is coerced and bounded, and two are not read from the payload
+    at all: `source_type` comes from the job row, so a reader cannot change
+    what kind of thing this is, and `locator_type` must be one the schema
+    allows. `finalise()` then strips control characters and invisible Unicode
+    from the title, the text and every cue — the same cleaning a local fetch
+    gets, because the threat is the same (MCP06).
+    """
+    cues: list[dict[str, Any]] = []
+    for raw in (payload.get("cues") or [])[:50_000]:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "")
+        if not text.strip():
+            continue
+        cue: dict[str, Any] = {"text": text}
+        if raw.get("start") is not None:
+            try:
+                cue["start"] = max(0, int(float(raw["start"])))
+                cue["end"] = max(cue["start"], int(float(raw.get("end") or cue["start"])))
+            except (TypeError, ValueError):
+                continue
+        elif raw.get("page") is not None:
+            try:
+                cue["page"] = max(1, int(float(raw["page"])))
+            except (TypeError, ValueError):
+                continue
+        elif raw.get("section"):
+            cue["section"] = str(raw["section"])[:200]
+        cues.append(cue)
+
+    locator = str(payload.get("locator_type") or "")
+    if locator not in _LOCATOR_TYPES:
+        locator = "timestamp" if any("start" in cue for cue in cues) else "none"
+
+    try:
+        duration = max(0, int(float(payload.get("duration_sec") or 0)))
+    except (TypeError, ValueError):
+        duration = 0
+
+    return FetchedContent(
+        title=str(payload.get("title") or ""),
+        full_text=str(payload.get("full_text") or ""),
+        cues=cues,
+        author=str(payload.get("author") or "")[:200],
+        published_at=str(payload.get("published_at") or "")[:10],
+        language=str(payload.get("language") or "en")[:16],
+        duration_sec=duration,
+        source_type=job["source_type"],
+        locator_type=locator,
+    ).finalise()
+
+
+def accept_fetched_content(
+    job_id: str, payload: dict[str, Any], *, cfg: Settings | None = None
+) -> dict[str, Any]:
+    """Enter the pipeline with text a reader fetched elsewhere.
+
+    The same door the local path uses: `_ingest_content` charges the credits,
+    enforces the 120-minute ceiling, extracts, grounds and links. Nothing
+    about the rest of the product knows where the words came from — which is
+    the whole point of moving only the fetch.
+
+    Not `op_rescue_job`, which exists and would have been the shortcut: that
+    one rebuilds cues as `Pasted part N` sections and forces
+    `locator_type="section"`, so every claim from a video would lose its
+    timestamp and its deep link.
+    """
     cfg = cfg or settings()
     control = control_db.control()
+    job = control_db.get_job(control, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["status"] in ("ready", "failed", "blocked_by_platform"):
+        # A reader that retried after its report landed must not re-charge a
+        # finished job. Idempotent by status, which is the only state both
+        # sides can see.
+        return {"job_id": job_id, "status": job["status"], "claims": 0, "message": "", "stale": True}
+    if not remote_fetch_wanted(job["source_type"], cfg=cfg):
+        raise ValueError(f"{job['source_type']} is not fetched remotely")
+
+    content = _content_from_payload(payload, dict(job))
+    finish = _job_finisher(dict(job), cfg=cfg)
+    if not content.full_text:
+        return finish("failed", message=VIDEO_UNAVAILABLE, reason="empty_content")
+    control_db.finish_step(
+        control, job_id, "read", detail=_step_detail_read(dict(job), content)
+    )
+    return _ingest_content(dict(job), content, cfg=cfg, finish=finish)
+
+
+def report_fetch_problem(
+    job_id: str, reason: str, message: str = "", *, cfg: Settings | None = None
+) -> dict[str, Any]:
+    """A reader could not read it — defer rather than fail, while it can.
+
+    The founder's rule: do not dress up a failure state you can avoid. A
+    platform refusal or a reader with stale tooling says nothing permanent
+    about the video, so the job goes back to the queue with a delay and the
+    person sees no change at all. Only when the attempts are spent, or the
+    reason is one where waiting cannot help, does anything terminal get
+    written — and then it is one sentence.
+    """
+    cfg = cfg or settings()
+    control = control_db.control()
+    job = control_db.get_job(control, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["status"] in ("ready", "failed", "blocked_by_platform"):
+        return {"job_id": job_id, "status": job["status"], "deferred": False, "stale": True}
+
+    spent = control_db.spend_attempt(control, job_id)
+    permanent = reason in PERMANENT_FETCH_REASONS
+    control_db.audit(
+        control,
+        user_id=job["user_id"],
+        action="fetch_problem",
+        status=reason or "unknown",
+        surface="system",
+        target_id=job_id,
+        # The operator's copy of what actually happened. The person gets one
+        # sentence; this keeps the sentence the reader wrote.
+        detail={"attempt": spent, "message": message[:400], "permanent": permanent},
+    )
+
+    if not permanent and spent < cfg.fetch_max_attempts:
+        control_db.defer_job(
+            control, job_id, seconds=cfg.fetch_retry_after_sec, note=reason or "fetch_deferred"
+        )
+        LOGGER.info(
+            "job %s handed back after attempt %s (%s) — retrying in %ss",
+            job_id, spent, reason, cfg.fetch_retry_after_sec,
+        )
+        return {"job_id": job_id, "status": "queued", "deferred": True, "attempt": spent}
+
+    finish = _job_finisher(dict(job), cfg=cfg)
+    status = "blocked_by_platform" if reason == "blocked_by_platform" else "failed"
+    # `no_transcript` and a private video each have a sentence that tells the
+    # person something true and actionable, so they keep it. Everything else
+    # is ours or transient, and says the one line.
+    said = message if (permanent and message) else VIDEO_UNAVAILABLE
+    return finish(status, message=said, reason=reason or "fetch_failed")
+
+
+def _job_finisher(job: dict[str, Any], *, cfg: Settings):
+    """Build the one function every exit from a job goes through.
+
+    Extracted from `process_job` by `R-23` with no change to its body: a
+    video's fetch now happens on another machine, so the pipeline is
+    entered from two places, and both have to end a job the same way —
+    the refund, the abandoned steps, the blocked source row, the upload
+    release and the audit row. A second copy of this would drift, and
+    what it would drift on is the person's credits.
+    """
+    control = control_db.control()
     user_id = job["user_id"]
-    tdb = tenant_db.tenant(user_id, cfg=cfg)
-    prov = providers(cfg)
     job_id = job["job_id"]
 
     def finish(
@@ -1129,6 +1363,20 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
             "message": message,
             "source_id": job["source_id"],
         }
+
+    return finish
+
+
+def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str, Any]:
+    """Run one leased job all the way through: fetch -> extract -> link."""
+    cfg = cfg or settings()
+    control = control_db.control()
+    user_id = job["user_id"]
+    tdb = tenant_db.tenant(user_id, cfg=cfg)
+    prov = providers(cfg)
+    job_id = job["job_id"]
+
+    finish = _job_finisher(job, cfg=cfg)
 
     # ---- step 1: reading the source ---------------------------------------
     # The ledger is seeded at queue time. This is the safety net for a job
@@ -2205,10 +2453,18 @@ def run_pending_jobs_sync(
     """
     cfg = cfg or settings()
     control = control_db.control()
-    control_db.reap_exhausted_jobs(control, user_id=user_id)
+    control_db.reap_exhausted_jobs(
+        control, user_id=user_id, exclude_source_types=cfg.remote_fetch_types
+    )
     processed: list[dict[str, Any]] = []
     for _ in range(max(1, limit)):
-        job = control_db.claim_next_job(control, user_id=user_id)
+        # `R-23`: a video is fetched by a reader on a residential connection,
+        # so this loop must not claim one. It would run `fetch_youtube` from
+        # the datacentre IP that YouTube refuses, and spend the job's attempts
+        # proving it.
+        job = control_db.claim_next_job(
+            control, user_id=user_id, exclude_source_types=cfg.remote_fetch_types
+        )
         if job is None:
             break
         try:

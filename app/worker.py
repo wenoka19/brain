@@ -56,9 +56,17 @@ class Worker:
         # charge is never given back. Before credits that leaked a
         # reservation quietly; now it would leak something the person can see
         # on their own usage screen.
-        control_db.reap_exhausted_jobs(control, max_attempts=MAX_ATTEMPTS)
+        control_db.reap_exhausted_jobs(
+            control,
+            max_attempts=MAX_ATTEMPTS,
+            exclude_source_types=self.cfg.remote_fetch_types,
+        )
+        # `R-23`: videos belong to the reader on a residential connection.
         job = control_db.claim_next_job(
-            control, lease_seconds=LEASE_SECONDS, max_attempts=MAX_ATTEMPTS
+            control,
+            lease_seconds=LEASE_SECONDS,
+            max_attempts=MAX_ATTEMPTS,
+            exclude_source_types=self.cfg.remote_fetch_types,
         )
         if job is None:
             return None
