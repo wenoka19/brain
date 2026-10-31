@@ -195,6 +195,21 @@ def _youtube_refusal(stderr: str, url: str) -> ProviderError:
     """
     text = (stderr or "").lower()
     head = " ".join((stderr or "").split())[:400]
+    # Ours before theirs. Production hit this one and my own classifier called
+    # it a bot wall: yt-dlp needs a JavaScript runtime to read YouTube now, the
+    # image had none, and every video failed with "No title found in player
+    # response". Blaming YouTube for a missing dependency sends the operator
+    # looking outward at something they own.
+    if "javascript runtime" in text or "js runtime" in text:
+        LOGGER.error(
+            "yt-dlp has no JavaScript runtime, so YouTube cannot be read at all — "
+            "install deno in the image. yt-dlp said: %s", head,
+        )
+        return ProviderError(
+            "js_runtime_missing",
+            "This Brain cannot read YouTube right now: a tool is missing on the server. "
+            "Nothing you can fix.",
+        )
     if any(k in text for k in _BOT_WALL):
         LOGGER.warning("youtube refused this server for %s — yt-dlp said: %s", url, head)
         return ProviderError(

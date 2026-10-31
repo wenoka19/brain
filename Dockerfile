@@ -48,11 +48,21 @@ ENV PYTHONUNBUFFERED=1 \
     BRAIN_DATA_DIR=/data \
     PORT=8080
 
-# ca-certificates for outbound HTTPS; litestream for replication.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+# ca-certificates for outbound HTTPS; litestream for replication; deno because
+# yt-dlp needs a JavaScript runtime to read YouTube.
+#
+# That last one is not optional any more. Without it yt-dlp logs "No supported
+# JavaScript runtime could be found ... YouTube extraction without a JS runtime
+# has been deprecated" and then "No title found in player response", and every
+# single video fails. Measured on production: three of the most public videos
+# on YouTube, all refused, with nothing in the image to explain it. `deno` is
+# the one runtime yt-dlp enables by default.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && curl -sSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
        | tar -xz -C /usr/local/bin litestream \
-    && apt-get purge -y curl && apt-get autoremove -y \
+    && curl -sSL https://github.com/denoland/deno/releases/download/v2.1.4/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip \
+    && unzip -q /tmp/deno.zip -d /usr/local/bin && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
+    && apt-get purge -y curl unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/venv /opt/venv

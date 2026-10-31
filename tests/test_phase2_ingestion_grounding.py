@@ -1435,3 +1435,78 @@ class TestYouTubeRefusalIsDiagnosable:
         mapped = set(re.findall(r"^  ([a-z_]+):", block, re.M))
         for reason in ("platform_blocked_caller", "blocked_by_platform", "fetch_failed"):
             assert reason in mapped, reason
+
+
+class TestAMissingJsRuntimeBlamesTheServer:
+    """Production's real failure, and my own classifier got it wrong first.
+
+    yt-dlp needs a JavaScript runtime to read YouTube. The image had none, so
+    every video failed with "No title found in player response" — and the
+    first version of `_youtube_refusal` called that a bot wall, which blames
+    YouTube for a dependency we own and sends the operator looking outward.
+    """
+
+    def _reason(self, stderr: str) -> str:
+        from app.ingestion.fetchers import _youtube_refusal
+
+        return _youtube_refusal(stderr, "https://youtu.be/x").reason
+
+    def test_the_real_production_stderr_is_named_correctly(self):
+        stderr = (
+            "WARNING: [youtube] No supported JavaScript runtime could be found. Only deno "
+            "is enabled by default; to use another runtime add --js-runtimes RUNTIME[:PATH]. "
+            "YouTube extraction without a JS runtime has been deprecated. "
+            "WARNING: [youtube] No title found in player response"
+        )
+        assert self._reason(stderr) == "js_runtime_missing"
+
+    def test_ours_is_checked_before_theirs(self):
+        """A stderr carrying both must blame the dependency we control."""
+        stderr = (
+            "No supported JavaScript runtime could be found. "
+            "ERROR: Sign in to confirm you're not a bot."
+        )
+        assert self._reason(stderr) == "js_runtime_missing"
+
+    def test_doctor_fails_when_no_runtime_is_installed(self, cfg, monkeypatch, capsys):
+        """The check lives in the prod block, because that is the image that
+        has to carry the runtime."""
+        import shutil as sh
+
+        from app import cli
+        from app import config as config_module
+
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://example.test")
+        monkeypatch.setenv("BRAIN_JWT_SECRET", "doctor-secret-key-long-enough-for-hs256")
+        config_module.reload_settings()
+
+        real = sh.which
+        monkeypatch.setattr(
+            cli.shutil, "which",
+            lambda name: "" if name in ("deno", "node", "bun", "qjs") else real(name),
+        )
+        cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
+        out = capsys.readouterr().out
+        assert "JavaScript runtime" in out
+        assert "0 failure(s)" not in out, "doctor called itself ready with no JS runtime"
+
+    def test_doctor_is_happy_when_a_runtime_is_there(self, cfg, monkeypatch, capsys):
+        import shutil as sh
+
+        from app import cli
+        from app import config as config_module
+
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://example.test")
+        monkeypatch.setenv("BRAIN_JWT_SECRET", "doctor-secret-key-long-enough-for-hs256")
+        config_module.reload_settings()
+
+        real = sh.which
+        monkeypatch.setattr(
+            cli.shutil, "which",
+            lambda name: "/usr/local/bin/deno" if name == "deno" else real(name),
+        )
+        cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
+        out = capsys.readouterr().out
+        assert "yt-dlp JavaScript runtime" in out and "deno" in out

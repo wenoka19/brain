@@ -307,6 +307,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             line("warn", "yt-dlp", "not found — YouTube ingestion will fail")
             warnings += 1
+        # yt-dlp on PATH is no longer enough. It needs a JavaScript runtime to
+        # read YouTube, and without one every video fails with "No title found
+        # in player response" — which production did, while `doctor` reported
+        # `yt-dlp on PATH` and called itself ready.
+        runtime = next((r for r in ("deno", "node", "bun", "qjs") if shutil.which(r)), "")
+        if runtime:
+            line("ok", "yt-dlp JavaScript runtime", runtime)
+        else:
+            line(
+                "bad",
+                "yt-dlp JavaScript runtime",
+                "none of deno/node/bun found — YouTube extraction is deprecated without "
+                "one and every video fails. Install deno in the image",
+            )
+            failures += 1
 
     # ---- portability -------------------------------------------------------
     from app.storage import r2_sync
