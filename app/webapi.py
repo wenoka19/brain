@@ -478,6 +478,78 @@ async def api_job_run(request: Request) -> Response:
     return _json({"ok": True, "processed": processed})
 
 
+# ---------------------------------------------------------------------------
+# `R-23`: the reader's two endpoints
+# ---------------------------------------------------------------------------
+def _fetcher_auth(request: Request) -> Settings:
+    """Authenticate a reader, or refuse without telling it anything.
+
+    A bearer token, compared in constant time, never written to `control.db`,
+    rotated by changing `BRAIN_FETCHER_TOKEN`. No CSRF check: that defends
+    cookie authentication, and there is no cookie here.
+
+    Both failures answer the same 401 with the same sentence. A reader with
+    the wrong token must not be able to learn whether the feature is even
+    switched on, let alone whether a job is waiting.
+    """
+    cfg = settings()
+    presented = (request.headers.get("authorization") or "").strip()
+    scheme, _, token = presented.partition(" ")
+    if (
+        not cfg.fetcher_token
+        or scheme.lower() != "bearer"
+        or not hmac.compare_digest(token.strip(), cfg.fetcher_token)
+    ):
+        raise ApiError(401, "fetcher_unauthorised", "This reader is not authorised.")
+    return cfg
+
+
+@endpoint
+async def api_fetch_lease(request: Request) -> Response:
+    """Hand the next video to a reader on a residential connection.
+
+    Answers `{"job": null}` when there is nothing to do, which is the normal
+    case and not an error: the reader polls, and an empty queue is the
+    expected shape rather than a 404 it would have to special-case.
+    """
+    cfg = _fetcher_auth(request)
+    job = E.lease_fetch_job(cfg=cfg)
+    return _json({"ok": True, "job": job})
+
+
+@endpoint
+async def api_fetch_content(request: Request) -> Response:
+    """Take the text a reader fetched and run the rest of the pipeline."""
+    cfg = _fetcher_auth(request)
+    payload = await _body(request)
+    try:
+        outcome = E.accept_fetched_content(
+            request.path_params["job_id"], payload, cfg=cfg
+        )
+    except KeyError as exc:
+        raise ApiError(404, "no_such_job", "No job with that id.") from exc
+    except ValueError as exc:
+        raise ApiError(409, "not_remote", str(exc)) from exc
+    return _json({"ok": True, **outcome})
+
+
+@endpoint
+async def api_fetch_problem(request: Request) -> Response:
+    """A reader could not read it. Usually this changes nothing on the screen."""
+    cfg = _fetcher_auth(request)
+    payload = await _body(request)
+    try:
+        outcome = E.report_fetch_problem(
+            request.path_params["job_id"],
+            str(payload.get("reason") or "fetch_failed"),
+            str(payload.get("message") or ""),
+            cfg=cfg,
+        )
+    except KeyError as exc:
+        raise ApiError(404, "no_such_job", "No job with that id.") from exc
+    return _json({"ok": True, **outcome})
+
+
 @endpoint
 async def api_counts(request: Request) -> Response:
     """§5: "Counts live in the navigation and nowhere else." One read, so the
@@ -1080,6 +1152,9 @@ ROUTES = [
     Route("/api/jobs/{job_id}/rescue", api_job_rescue, methods=["POST"]),
     Route("/api/sources/{source_id}/job", api_source_progress, methods=["GET"]),
     Route("/api/sources/{source_id}/summary", api_source_summary, methods=["GET"]),
+    Route("/api/fetch-queue/lease", api_fetch_lease, methods=["POST"]),
+    Route("/api/fetch-queue/{job_id}/content", api_fetch_content, methods=["POST"]),
+    Route("/api/fetch-queue/{job_id}/problem", api_fetch_problem, methods=["POST"]),
     Route("/api/counts", api_counts, methods=["GET"]),
     Route("/api/sources", api_sources, methods=["GET"]),
     Route("/api/sources/{source_id}", api_source, methods=["GET"]),

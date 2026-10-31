@@ -138,6 +138,34 @@ class Settings:
     max_media_minutes: int = 120
     subprocess_timeout_sec: int = 45
     ytdlp_max_filesize: str = "25M"
+
+    # ---- `R-23`: what the server does not fetch itself -------------------
+    #: Source types whose fetch leaves this machine. YouTube refuses anonymous
+    #: requests from datacentre IPs — measured, and not fixable from here — so
+    #: a reader on a residential connection leases these jobs over HTTPS and
+    #: posts the text back. Everything else (uploads, articles, GitHub) has no
+    #: IP problem and is fetched in place.
+    #:
+    #: Deliberately NOT a new job status. `ingestion_jobs.status` carries a
+    #: CHECK constraint, so a new value means rebuilding that table under a
+    #: live database — and it would put a state on the person's screen that
+    #: says nothing to them. A video stays `queued`, then `fetching` when a
+    #: reader holds it: the same two words every other source uses, and the
+    #: work block keeps saying "Working on it".
+    remote_fetch_types: tuple[str, ...] = ("youtube",)
+    #: Shared secret the reader presents. Compared with `compare_digest`, never
+    #: stored in `control.db`, rotated by changing the variable.
+    fetcher_token: str = ""
+    #: How long a reader may hold a job before it is offered again.
+    fetch_lease_sec: int = 300
+    #: A reader that cannot read right now hands the job back with this delay
+    #: and *without* spending an attempt. A platform refusal is usually
+    #: temporary, and the point is that the person never sees it.
+    fetch_retry_after_sec: int = 600
+    #: Only a *reported* failure counts against this. A job nobody leased, or
+    #: a reader that went offline mid-job, costs nothing — otherwise closing a
+    #: laptop three times would fail a video that was never read once.
+    fetch_max_attempts: int = 6
     http_timeout_sec: float = 20.0
     max_redirect_hops: int = 5
     max_fetch_bytes: int = 20 * MB
@@ -521,6 +549,20 @@ def load_settings() -> Settings:
             os.environ["BRAIN_SHARD_INSTANCE_TEMPLATE"].strip()
             if "BRAIN_SHARD_INSTANCE_TEMPLATE" in os.environ
             else defaults.shard_instance_template
+        ),
+        fetcher_token=(os.environ.get("BRAIN_FETCHER_TOKEN") or "").strip(),
+        # `BRAIN_ENV=test` is the deterministic mode: its provider fetches a
+        # video from a fixture, with no network and no IP to refuse, and the
+        # whole suite drains those jobs in-process. Routing them to a reader
+        # that does not exist there would park every fixture forever. Prod
+        # gets the real default; a test that wants the routing asks for it by
+        # name through the variable.
+        remote_fetch_types=(
+            _list_env("BRAIN_REMOTE_FETCH_TYPES")
+            or ((), defaults.remote_fetch_types)[env == "prod"]
+        ),
+        fetch_retry_after_sec=_int_env(
+            "BRAIN_FETCH_RETRY_AFTER_SEC", defaults.fetch_retry_after_sec
         ),
         audience=os.environ.get("BRAIN_AUDIENCE", defaults.audience),
         llm_base_url=(os.environ.get("LLM_BASE_URL") or defaults.llm_base_url).rstrip("/"),
