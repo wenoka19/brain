@@ -1491,6 +1491,40 @@ class TestAMissingJsRuntimeBlamesTheServer:
         assert "JavaScript runtime" in out
         assert "0 failure(s)" not in out, "doctor called itself ready with no JS runtime"
 
+    def test_a_runtime_that_is_found_but_cannot_run_is_a_failure(
+        self, cfg, monkeypatch, capsys
+    ):
+        """`which` says a file exists and carries the executable bit. A deno
+        built for the wrong architecture passes that and dies the moment
+        yt-dlp calls it — which is how production printed
+        `[ok] yt-dlp JavaScript runtime — deno` on the same boot where every
+        video failed for want of one. Finding it is not running it."""
+        import subprocess as sp
+
+        from app import cli
+        from app import config as config_module
+
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://example.test")
+        monkeypatch.setenv("BRAIN_JWT_SECRET", "doctor-secret-key-long-enough-for-hs256")
+        config_module.reload_settings()
+
+        monkeypatch.setattr(
+            cli.shutil, "which",
+            lambda name: "/usr/local/bin/deno" if name == "deno" else "",
+        )
+        monkeypatch.setattr(
+            cli.subprocess, "run",
+            lambda *a, **k: sp.CompletedProcess(
+                a[0], 126, "", "cannot execute binary file: Exec format error"
+            ),
+        )
+        cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
+        out = capsys.readouterr().out
+        assert "deno unusable" in out
+        assert "Exec format error" in out
+        assert "0 failure(s)" not in out, "doctor passed a runtime that cannot run"
+
     def test_doctor_is_happy_when_a_runtime_is_there(self, cfg, monkeypatch, capsys):
         import shutil as sh
 
@@ -1503,10 +1537,16 @@ class TestAMissingJsRuntimeBlamesTheServer:
         config_module.reload_settings()
 
         real = sh.which
+        import subprocess as sp
+
         monkeypatch.setattr(
             cli.shutil, "which",
             lambda name: "/usr/local/bin/deno" if name == "deno" else real(name),
         )
+        monkeypatch.setattr(
+            cli.subprocess, "run",
+            lambda *a, **k: sp.CompletedProcess(a[0], 0, "deno 2.1.4", ""),
+        )
         cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
         out = capsys.readouterr().out
-        assert "yt-dlp JavaScript runtime" in out and "deno" in out
+        assert "yt-dlp JavaScript runtime" in out and "deno 2.1.4" in out

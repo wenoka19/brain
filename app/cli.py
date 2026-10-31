@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import os
 import shutil
+import subprocess
 import sqlite3
 import sys
 import tempfile
@@ -311,7 +312,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # read YouTube, and without one every video fails with "No title found
         # in player response" — which production did, while `doctor` reported
         # `yt-dlp on PATH` and called itself ready.
-        runtime = next((r for r in ("deno", "node", "bun", "qjs") if shutil.which(r)), "")
+        # Running it, not just finding it. `which` only says a file exists and
+        # carries the executable bit: a binary built for the wrong
+        # architecture passes that and fails the moment yt-dlp calls it, which
+        # is how production showed `[ok] yt-dlp JavaScript runtime — deno` on
+        # the same boot where every video failed for want of one.
+        runtime = ""
+        for candidate in ("deno", "node", "bun", "qjs"):
+            path = shutil.which(candidate)
+            if not path:
+                continue
+            try:
+                proc = subprocess.run(
+                    [path, "--version"], capture_output=True, text=True, timeout=20, check=False
+                )
+            except Exception as exc:
+                line("bad", f"{candidate} unusable", f"found at {path} but would not run: {exc}")
+                failures += 1
+                continue
+            if proc.returncode == 0:
+                first = ((proc.stdout or "").strip().splitlines() or [candidate])[0]
+                runtime = first.strip()[:60]
+                break
+            line(
+                "bad",
+                f"{candidate} unusable",
+                f"found at {path} but exited {proc.returncode}: "
+                f"{((proc.stderr or '').strip().splitlines() or [''])[0][:120]}",
+            )
+            failures += 1
         if runtime:
             line("ok", "yt-dlp JavaScript runtime", runtime)
         else:

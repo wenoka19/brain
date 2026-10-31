@@ -60,8 +60,15 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && curl -sSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
        | tar -xz -C /usr/local/bin litestream \
-    && curl -sSL https://github.com/denoland/deno/releases/download/v2.1.4/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip \
+    && DENO_ARCH="$(dpkg --print-architecture)" \
+    && case "$DENO_ARCH" in \
+         amd64) DENO_TARGET=x86_64-unknown-linux-gnu ;; \
+         arm64) DENO_TARGET=aarch64-unknown-linux-gnu ;; \
+         *) echo "no deno build for $DENO_ARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -sSL "https://github.com/denoland/deno/releases/download/v2.1.4/deno-${DENO_TARGET}.zip" -o /tmp/deno.zip \
     && unzip -q /tmp/deno.zip -d /usr/local/bin && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
+    && deno --version \
     && apt-get purge -y curl unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
