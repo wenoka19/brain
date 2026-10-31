@@ -46,6 +46,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIT = ROOT / "tests" / "browser" / "app_audit.js"
+LAYOUT = ROOT / "tests" / "browser" / "layout_regressions.js"
 JWT_SECRET = "browser-audit-secret-key-long-enough-for-hs256"
 PHONE_WIDTH = 390
 
@@ -182,3 +183,83 @@ class TestStoredTextIsTextWhenItReachesTheDom:
         rules = next(row for row in report["routes"] if row["path"] == "/rules")
         assert rules["content"] > 0
         assert rules["errors"] == []
+
+
+@pytest.fixture(scope="module")
+def layout(served):
+    result = subprocess.run(
+        ["node", str(LAYOUT)],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "BASE": served}, cwd=str(ROOT),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    parsed = json.loads(result.stdout)
+    assert "fatal" not in parsed, parsed.get("fatal")
+    return parsed
+
+
+class TestTheLayoutDefectsTheAuditFound:
+    """Five measurements, each one a number that was wrong in the shipped app.
+
+    They were found by driving every screen and every control with a browser
+    and measuring the DOM; reading the stylesheet had not shown any of them,
+    and four of the five never appeared in a Python test at all.
+    """
+
+    def test_no_step_content_is_left_in_the_counter_column(self, layout):
+        """`.steps-list > li` is `26px 1fr` and its counter is a `::before`,
+        so auto-placement sent every second real child into the 26px track:
+        `/connections` rendered its command paths one word per line."""
+        assert layout["steps"], "the guided steps did not render"
+        for step in layout["steps"]:
+            for kid in step["kids"]:
+                assert kid["column"] == "2", f"{kid['cls']} is in column {kid['column']}"
+
+    def test_the_code_block_gets_the_whole_content_column(self, layout):
+        blocks = [k for s in layout["steps"] for k in s["kids"] if "code" in k["cls"]]
+        assert blocks, "no code block on the connections page"
+        for block in blocks:
+            assert block["width"] > 400, f"the code block is {block['width']}px wide"
+
+    def test_a_step_button_is_button_sized(self, layout):
+        """Grid blockifies an `inline-flex` button, so the Copy control filled
+        the content column and sat as a bar above the squeezed code block."""
+        buttons = [k for s in layout["steps"] for k in s["kids"] if "btn" in k["cls"]]
+        assert buttons, "no button inside the guided steps"
+        for button in buttons:
+            assert button["width"] < 240, f"the step button is {button['width']}px wide"
+
+    def test_the_phone_top_bar_does_not_grow_with_the_page(self, layout):
+        """Two auto rows under `min-height: 100svh` shared the leftover
+        height, so the bar measured 261px on `/rules` and 49px on a page long
+        enough to fill the screen. It is its content on every route."""
+        heights = layout["topbar"]
+        assert heights, "no top bar was measured"
+        for route, height in heights.items():
+            assert height is not None and height <= 60, f"{route}: top bar is {height}px"
+
+    def test_a_connection_menu_is_not_clipped(self, layout):
+        """`overflow: hidden` for the rounded corners cut the row's own menu
+        by 35px, which is exactly where `Revoke` sits — the one destructive
+        action the menu exists to offer."""
+        menu = layout["connMenu"]
+        assert menu["found"], "the connection menu did not open"
+        assert menu["clippedBy"] is None, (
+            f"clipped by .{menu['clippedBy']}, {menu.get('hiddenPx')}px hidden"
+        )
+        assert any("revoke" in item.lower() for item in menu["items"]), menu["items"]
+
+    def test_a_source_title_is_readable_on_a_phone(self, layout):
+        """The 132px thumbnail is `flex: 0 0 auto`, so the title — the one
+        thing the screen is about — had 162px and four lines."""
+        title = layout["sourceTitle"]
+        assert title, "no source title was measured"
+        assert title["width"] > 280, f"the title has {title['width']}px"
+        assert title["lines"] <= 3, f"the title wraps over {title['lines']} lines"
+
+    def test_a_status_pill_is_a_chip_not_a_bar(self, layout):
+        """Alone in a `1fr` track a grid item stretches, so `Live` rendered as
+        a 270px green bar."""
+        pill = layout["pill"]
+        assert pill, "no status pill was measured"
+        assert pill["width"] < 120, f"the pill is {pill['width']}px wide"

@@ -258,18 +258,98 @@ FRAMES.home = async function home(_params, ctx) {
    */
   const URL_RE = /\bhttps?:\/\/\S+/i;
 
+  /** A line with no link goes to the command router.
+   *
+   *  `app/omnibar.py` has resolved targets, written confirmations and undone
+   *  actions since Phase 4, and `/api/omnibar`, `/api/omnibar/run` and
+   *  `/api/omnibar/undo` have been mounted the whole time. Nothing here
+   *  called them: the bar answered "Brain reads sources, not questions" to
+   *  everything without an `http`, under a placeholder cycling "Ask Brain
+   *  anything…". Checkpoint B's hybrid bar — deterministic filtering while
+   *  typing, a command on Enter — was built on the server and unreachable
+   *  from the page.
+   */
+  async function command(raw) {
+    say("Reading that…");
+    let plan;
+    try {
+      ({ plan } = await post("/api/omnibar", { text: raw, submitted: true }));
+    } catch (error) {
+      say(error.message, "error");
+      return;
+    }
+
+    if (plan.mode !== "command") {
+      // `clarify` carries a question the router wrote. `filter` means it did
+      // not read as a command, and Home has no list to filter — so it says
+      // that, rather than the router's "Showing matches", which would be a
+      // sentence about a surface that is not on this page.
+      say(
+        plan.mode === "clarify" && plan.message
+          ? plan.message
+          : "That did not read as a command. Paste a link to add a source, or try “archive …”, “rename …”."
+      );
+      return;
+    }
+
+    // The target was inferred from a phrase, so the person confirms which
+    // object it landed on before anything moves — this is about ambiguity,
+    // not about danger.
+    if (plan.requires_confirmation) {
+      const verb = plan.action ? plan.action.replace(/_/g, " ") : "Run";
+      const agreed = await confirmDialog({
+        title: plan.confirm_text || "Run this?",
+        body: plan.target_label
+          ? `Brain matched that to “${plan.target_label}”.`
+          : "Brain matched that to one item.",
+        confirmLabel: verb.charAt(0).toUpperCase() + verb.slice(1),
+      });
+      if (!agreed) {
+        say("");
+        return;
+      }
+    }
+
+    let receipt;
+    try {
+      ({ receipt } = await post("/api/omnibar/run", { plan }));
+    } catch (error) {
+      say(error.message, "error");
+      return;
+    }
+    input.value = "";
+    say("");
+    refreshCounts();
+    toast(
+      receipt.text,
+      receipt.undo_action
+        ? {
+            action: receipt.undo_label || "Undo",
+            onAction: async () => {
+              try {
+                await post("/api/omnibar/undo", {
+                  action: receipt.undo_action,
+                  params: receipt.undo_params,
+                });
+              } catch (error) {
+                toast(error.message);
+                return;
+              }
+              window.location.reload();
+            },
+          }
+        : undefined
+    );
+  }
+
   async function submit() {
     const raw = input.value.trim();
     if (!raw) return;
     const match = raw.match(URL_RE);
     if (!match) {
       // Once §7.2's thread is open, a line without a link is an interjection
-      // and the thread's own handler answers it. Saying "paste a link" here
-      // as well put a contradiction under the composer: Brain had just
-      // acknowledged the very message this was rejecting.
-      if (!node.querySelector("#thread")) {
-        say("Paste a link, or drop a file — Brain reads sources, not questions, for now.");
-      }
+      // and the thread's own handler answers it.
+      if (!node.querySelector("#thread")) await command(raw);
       return;
     }
     const note = raw.replace(match[0], "").trim();
