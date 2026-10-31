@@ -286,17 +286,26 @@ class TestTheBlockedRowCarriesItsRemedy:
         row = next(r for r in E.op_list_sources(ctx).data["sources"] if r["id"] == source_id)
         assert "block_reason" not in row
 
-    def test_every_reason_the_fetchers_raise_has_a_remedy(self):
+    def test_every_reason_a_provider_raises_has_a_remedy(self):
         """A missing key falls through to `REMEDY.default`, which is a correct
         sentence but a vague one — so the mapping is checked against the codes
-        the fetchers actually raise."""
+        that are actually raised.
+
+        This used to read `fetchers.py` alone, and `providers.py` is where the
+        model and embedding failures live: `bad_api_key`, `model_not_found`,
+        `embedding_error` and five more reached the person as "Make it
+        reachable, then retry", which is advice about a source for a problem
+        with an API key. Both files are checked now.
+        """
         import re
 
-        fetchers = (
-            Path(__file__).resolve().parents[1] / "app/ingestion/fetchers.py"
-        ).read_text()
-        raised = set(re.findall(r'ProviderError\(\s*"([a-z_]+)"', fetchers))
-        frames = (Path(__file__).resolve().parents[1] / "app/static/frames.js").read_text()
+        root = Path(__file__).resolve().parents[1]
+        raised: set[str] = set()
+        for name in ("app/ingestion/fetchers.py", "app/ingestion/providers.py"):
+            raised |= set(
+                re.findall(r'ProviderError\(\s*"([a-z_]+)"', (root / name).read_text())
+            )
+        frames = (root / "app/static/frames.js").read_text()
         block = frames[frames.index("const REMEDY = {") : frames.index("/** §7.7: \"Never")]
         mapped = set(re.findall(r"^  ([a-z_]+):", block, re.M))
         assert raised <= mapped, f"no remedy for: {sorted(raised - mapped)}"
@@ -375,3 +384,64 @@ class TestTheRefusalSaysWhatItBlocked:
         ):
             assert result.error_reason == "person_only"
             assert "skill's state" in result.error_message
+
+
+class TestAProviderFailureSaysWhatFailed:
+    """`endpoint()` caught `ApiError` and `GatekeeperError` and let everything
+    else fall into a net that answers with the exception's class name. A
+    `ProviderError` carries both a reason code and a sentence written for the
+    person, and both were being thrown away: writing a rule against a live
+    embedding model answered `Something went wrong (ProviderError).`
+    """
+
+    def test_the_reason_and_message_reach_the_browser(self, client, monkeypatch):
+        from app.core import engine as E
+        from app.ingestion.providers import ProviderError
+
+        def boom(*args, **kwargs):
+            raise ProviderError("bad_api_key", "The model host rejected the API key.")
+
+        monkeypatch.setattr(E, "op_remember_this", boom)
+        response = client.post(
+            "/api/rule",
+            json={"claim": "Keep replies short.", "when_it_applies": "Always."},
+            headers=headers(client),
+        )
+        assert response.status_code == 502
+        body = response.json()
+        assert body["ok"] is False
+        assert body["reason"] == "bad_api_key"
+        assert body["message"] == "The model host rejected the API key."
+
+    def test_the_class_name_is_never_the_message(self, client, monkeypatch):
+        from app.core import engine as E
+        from app.ingestion.providers import ProviderError
+
+        def boom(*args, **kwargs):
+            raise ProviderError("embedding_error", "The model returned a zero vector.")
+
+        monkeypatch.setattr(E, "op_remember_this", boom)
+        response = client.post(
+            "/api/rule",
+            json={"claim": "Keep replies short.", "when_it_applies": "Always."},
+            headers=headers(client),
+        )
+        assert "ProviderError" not in response.text
+
+    def test_an_unexpected_error_still_says_nothing_about_internals(self, client, monkeypatch):
+        """The generic net stays: only `ProviderError` is let through, because
+        only it is written to be read."""
+        from app.core import engine as E
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("/data/users/user_3.db is locked")
+
+        monkeypatch.setattr(E, "op_remember_this", boom)
+        response = client.post(
+            "/api/rule",
+            json={"claim": "Keep replies short.", "when_it_applies": "Always."},
+            headers=headers(client),
+        )
+        assert response.status_code == 500
+        assert "/data/users" not in response.text
+        assert response.json()["reason"] == "internal_error"

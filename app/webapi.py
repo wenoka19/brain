@@ -29,6 +29,7 @@ from app.config import Settings, settings
 from app.core import engine as E
 from app.db import control as control_db
 from app.ingestion.gatekeeper import GatekeeperError
+from app.ingestion.providers import ProviderError
 from app.security import ratelimit
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -185,6 +186,14 @@ def endpoint(handler: Callable) -> Callable:
             return _json({"ok": False, "reason": exc.reason, "message": exc.message}, exc.status)
         except GatekeeperError as exc:
             return _json({"ok": False, "reason": exc.reason, "message": exc.message}, 400)
+        except ProviderError as exc:
+            # A provider failure already carries a reason code and a sentence
+            # written for the person. Falling through to the generic net below
+            # replaced both with the name of a Python class: saving a rule
+            # against a live embedding model answered "Something went wrong
+            # (ProviderError)." — true, unactionable, and not what the message
+            # on the exception says. 502, because what failed is upstream.
+            return _json({"ok": False, "reason": exc.reason, "message": exc.message}, 502)
         except Exception as exc:  # never leak internals to a browser
             return _json(
                 {

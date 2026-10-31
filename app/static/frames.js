@@ -696,8 +696,23 @@ const REMEDY = {
   fetch_failed: "The source did not answer — retry",
   timeout: "It took too long to read — retry, or paste the text instead",
   unsupported_content_type: "Brain does not read this kind of link yet — paste the text instead",
+  unsupported_file: "Brain does not read this kind of file yet — paste the text instead",
+  image_too_large: "That image is over the size cap — shrink it and try again",
   tool_missing: "Brain is missing a tool for this type. Nothing you can fix",
   vision_unavailable: "Reading images is not switched on for this Brain. Nothing you can fix",
+
+  /* The model host, not the source. These reach the person through the same
+     envelope — writing a rule embeds it — and every one of them used to land
+     on `default`, which tells someone whose API key is wrong to go and make
+     their own sentence reachable. */
+  bad_api_key: "The model host rejected the key — check LLM_API_KEY, then retry",
+  model_forbidden: "That key is not allowed to use that model — check the plan, or LLM_MODEL",
+  model_not_found: "No such model at that host — check LLM_MODEL and LLM_BASE_URL",
+  model_unreachable: "The model host did not answer — retry in a moment",
+  model_error: "The model host failed on this one — retry",
+  embedding_error: "The embedding model answered wrongly — check the embedding settings, then retry",
+  rate_limited: "The model host is rate-limiting this key — wait a moment, then retry",
+
   default: "Make it reachable, then retry",
 };
 
