@@ -16,10 +16,17 @@ from app.security import ratelimit
 from app.storage import r2_sync
 
 
+#: The one list, so `selftest` and the suite cannot drift apart.
+_AMBIENT_ENV = config.AMBIENT_PROVIDER_ENV
+
+
+
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("BRAIN_ENV", "test")
     monkeypatch.setenv("BRAIN_DATA_DIR", str(tmp_path))
+    for name in _AMBIENT_ENV:
+        monkeypatch.delenv(name, raising=False)
     settings = config.reload_settings()
     settings.ensure_dirs()
     ratelimit.reset_limiter()
@@ -27,6 +34,7 @@ def cfg(tmp_path, monkeypatch):
     # its fetcher/extractor to simulate failures — so it must be rebuilt per
     # test or one test's stub leaks into the next.
     providers_module.set_providers(None)
+    providers_module.reset_embedder_probe()
     # Object storage is off unless a test installs a fake endpoint, and the
     # dirty/accessed maps are process-global, so they are reset on both sides.
     r2_sync.set_config(r2_sync.R2Config())
@@ -37,6 +45,7 @@ def cfg(tmp_path, monkeypatch):
     control_db.close_all()
     ratelimit.reset_limiter()
     providers_module.set_providers(None)
+    providers_module.reset_embedder_probe()
     r2_sync.set_config(None)
     r2_sync.set_http_client_factory(None)
     r2_sync.reset_state()

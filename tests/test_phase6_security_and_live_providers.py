@@ -578,7 +578,14 @@ class TestProviderSelection:
         assert isinstance(bundle.linker, P.HeuristicLinkClassifier)
         assert isinstance(bundle.vision, P.DeterministicVisionProvider)
 
-    def test_prod_with_a_key_selects_every_live_adapter(self, prod):
+    def test_prod_with_a_key_selects_every_live_adapter(self, prod, monkeypatch):
+        # The embedder is now chosen by asking the host, not by finding a key,
+        # so a selection test has to let the host answer.
+        monkeypatch.setattr(
+            P.LiveEmbedder, "embed",
+            lambda self, texts: [[0.1] * prod.embedding_dim for _ in texts],
+        )
+        P.reset_embedder_probe()
         bundle = P.build_providers(prod)
         assert bundle.mode == "prod"
         assert isinstance(bundle.embedder, P.LiveEmbedder)
@@ -604,6 +611,11 @@ class TestProviderSelection:
         settings = config_module.load_settings()
         assert settings.live_embeddings is True and settings.live_llm is False
         assert settings.search_similarity_floor == 0.42
+        monkeypatch.setattr(
+            P.LiveEmbedder, "embed",
+            lambda self, texts: [[0.1] * settings.embedding_dim for _ in texts],
+        )
+        P.reset_embedder_probe()
         bundle = P.build_providers(dataclasses.replace(settings, data_dir=cfg.data_dir))
         assert isinstance(bundle.embedder, P.LiveEmbedder)
         assert isinstance(bundle.extractor, P.HeuristicClaimExtractor)
@@ -1188,3 +1200,79 @@ class TestEnvelopePolish:
         )
         assert "1 skill*" in plural and "1 skills" not in plural
         assert "3 claims" in plural
+
+
+class TestAKeyIsNotAWorkingHost:
+    """`live_embeddings` meant "a key exists". The founder's Z.ai key serves
+    eleven chat models and no embedding model, so every write that had to
+    index raised `Unknown Model`: creating an account, saving a rule. The app
+    was unusable because one optional provider was misconfigured.
+
+    The host is asked once now, and a refusal degrades to the hashed embedder
+    instead of killing every write.
+    """
+
+    def _prod(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BRAIN_ENV", "prod")
+        monkeypatch.setenv("BRAIN_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("BRAIN_JWT_SECRET", "probe-secret-key-long-enough-for-hs256")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
+        from app import config as config_module
+
+        return config_module.reload_settings()
+
+    def test_a_host_that_refuses_the_model_degrades_instead_of_raising(
+        self, monkeypatch, tmp_path
+    ):
+        from app.ingestion import providers as P
+
+        cfg = self._prod(monkeypatch, tmp_path)
+        P.reset_embedder_probe()
+
+        def unknown_model(self, texts):
+            raise P.ProviderError("model_error", "Unknown Model, please check the model code.")
+
+        monkeypatch.setattr(P.LiveEmbedder, "embed", unknown_model)
+        embedder = P._embedder_for(cfg)
+
+        assert isinstance(embedder, P.HashingEmbedder), type(embedder)
+        # The whole point: a write still works.
+        assert len(embedder.embed(["a rule worth keeping"])[0]) == cfg.embedding_dim
+
+    def test_a_host_that_answers_is_used(self, monkeypatch, tmp_path):
+        from app.ingestion import providers as P
+
+        cfg = self._prod(monkeypatch, tmp_path)
+        P.reset_embedder_probe()
+        monkeypatch.setattr(
+            P.LiveEmbedder, "embed", lambda self, texts: [[0.1] * cfg.embedding_dim for _ in texts]
+        )
+        assert isinstance(P._embedder_for(cfg), P.LiveEmbedder)
+
+    def test_the_host_is_asked_once_not_per_request(self, monkeypatch, tmp_path):
+        """A probe per request would be absurd, and a transient outage must
+        not flip a live library onto hashed vectors mid-life."""
+        from app.ingestion import providers as P
+
+        cfg = self._prod(monkeypatch, tmp_path)
+        P.reset_embedder_probe()
+        calls: list[int] = []
+
+        def counted(self, texts):
+            calls.append(1)
+            return [[0.1] * cfg.embedding_dim for _ in texts]
+
+        monkeypatch.setattr(P.LiveEmbedder, "embed", counted)
+        for _ in range(5):
+            P._embedder_for(cfg)
+        assert len(calls) == 1, f"probed {len(calls)} times"
+
+    def test_a_wrong_width_also_degrades(self, monkeypatch, tmp_path):
+        """`pack_embedding` raises on a short vector, so a host that answers
+        with the wrong width is as unusable as one that refuses."""
+        from app.ingestion import providers as P
+
+        cfg = self._prod(monkeypatch, tmp_path)
+        P.reset_embedder_probe()
+        monkeypatch.setattr(P.LiveEmbedder, "embed", lambda self, texts: [[0.1] * 64])
+        assert isinstance(P._embedder_for(cfg), P.HashingEmbedder)

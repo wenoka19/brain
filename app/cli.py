@@ -38,16 +38,23 @@ def line(state: str, label: str, detail: str = "") -> None:
 
 
 @contextlib.contextmanager
-def scoped_env(**overrides: str):
+def scoped_env(*, clear: tuple[str, ...] = (), **overrides: str):
     """Apply environment overrides and put the old values back afterwards.
 
     These commands relocate `BRAIN_DATA_DIR` and sometimes pin a floor to zero.
     Leaving that behind would be a real bug: in a long-lived process — the test
     suite, or a `doctor` run after a `calibrate` — the next caller would silently
     inherit a scratch directory and a floor it never asked for.
+
+    `clear` removes names for the duration, which is what makes a run actually
+    self-contained: setting `BRAIN_ENV=test` does not stop an exported
+    `ZAI_API_KEY` from being found, and a deterministic run that calls a real
+    vendor is not deterministic.
     """
-    previous = {name: os.environ.get(name) for name in overrides}
+    previous = {name: os.environ.get(name) for name in (*overrides, *clear)}
     os.environ.update(overrides)
+    for name in clear:
+        os.environ.pop(name, None)
     try:
         yield
     finally:
@@ -72,17 +79,18 @@ def _probe_providers(cfg) -> list[tuple[str, str, str]]:
     code." A name in a config file is not a working endpoint, and only a call
     can tell them apart.
     """
-    from app.ingestion.providers import ProviderError, build_providers
+    from app.ingestion.providers import LiveEmbedder, ProviderError
 
     out: list[tuple[str, str, str]] = []
-    try:
-        prov = build_providers(cfg)
-    except Exception as exc:  # pragma: no cover - defensive
-        return [("bad", "providers", f"could not be built: {exc}")]
 
     if cfg.live_embeddings:
+        # The LIVE embedder, deliberately — not whatever `build_providers`
+        # selected. That now degrades to the hashed embedder when the host
+        # refuses, and probing the fallback reported "reachable, 256
+        # dimensions" about a host that had just answered `Unknown Model`.
+        # A health check that measures its own safety net is worse than none.
         try:
-            vector = prov.embedder.embed(["brain doctor probe"])[0]
+            vector = LiveEmbedder(cfg).embed(["brain doctor probe"])[0]
             out.append((
                 "ok",
                 "embeddings reachable",
@@ -390,6 +398,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             BRAIN_DATA_DIR=str(workdir),
             BRAIN_JWT_SECRET=os.environ.get("BRAIN_JWT_SECRET")
             or "selftest-secret-key-long-enough-ok",
+            clear=config_module.AMBIENT_PROVIDER_ENV,
         ):
             return _selftest_inner(args, workdir)
     finally:
@@ -804,7 +813,8 @@ def cmd_preview_ax(args: argparse.Namespace) -> int:
     from app import config as config_module
 
     try:
-        with scoped_env(BRAIN_ENV="test", BRAIN_DATA_DIR=str(workdir)):
+        with scoped_env(BRAIN_ENV="test", BRAIN_DATA_DIR=str(workdir),
+                        clear=config_module.AMBIENT_PROVIDER_ENV):
             return _preview_ax_inner(args, workdir)
     finally:
         config_module.reload_settings()

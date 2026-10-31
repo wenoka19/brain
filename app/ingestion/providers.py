@@ -1584,7 +1584,7 @@ def build_providers(cfg: Settings | None = None) -> Providers:
             mode="test",
         )
     return Providers(
-        embedder=LiveEmbedder(cfg) if cfg.live_embeddings else HashingEmbedder(cfg.embedding_dim),
+        embedder=_embedder_for(cfg),
         fetcher=LiveFetcher(),
         extractor=LiveLLMExtractor(cfg) if cfg.live_llm else HeuristicClaimExtractor(cfg=cfg),
         linker=LiveLinkClassifier(cfg) if cfg.live_llm else HeuristicLinkClassifier(),
@@ -1592,6 +1592,72 @@ def build_providers(cfg: Settings | None = None) -> Providers:
         vision=LiveVisionProvider(cfg) if cfg.live_vision else None,
         mode="prod",
     )
+
+
+#: One probe result per (host, model, key) so a bundle rebuilt per request
+#: does not call the embedding host again. Decided once, at process start.
+_EMBEDDER_PROBE: dict[tuple[str, str, str], bool] = {}
+
+
+def reset_embedder_probe() -> None:
+    """Forget the probe. For tests, and for a config reload."""
+    _EMBEDDER_PROBE.clear()
+
+
+def _embedder_for(cfg: Settings):
+    """Pick the embedder by asking the host, not by looking for a key.
+
+    `live_embeddings` means "a key exists", and a key is not a working host.
+    The founder's Z.ai key serves eleven chat models and no embedding model at
+    all, so every write that had to index raised `Unknown Model` — creating an
+    account, saving a rule. The app was unusable because one optional provider
+    was misconfigured, and nothing said so.
+
+    So the host is asked once, here. If it answers, nothing changes. If it
+    does not, the library runs on the hashed embedder: search falls back to
+    roughly a second keyword lane, which is worse than semantic search and
+    far better than an app that cannot be written to.
+
+    Decided once per process and cached, for two reasons. A probe per request
+    would be absurd, and — more importantly — a *transient* outage must not
+    flip a live library onto hashed vectors mid-life. Hashed and neural
+    vectors in one index make every similarity meaningless. After a probe
+    succeeds, a later failure still raises, exactly as before.
+    """
+    if not cfg.live_embeddings:
+        return HashingEmbedder(cfg.embedding_dim)
+
+    live = LiveEmbedder(cfg)
+    key = (
+        cfg.resolved_embedding_base_url,
+        cfg.resolved_embedding_model,
+        hashlib.sha256(cfg.resolved_embedding_api_key.encode("utf-8")).hexdigest()[:16],
+    )
+    answered = _EMBEDDER_PROBE.get(key)
+    if answered is None:
+        try:
+            vector = live.embed(["brain embedding probe"])[0]
+            answered = len(vector) == cfg.embedding_dim
+            if not answered:
+                LOGGER.error(
+                    "%s returned %s dimensions, not %s — falling back to the hashed "
+                    "embedder; semantic search is degraded",
+                    cfg.resolved_embedding_model, len(vector), cfg.embedding_dim,
+                )
+        except Exception as exc:
+            answered = False
+            reason = getattr(exc, "reason", type(exc).__name__)
+            message = getattr(exc, "message", str(exc))
+            LOGGER.error(
+                "the embedding host refused %s at %s (%s: %s) — falling back to the "
+                "hashed embedder, so writes keep working and semantic search is "
+                "degraded. Set EMBEDDING_BASE_URL and EMBEDDING_MODEL to a host that "
+                "serves embeddings, then restart.",
+                cfg.resolved_embedding_model, cfg.resolved_embedding_base_url,
+                reason, message,
+            )
+        _EMBEDDER_PROBE[key] = answered
+    return live if answered else HashingEmbedder(cfg.embedding_dim)
 
 
 def providers(cfg: Settings | None = None) -> Providers:

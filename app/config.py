@@ -40,6 +40,19 @@ ZAI_EMBEDDING_MODEL = "embedding-3"
 #: Only reached on a marketplace host, where ids keep their vendor namespace.
 MARKETPLACE_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
 
+#: Everything the environment can say about which provider to call and which
+#: public identity to claim. `selftest` and the test suite both promise to be
+#: self-contained, and both were only self-contained on a machine with none of
+#: these exported: a real `ZAI_API_KEY` made prod-config paths call the vendor
+#: for real, and a real `BRAIN_PUBLIC_URL` moved the OAuth resource identifier
+#: under them. CI has neither, so the leak was invisible exactly where it was
+#: checked and loud only for whoever holds the keys.
+AMBIENT_PROVIDER_ENV = (
+    "BRAIN_PUBLIC_URL", "BRAIN_AUDIENCE", "BRAIN_OWNER_EMAIL",
+    "LLM_API_KEY", "ZAI_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
+    "EMBEDDING_API_KEY", "DASHSCOPE_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
+)
+
 VENDOR_LABELS = {
     "zai": "Z.ai Direct",
     "dashscope": "Alibaba DashScope Direct",

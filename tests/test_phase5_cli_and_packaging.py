@@ -577,7 +577,7 @@ class TestDoctorCallsTheHostsItReportsOn:
         from app.ingestion import providers as P
 
         class Rejects:
-            def embed(self, texts):
+            def embed(self, texts):  # bound, so LiveEmbedder's self is ignored
                 raise P.ProviderError(
                     "model_error",
                     'The model host rejected the request (400): {"error":'
@@ -585,9 +585,7 @@ class TestDoctorCallsTheHostsItReportsOn:
                 )
 
         monkeypatch.setattr(cfg.__class__, "live_embeddings", property(lambda self: True))
-        monkeypatch.setattr(
-            P, "build_providers", lambda c: type("P", (), {"embedder": Rejects()})()
-        )
+        monkeypatch.setattr(P.LiveEmbedder, "embed", Rejects().embed)
         rows = cli._probe_providers(cfg)
         assert rows, "the probe reported nothing at all"
         status, label, detail = rows[0]
@@ -603,12 +601,32 @@ class TestDoctorCallsTheHostsItReportsOn:
                 return [[0.1] * 256 for _ in texts]
 
         monkeypatch.setattr(cfg.__class__, "live_embeddings", property(lambda self: True))
-        monkeypatch.setattr(
-            P, "build_providers", lambda c: type("P", (), {"embedder": Works()})()
-        )
+        monkeypatch.setattr(P.LiveEmbedder, "embed", Works().embed)
         rows = cli._probe_providers(cfg)
         assert [r[0] for r in rows] == ["ok"], rows
         assert "256" in rows[0][2]
+
+    def test_it_probes_the_live_host_not_the_fallback(self, cfg, monkeypatch):
+        """`build_providers` now degrades to the hashed embedder when the host
+        refuses, so probing *it* measured the safety net: `doctor --probe`
+        reported "reachable, 256 dimensions" about a host that had just
+        answered `Unknown Model`. A health check that grades its own fallback
+        is worse than no health check."""
+        from app.ingestion import providers as P
+
+        monkeypatch.setattr(cfg.__class__, "live_embeddings", property(lambda self: True))
+
+        def refuses(self, texts):
+            raise P.ProviderError("model_error", "Unknown Model, please check the model code.")
+
+        monkeypatch.setattr(P.LiveEmbedder, "embed", refuses)
+        # The bundle would hand back a working HashingEmbedder here.
+        P.reset_embedder_probe()
+        assert isinstance(P.build_providers(cfg).embedder, P.HashingEmbedder)
+
+        rows = cli._probe_providers(cfg)
+        assert [r[0] for r in rows] == ["bad"], rows
+        assert "Unknown Model" in rows[0][2]
 
     def test_the_probe_is_off_unless_asked_for(self):
         """`doctor` stays free and offline by default; the container asks."""
