@@ -34,6 +34,30 @@ YOUTUBE_HOSTS = frozenset(
 )
 GITHUB_HOSTS = frozenset({"github.com", "www.github.com", "raw.githubusercontent.com", "gist.github.com"})
 
+#: `R-23`: the three platforms besides YouTube whose video the founder wants
+#: read. They are named here for one reason that has nothing to do with
+#: fetching them yet: every host this file does not recognise falls through to
+#: the generic-article branch below, and `LiveFetcher.fetch_url` sends
+#: anything that is not `youtube` or `github` to `fetch_article`. So a TikTok
+#: link was downloaded as an HTML page and handed to BeautifulSoup, which on a
+#: JavaScript shell yields nothing — and the person was told "Nothing readable
+#: was there", a sentence about their link rather than about the gap in this
+#: product. Recognising the host is what makes the refusal honest.
+TIKTOK_HOSTS = frozenset(
+    {"tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"}
+)
+INSTAGRAM_HOSTS = frozenset({"instagram.com", "www.instagram.com", "m.instagram.com"})
+FACEBOOK_HOSTS = frozenset(
+    {"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com",
+     "fb.watch", "fb.com", "www.fb.com"}
+)
+#: host set -> the name the person reads in the refusal.
+PLATFORM_HOSTS: tuple[tuple[frozenset[str], str], ...] = (
+    (TIKTOK_HOSTS, "TikTok"),
+    (INSTAGRAM_HOSTS, "Instagram"),
+    (FACEBOOK_HOSTS, "Facebook"),
+)
+
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _MEDIA_EXT_RE = re.compile(r"\.(mp4|mov|mkv|avi|webm|mp3|wav|m4a|flac|aac|ogg)(?:$|[?#])", re.I)
 
@@ -153,6 +177,15 @@ def normalize_url(raw_url: str, *, cfg: Settings | None = None) -> NormalizedTar
         )
 
     # ---- GitHub -----------------------------------------------------------
+    # ---- `R-23`: recognised, and refused for what is actually missing ----
+    for hosts, platform in PLATFORM_HOSTS:
+        if host in hosts:
+            raise GatekeeperError(
+                "unsupported_content_type",
+                f"Brain does not read {platform} links yet. Paste the transcript "
+                f"instead, or the text you want kept.",
+            )
+
     if host in GITHUB_HOSTS:
         canonical = _canonical_github(parts)
         validate_url(canonical)
