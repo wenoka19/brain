@@ -1481,9 +1481,9 @@ def _person_only(
     return _fail(action, "person_only", because)
 
 
-def op_list_skills(ctx: Context) -> OpResult:
+def op_list_skills(ctx: Context, *, limit: int = 200) -> OpResult:
     """§7.9's three sections, plus the number the sidebar's amber pill shows."""
-    rows = tenant_db.list_skills(ctx.tenant)
+    rows = tenant_db.list_skills(ctx.tenant, limit=limit)
     sections = {"proposed": [], "active": [], "inactive": []}
     for row in rows:
         sections.setdefault(row["status"], []).append(row)
@@ -1497,6 +1497,7 @@ def op_list_skills(ctx: Context) -> OpResult:
             "active": sections["active"],
             "inactive": sections["inactive"],
             "needs_review": tenant_db.count_skills_needing_review(ctx.tenant),
+            **_page(rows, tenant_db.count_skills(ctx.tenant)),
         },
     )
 
@@ -1574,6 +1575,20 @@ def op_set_skill_state(ctx: Context, skill_id: str, state: str) -> OpResult:
     )
 
 
+def _page(rows: list[Any], total: int) -> dict[str, int]:
+    """`R-20`: what a capped list owes the person reading it.
+
+    `total` comes from the list's own `count_*` twin, never from `counts()`,
+    whose clauses answer §5's sidebar and are genuinely a different scope.
+
+    `shown` can never be reported above `total`: the two are separate queries
+    and a row can be archived between them, and "Showing 200 of 199" would be
+    a stranger bug than the silence this replaces.
+    """
+    shown = len(rows)
+    return {"shown": shown, "total": max(shown, total)}
+
+
 def op_list_sources(ctx: Context, *, limit: int = 100) -> OpResult:
     """§7.7's list, type-first, with the yield in green.
 
@@ -1590,7 +1605,11 @@ def op_list_sources(ctx: Context, *, limit: int = 100) -> OpResult:
         row["block_reason"] = (job or {}).get("error_reason", "")
         row["block_message"] = (job or {}).get("error_message", "")
     ctx.audit("list_sources", "ok", detail={"count": len(rows)})
-    return OpResult(ok=True, action="list_sources", data={"sources": rows})
+    return OpResult(
+        ok=True,
+        action="list_sources",
+        data={"sources": rows, **_page(rows, tenant_db.count_sources(ctx.tenant))},
+    )
 
 
 def op_get_source(ctx: Context, source_id: str) -> OpResult:
@@ -1791,7 +1810,11 @@ def op_list_transcripts(ctx: Context, *, limit: int = 100) -> OpResult:
     """§7.4. A transcript is a source whose text was captured."""
     rows = tenant_db.list_transcripts(ctx.tenant, limit=limit)
     ctx.audit("list_transcripts", "ok", detail={"count": len(rows)})
-    return OpResult(ok=True, action="list_transcripts", data={"transcripts": rows})
+    return OpResult(
+        ok=True,
+        action="list_transcripts",
+        data={"transcripts": rows, **_page(rows, tenant_db.count_transcripts(ctx.tenant))},
+    )
 
 
 def op_get_transcript(ctx: Context, source_id: str) -> OpResult:
@@ -1877,6 +1900,7 @@ def op_list_archive(ctx: Context, *, limit: int = 200) -> OpResult:
             "items": rows,
             # §7.12's filter pills, and the only place a type filter exists.
             "types": ["source", "transcript", "summary", "rule", "skill"],
+            **_page(rows, tenant_db.count_archive(ctx.tenant)),
         },
     )
 
@@ -1905,7 +1929,16 @@ def op_list_rules(ctx: Context, *, limit: int = 200) -> OpResult:
     return OpResult(
         ok=True,
         action="list_rules",
-        data={"mine": mine, "from_your_sources": extracted},
+        data={
+            "mine": mine,
+            "from_your_sources": extracted,
+            # `R-20`: `shown` and `total` are the page's licence to say
+            # "Showing 200 of 394". They are reported together because either
+            # alone is unreadable: a total with no shown cannot tell the
+            # person anything is missing, and a shown with no total is the
+            # number they can already see.
+            **_page(rows, tenant_db.count_rules(ctx.tenant)),
+        },
     )
 
 
@@ -1914,7 +1947,11 @@ def op_list_summaries(ctx: Context, *, limit: int = 50) -> OpResult:
     Archive has its own view of them."""
     rows = tenant_db.list_summaries(ctx.tenant, limit=max(1, min(limit, 200)))
     ctx.audit("list_summaries", "ok", detail={"count": len(rows)})
-    return OpResult(ok=True, action="list_summaries", data={"summaries": rows})
+    return OpResult(
+        ok=True,
+        action="list_summaries",
+        data={"summaries": rows, **_page(rows, tenant_db.count_summaries(ctx.tenant))},
+    )
 
 
 def op_get_summary(

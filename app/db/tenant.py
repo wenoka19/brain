@@ -872,6 +872,28 @@ def set_source_content(
     )
 
 
+def _sources_where(active_only: bool) -> str:
+    """The scope `list_sources` and `count_sources` both run against."""
+    # `user_note` is not a source the person gave Brain — it is the container
+    # a hand-written rule hangs from (§7.8's "Written here"). §7.7 lists
+    # Link, Document and Image, and a pseudo-source would be a row nobody can
+    # open, with no type, no yield and nothing to fix.
+    where = ["s.source_type != 'user_note'"]
+    if active_only:
+        # §7.7 has three states — in memory, `Processing`, `Needs you` — and
+        # all three are rows on this page. Filtering to `active` would make a
+        # source vanish the moment it was queued and come back when it
+        # finished, which is the opposite of what the page is for.
+        where.append("s.status IN ('active','processing','blocked')")
+    return " WHERE " + " AND ".join(where)
+
+
+def count_sources(conn: sqlite3.Connection, *, active_only: bool = True) -> int:
+    """How many sources `list_sources` would return uncapped."""
+    sql = "SELECT COUNT(*) FROM sources s" + _sources_where(active_only)
+    return int(conn.execute(sql).fetchone()[0])
+
+
 def list_sources(
     conn: sqlite3.Connection, *, limit: int = 100, active_only: bool = True
 ) -> list[dict[str, Any]]:
@@ -895,20 +917,21 @@ def list_sources(
                (SELECT word_count FROM source_content sc WHERE sc.source_id = s.id) AS word_count
         FROM sources s
     """
-    # `user_note` is not a source the person gave Brain — it is the container
-    # a hand-written rule hangs from (§7.8's "Written here"). §7.7 lists
-    # Link, Document and Image, and a pseudo-source would be a row nobody can
-    # open, with no type, no yield and nothing to fix.
-    where = ["s.source_type != 'user_note'"]
-    if active_only:
-        # §7.7 has three states — in memory, `Processing`, `Needs you` — and
-        # all three are rows on this page. Filtering to `active` would make a
-        # source vanish the moment it was queued and come back when it
-        # finished, which is the opposite of what the page is for.
-        where.append("s.status IN ('active','processing','blocked')")
-    sql += " WHERE " + " AND ".join(where)
+    sql += _sources_where(active_only)
     sql += " ORDER BY s.created_at DESC LIMIT ?"
     return [dict(row) for row in conn.execute(sql, (limit,)).fetchall()]
+
+
+_TRANSCRIPTS_SCOPE = """
+        FROM sources s JOIN source_content sc ON sc.source_id = s.id
+        WHERE s.status = 'active' AND s.source_type != 'user_note'
+              AND TRIM(sc.full_text) != ''
+"""
+
+
+def count_transcripts(conn: sqlite3.Connection) -> int:
+    """How many transcripts `list_transcripts` would return uncapped."""
+    return int(conn.execute(f"SELECT COUNT(*) {_TRANSCRIPTS_SCOPE}").fetchone()[0])
 
 
 def list_transcripts(
@@ -921,13 +944,11 @@ def list_transcripts(
     captured, which is exactly what the frame shows.
     """
     rows = conn.execute(
-        """
+        f"""
         SELECT s.*, sc.word_count,
                (SELECT COUNT(*) FROM summaries su
                  WHERE su.source_id = s.id AND su.status = 'active') AS summary_count
-        FROM sources s JOIN source_content sc ON sc.source_id = s.id
-        WHERE s.status = 'active' AND s.source_type != 'user_note'
-              AND TRIM(sc.full_text) != ''
+        {_TRANSCRIPTS_SCOPE}
         ORDER BY s.created_at DESC LIMIT ?
         """,
         (limit,),
@@ -951,20 +972,7 @@ def get_transcript(conn: sqlite3.Connection, source_id: str) -> dict[str, Any] |
     }
 
 
-def list_archive(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[str, Any]]:
-    """§7.12. Every archived thing, newest-archived first.
-
-    "Order: by archive date, most recent first. Not creation date — people
-    come here to undo something they just did." Which is why `archived_at`
-    had to exist before this list could be honest: sorting by `created_at`
-    would put the thing they archived a minute ago wherever it happened to
-    have been made.
-
-    One heterogeneous list, which is why §7.12's type filter exists here and
-    nowhere else.
-    """
-    rows = conn.execute(
-        """
+_ARCHIVE_UNION = """
         SELECT 'source' AS kind, id, title AS label, '' AS detail,
                archived_at, archived_by, created_at, canonical_url AS extra
           FROM sources WHERE status = 'archived'
@@ -979,12 +987,64 @@ def list_archive(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[str
                su.created_at, ''
           FROM summaries su JOIN sources s ON s.id = su.source_id
          WHERE su.status = 'archived'
+"""
+
+
+def count_archive(conn: sqlite3.Connection) -> int:
+    """How many rows `list_archive` would return uncapped.
+
+    Counted over the same union rather than by adding four `COUNT(*)`s, which
+    is what `counts()['archive']` does and why it can disagree: a summary
+    whose source is gone survives that sum and never reaches this list, whose
+    fourth arm inner-joins `sources`.
+    """
+    return int(conn.execute(f"SELECT COUNT(*) FROM ({_ARCHIVE_UNION})").fetchone()[0])
+
+
+def list_archive(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[str, Any]]:
+    """§7.12. Every archived thing, newest-archived first.
+
+    "Order: by archive date, most recent first. Not creation date — people
+    come here to undo something they just did." Which is why `archived_at`
+    had to exist before this list could be honest: sorting by `created_at`
+    would put the thing they archived a minute ago wherever it happened to
+    have been made.
+
+    One heterogeneous list, which is why §7.12's type filter exists here and
+    nowhere else.
+    """
+    rows = conn.execute(
+        f"""
+        {_ARCHIVE_UNION}
         ORDER BY archived_at DESC, created_at DESC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+# `R-20`: every list on the web is capped, so every list has to be able to say
+# what it is capped out of. A total that does not match its own list is worse
+# than no total — it is a second lie on top of the first — and the two drift
+# the moment they are written as two queries. So each list below shares the
+# literal FROM/WHERE text with its `count_*` twin, which is the only thing
+# that makes them provably the same scope.
+#
+# They cannot be read off `counts()`: that function answers the sidebar, and
+# its clauses are genuinely different. `counts()['rules']` counts
+# `epistemic_claims` with no join, while `list_rules` inner-joins `sources`;
+# `counts()['sources']` is `status = 'active'` while `list_sources` also shows
+# `processing` and `blocked`; `counts()['skills']` is active-only while the
+# Skills page lists proposed and inactive too.
+_RULES_FROM = "FROM epistemic_claims c JOIN sources s ON s.id = c.source_id"
+_RULES_ACTIVE = " WHERE c.status = 'active'"
+
+
+def count_rules(conn: sqlite3.Connection, *, active_only: bool = True) -> int:
+    """How many rules `list_rules` would return if nothing capped it."""
+    sql = f"SELECT COUNT(*) {_RULES_FROM}" + (_RULES_ACTIVE if active_only else "")
+    return int(conn.execute(sql).fetchone()[0])
 
 
 def list_rules(
@@ -997,12 +1057,12 @@ def list_rules(
     distinction between `My rules` and `From your sources`, and it is already
     in the data rather than needing a new column.
     """
-    sql = """
+    sql = f"""
         SELECT c.*, s.title AS source_title, s.source_type, s.canonical_url
-        FROM epistemic_claims c JOIN sources s ON s.id = c.source_id
+        {_RULES_FROM}
     """
     if active_only:
-        sql += " WHERE c.status = 'active'"
+        sql += _RULES_ACTIVE
     sql += " ORDER BY c.created_at DESC LIMIT ?"
     rows = conn.execute(sql, (limit,)).fetchall()
     out = []
@@ -1205,16 +1265,26 @@ def get_summary(
     return hydrate_summary(row) if row else None
 
 
+_SUMMARIES_FROM = "FROM summaries su JOIN sources s ON s.id = su.source_id"
+_SUMMARIES_ACTIVE = " WHERE su.status = 'active' AND s.status = 'active'"
+
+
+def count_summaries(conn: sqlite3.Connection, *, active_only: bool = True) -> int:
+    """How many summaries `list_summaries` would return uncapped."""
+    sql = f"SELECT COUNT(*) {_SUMMARIES_FROM}" + (_SUMMARIES_ACTIVE if active_only else "")
+    return int(conn.execute(sql).fetchone()[0])
+
+
 def list_summaries(
     conn: sqlite3.Connection, *, limit: int = 50, active_only: bool = True
 ) -> list[dict[str, Any]]:
     sql = (
         "SELECT su.*, s.title AS source_title, s.source_type, s.canonical_url, "
         "       s.duration_sec "
-        "FROM summaries su JOIN sources s ON s.id = su.source_id"
+        f"{_SUMMARIES_FROM}"
     )
     if active_only:
-        sql += " WHERE su.status = 'active' AND s.status = 'active'"
+        sql += _SUMMARIES_ACTIVE
     sql += " ORDER BY su.created_at DESC LIMIT ?"
     return [hydrate_summary(row) for row in conn.execute(sql, (limit,)).fetchall()]
 
@@ -1498,6 +1568,26 @@ def set_skill_embedding(
     )
 
 
+_SKILLS_FROM = "FROM skills sk LEFT JOIN sources s ON s.id = sk.source_id "
+
+
+def count_skills(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Sequence[str] = ("proposed", "active", "inactive"),
+) -> int:
+    """How many skills `list_skills` would return uncapped, for the same
+    statuses. Not `counts()['skills']`, which is active-only — the Skills page
+    also lists proposed and inactive, so that number reads low by exactly the
+    rows the page is showing."""
+    unknown = set(statuses) - set(SKILL_STATUSES)
+    if unknown:
+        raise ValueError(f"unknown skill status: {sorted(unknown)}")
+    placeholders = ",".join("?" for _ in statuses)
+    sql = f"SELECT COUNT(*) {_SKILLS_FROM}WHERE sk.status IN ({placeholders})"
+    return int(conn.execute(sql, tuple(statuses)).fetchone()[0])
+
+
 def list_skills(
     conn: sqlite3.Connection,
     *,
@@ -1518,7 +1608,7 @@ def list_skills(
         # provenance is the source it was drafted from — so the title comes
         # along rather than costing a read per card to draw it.
         f"SELECT sk.*, s.title AS source_title, s.canonical_url AS source_url "
-        f"FROM skills sk LEFT JOIN sources s ON s.id = sk.source_id "
+        f"{_SKILLS_FROM}"
         f"WHERE sk.status IN ({placeholders}) "
         "ORDER BY CASE sk.status WHEN 'proposed' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, "
         "sk.updated_at DESC LIMIT ?",

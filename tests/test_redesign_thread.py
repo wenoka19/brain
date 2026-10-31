@@ -139,10 +139,20 @@ class TestTheFrameSource:
 
     def test_the_composer_is_never_disabled(self):
         """§7.2's first hard requirement, as a grep: there is no code path
-        that takes the field away."""
+        that takes the field away.
+
+        Scoped to the two regions that can actually reach the composer — the
+        home frame and the thread — rather than to everything between
+        `FRAMES.home` and the next `FRAMES.`. That slice quietly grew to
+        include the shared list helpers that sit between them, so a disabled
+        button in a list footer failed a test about §7.2's composer.
+        """
         source = FRAMES_JS.read_text()
         assert "input.disabled = true" not in source
-        assert ".disabled = true" not in source.split("FRAMES.home =")[1].split("FRAMES.")[0]
+        start = source.index("FRAMES.home = ")
+        home = source[start : source.index("/* ----", start)]
+        for region, name in ((home, "the home frame"), (self.thread(), "the thread")):
+            assert ".disabled = true" not in region, f"{name} disables a control"
 
     def test_the_greeting_and_the_pitch_go(self):
         """§7.2: "Greeting and pitch disappear. The thread fills the space"."""

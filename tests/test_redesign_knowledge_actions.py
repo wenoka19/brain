@@ -341,5 +341,11 @@ class TestTheFrameSource:
         declared |= set(re.findall(r'data-act="([a-z]+)"', source))
         handled = set(re.findall(r"^    (\w+): (?:async )?\(", source, re.M))
         handled |= set(re.findall(r"^    (\w+): async \(", source, re.M))
+        # `R-20`: a handler map is not the only way to wire an act. A control
+        # that belongs to the frame rather than to a card is wired straight by
+        # selector — `wirePageFoot` reaches for `[data-act="more"]` itself.
+        # Crediting the selector keeps the rule's teeth: an act that nothing
+        # maps AND nothing queries still fails here.
+        handled |= set(re.findall(r'\[data-act="([a-z]+)"\]', source))
         missing = declared - handled - {"cancel", "next", "go"}  # the dialog's own three
         assert not missing, f"rendered with no handler: {sorted(missing)}"

@@ -1377,3 +1377,79 @@ found: they fixed nothing and would have changed a layout §3.3 specifies.
   not a dropped guarantee.
 - The sync watermark, the visual-viewport keyboard inset, and a single
   Escape-ordering handler all went with `app.js` and are not rebuilt.
+
+## R-20 — a capped list says what it is capped out of (31 Oct 2026)
+
+The founder asked whether paging would help his users. Measuring it to answer
+him turned up something worse than the slowness the question assumed, and
+corrected two things this log had asserted.
+
+**What was actually wrong.** Every read on the web was already capped server
+side — Rules 200, Archive 200, Sources 100, Transcripts 100, Summaries 50 —
+and no page said so. Four documents produce 394 rules: the sidebar rendered
+`Rules 394`, the page rendered 200, and nothing anywhere mentioned the other
+194. The page's own search made it worse, because `wireListSearch` filtered
+the rows already in the DOM — a word that existed in rule 250 came back
+"Nothing here matches" from a library that held it. So the person was shown a
+number they could not reach, and told "nothing found" about something they
+had paid credits to store. A correctness bug wearing a performance bug's
+clothes.
+
+**Two claims in `R-19` and in the cutover PR were wrong**, both checked in
+the source: `op_list_cards` has always taken `limit: int = 60`, so the whole
+library was never returned in one response; and `frames.js` never calls
+`/api/cards` at all — that endpoint and its op are dead to the web.
+
+**What paging would not have fixed.** Measured, `/rules` is identical at
+1,000 and at 5,000 claims: 200 cards, 5,412 DOM nodes, 264 ms. The 50-second
+page exists only with the caps removed, and nothing on the client can remove
+them. There is roughly 5x of headroom before a cursor buys anything, and a
+cursor's own failure mode — rows that quietly vanish from page 2 — would be
+strictly worse than a cap that announces itself.
+
+**What was built instead.**
+
+- Every list op reports `shown` and `total`. The total comes from a
+  `count_*` twin that shares the literal `FROM`/`WHERE` text with its
+  `list_*`, because a total that disagrees with its own list is a second lie
+  on top of the first. They could not be read off `counts()`: that answers
+  §5's sidebar and its clauses genuinely differ — no join for rules,
+  active-only for sources where the page also shows `processing` and
+  `blocked`, active-only for skills where the page also lists proposed.
+- A footer: `Showing 200 of 394`, and a button. The founder chose **"Show 200
+  more", repeating**, over a single "Show all" — a page that freezes for
+  several seconds after one click, with no way to tell why, is the failure he
+  did not want. The footer renders nothing once the list is whole.
+- A search that misses in a short list finishes loading the list before
+  answering, rather than reporting absence. Deliberately the same mechanism
+  as the button, and deliberately not a call to `/api/search`: the thing the
+  person typed into is the list, so the honest answer is to finish the list
+  rather than query something ranked differently. It can fire only once per
+  visit.
+- **gzip, which had never been on anywhere.** 275,380 → 17,690 bytes, ~15x.
+  On a throttled link that single fetch was 1,457 ms of a 3,483 ms page.
+  `/mcp` is skipped: the transport is deliberately unbuffered and unrewritten
+  end to end. This is the largest measured win in the change and has nothing
+  to do with paging.
+
+**Scope note.** The product is built for the US, not a low-bandwidth market.
+That demotes gzip from first priority to a one-line win taken in passing, and
+promotes the silent truncation: a faster network means a user reaches 200
+sooner, not later.
+
+**Two existing tests had to be made precise rather than looser.** A
+`data-act` with no handler-map entry now also counts as handled if the source
+queries it by selector, which is how a frame-level control is wired; and
+§7.2's "the composer is never disabled" is scoped to the home frame and the
+thread instead of to everything between `FRAMES.home` and the next frame —
+that slice had silently grown to include the shared list helpers.
+
+**Found by rendering, not by reading.** The first browser probe reported the
+scroll jumping 1200 → 14452 on "Show more". The product was right: Playwright
+scrolls an element into view before clicking it, so the reading was taken at
+the wrong moment. A trace through the swap showed 1200 → 1200 across every
+frame. The probe was fixed; the code was not touched. What the probe did
+catch for real is why `swapFrame` uses `replaceWith` and never
+`replaceChildren` — a rebuilt frame wires its listeners against itself, so
+moving its children into the old node leaves every closure pointing at a
+detached element, and the page looks right while nothing works.

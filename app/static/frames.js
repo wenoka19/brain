@@ -810,7 +810,83 @@ export function itemCard({ href, icon: glyph, title, meta, pill, actions = "" })
     </a>`;
 }
 
-export function listFrame({ title, search, controlsHtml = "", groups, empty }) {
+/* ---------------------------------------------------------------------- */
+/* `R-20` PAGING — what a capped list owes the person reading it            */
+/* ---------------------------------------------------------------------- */
+
+/* Every list here is capped server-side, and until now no page said so.
+ * Measured on the shipped build: four documents produce 394 rules, the
+ * sidebar renders `Rules 394`, the page renders 200, and nothing anywhere
+ * mentioned the other 194. The page's own search made it worse rather than
+ * better, because it filtered the rows already in the DOM — a word that
+ * existed in rule 250 came back "Nothing here matches" from a library that
+ * contained it.
+ *
+ * Two things fix that, and they are deliberately the same mechanism: say the
+ * real total next to a button that raises the cap, and when a search finds
+ * nothing in a short list, raise the cap and look again before answering.
+ * The second is why there is no separate "search the server" path — the one
+ * the person typed into is the list, so the honest answer is to finish
+ * loading the list rather than to query something ranked differently. */
+
+const PAGE_STEP = 200;
+
+function pagedPath(path, limit) {
+  if (!limit) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}limit=${encodeURIComponent(limit)}`;
+}
+
+/** The footer line. Renders nothing at all when the list is whole — a page
+ *  that says "Showing 12 of 12" is noise, and the person already knows. */
+function pageFoot({ shown = 0, total = 0, step = PAGE_STEP } = {}) {
+  if (!total || shown >= total) return "";
+  const left = total - shown;
+  return `
+    <div class="list-foot">
+      <p class="list-count">Showing ${shown.toLocaleString()} of ${total.toLocaleString()}</p>
+      <button class="btn" data-variant="secondary" data-act="more">Show ${Math.min(
+        step,
+        left
+      ).toLocaleString()} more</button>
+    </div>`;
+}
+
+/** Swap a rendered frame for a freshly built one, in place.
+ *
+ *  `replaceWith`, never `replaceChildren`: the rebuilt frame wires its own
+ *  listeners against *itself*, so moving its children into the old node
+ *  leaves every one of those closures pointing at a detached element —
+ *  the page looks right and nothing works. Scroll is restored by hand
+ *  because only rows are ever added, so everything above stays put.
+ */
+async function swapFrame(node, build, limit) {
+  const fresh = await build(limit);
+  const y = window.scrollY;
+  node.replaceWith(fresh);
+  // The router owns link rewriting and its `absolutise` is private to that
+  // closure, so a frame that remounts itself has to say so.
+  document.dispatchEvent(new CustomEvent("brain:mounted", { detail: fresh }));
+  window.scrollTo(0, y);
+  return fresh;
+}
+
+function wirePageFoot(node, page) {
+  const button = node.querySelector('.list-foot [data-act="more"]');
+  if (!button || typeof page?.rebuild !== "function") return;
+  button.addEventListener("click", async () => {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "Loading…";
+    try {
+      await swapFrame(node, page.rebuild, page.shown + (page.step || PAGE_STEP));
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = error?.reason === "offline" ? "Offline — try again" : label;
+    }
+  });
+}
+
+export function listFrame({ title, search, controlsHtml = "", groups, empty, page }) {
   if (!groups.length) {
     return el(`
       <div class="wrap">
@@ -845,6 +921,7 @@ export function listFrame({ title, search, controlsHtml = "", groups, empty }) {
         </section>`
         )
         .join("")}
+      ${pageFoot(page)}
     </div>`);
 }
 
@@ -852,8 +929,10 @@ export function listFrame({ title, search, controlsHtml = "", groups, empty }) {
 /* §7.4 TRANSCRIPTS, §7.6 SUMMARIES, §7.7 SOURCES                          */
 /* ---------------------------------------------------------------------- */
 
-FRAMES.transcripts = async function transcripts() {
-  const { transcripts: rows } = await api("/api/transcripts");
+FRAMES.transcripts = async function transcripts(params = {}) {
+  const data = await api(pagedPath("/api/transcripts", params.limit));
+  const rows = data.transcripts;
+  const page = { ...data, rebuild: (limit) => FRAMES.transcripts({ ...params, limit }) };
   const groups = byDate(rows).map((group) => ({
     title: group.title,
     rows: group.rows.map((row) =>
@@ -890,13 +969,15 @@ FRAMES.transcripts = async function transcripts() {
     search: "Search transcripts",
     controlsHtml: sortButton(),
     groups,
+    page,
     empty: {
       text: "No transcripts yet. Give Brain a video or a recording and the full text lands here, searchable and ready to copy.",
       action: "Teach Brain",
       href: "/",
     },
   });
-  wireListSearch(node);
+  wireListSearch(node, { page });
+  wirePageFoot(node, page);
   wireSort(node);
   wireMenus(node);
 
@@ -1030,8 +1111,10 @@ async function archiveRow(kind, id, button, node) {
   });
 }
 
-FRAMES.summaries = async function summaries() {
-  const { summaries: rows } = await api("/api/summaries");
+FRAMES.summaries = async function summaries(params = {}) {
+  const data = await api(pagedPath("/api/summaries", params.limit));
+  const rows = data.summaries;
+  const page = { ...data, rebuild: (limit) => FRAMES.summaries({ ...params, limit }) };
   const groups = byDate(rows).map((group) => ({
     title: group.title,
     rows: group.rows.map((row) =>
@@ -1053,19 +1136,23 @@ FRAMES.summaries = async function summaries() {
     search: "Search summaries",
     controlsHtml: sortButton(),
     groups,
+    page,
     empty: {
       text: "No summaries yet. Every source Brain reads gets one, so you never have to read the whole thing twice.",
       action: "Teach Brain",
       href: "/",
     },
   });
-  wireListSearch(node);
+  wireListSearch(node, { page });
+  wirePageFoot(node, page);
   wireSort(node);
   return node;
 };
 
-FRAMES.sources = async function sources() {
-  const { sources: rows } = await api("/api/sources");
+FRAMES.sources = async function sources(params = {}) {
+  const data = await api(pagedPath("/api/sources", params.limit));
+  const rows = data.sources;
+  const page = { ...data, rebuild: (limit) => FRAMES.sources({ ...params, limit }) };
   const groups = byDate(rows).map((group) => ({
     title: group.title,
     rows: group.rows.map((row) => {
@@ -1141,6 +1228,7 @@ FRAMES.sources = async function sources() {
     controlsHtml: `${sortButton()}
                <a class="btn" data-variant="primary" href="/">${icon("plus")}Teach Brain</a>`,
     groups,
+    page,
     empty: {
       text: "Nothing here yet. Paste a link or drop a file and Brain reads it, keeps what matters, and hands it to every AI you work with.",
       action: "Teach Brain",
@@ -1148,7 +1236,8 @@ FRAMES.sources = async function sources() {
     },
   });
 
-  wireListSearch(node);
+  wireListSearch(node, { page });
+  wirePageFoot(node, page);
   wireSort(node);
   wireMenus(node);
 
@@ -1867,12 +1956,12 @@ function wireMenus(node) {
  *  §7.4, §7.7, §7.8, §7.9 and §7.12 all draw one. Drawing a field that
  *  filters nothing is the same broken promise as a dead button.
  */
-function wireListSearch(node, { rowSelector = ".item-card, .exp-card" } = {}) {
+function wireListSearch(node, { rowSelector = ".item-card, .exp-card", page } = {}) {
   const field = node.querySelector(".search .input");
   if (!field) return;
   const empty = node.querySelector(".empty");
 
-  field.addEventListener("input", () => {
+  field.addEventListener("input", async () => {
     const needle = field.value.trim().toLowerCase();
     let shown = 0;
     for (const row of node.querySelectorAll(rowSelector)) {
@@ -1891,8 +1980,36 @@ function wireListSearch(node, { rowSelector = ".item-card, .exp-card" } = {}) {
       node.querySelector(".toolbar").after(note);
     }
     note.hidden = !needle;
-    note.textContent = needle && !shown ? `Nothing here matches “${field.value.trim()}”.` : "";
     if (empty) empty.hidden = Boolean(needle);
+
+    // `R-20`: the rows on screen are a capped slice, and the person has just
+    // searched for something that is not in the part they were handed. The
+    // honest answer is not "Nothing here matches" — that sentence was the
+    // bug, returned about rules the library demonstrably held. Finish
+    // loading the list, then answer.
+    //
+    // This can only fire once per visit: the rebuilt frame is whole, so
+    // `total > shown` is false for every later keystroke.
+    if (needle && !shown && page && page.total > page.shown) {
+      note.textContent = `Looking through all ${page.total.toLocaleString()}…`;
+      try {
+        const fresh = await swapFrame(node, page.rebuild, page.total);
+        const refocused = fresh.querySelector(".search .input");
+        if (refocused) {
+          refocused.value = field.value;
+          refocused.focus();
+          refocused.dispatchEvent(new Event("input"));
+        }
+      } catch (error) {
+        note.textContent =
+          error?.reason === "offline"
+            ? "Brain could not be reached. Check your connection and try again."
+            : `Nothing here matches “${field.value.trim()}”.`;
+      }
+      return;
+    }
+
+    note.textContent = needle && !shown ? `Nothing here matches “${field.value.trim()}”.` : "";
   });
 }
 
@@ -2341,8 +2458,9 @@ function wireExpanders(node) {
   }
 }
 
-FRAMES.rules = async function rules() {
-  const data = await api("/api/rules");
+FRAMES.rules = async function rules(params = {}) {
+  const data = await api(pagedPath("/api/rules", params.limit));
+  const page = { ...data, rebuild: (limit) => FRAMES.rules({ ...params, limit }) };
 
   const card = (rule) => {
     const written = !rule.provenance.title || rule.source_id === "src_user_axioms";
@@ -2417,10 +2535,12 @@ FRAMES.rules = async function rules() {
                <a class="btn" data-variant="primary" href="/">Teach Brain</a>
              </div>`
       }
+      ${pageFoot(page)}
     </div>`);
 
   wireExpanders(node);
-  wireListSearch(node);
+  wireListSearch(node, { page });
+  wirePageFoot(node, page);
   openCreatePanel(node, "rule");
 
   /* §7.8's two actions. They were plain buttons with no data attribute and
@@ -2494,8 +2614,9 @@ async function editRule(id, button, lookup) {
   });
 }
 
-FRAMES.skills = async function skills() {
-  const data = await api("/api/skills");
+FRAMES.skills = async function skills(params = {}) {
+  const data = await api(pagedPath("/api/skills", params.limit));
+  const page = { ...data, rebuild: (limit) => FRAMES.skills({ ...params, limit }) };
 
   const card = (skill, kind) =>
     expandable({
@@ -2597,10 +2718,12 @@ FRAMES.skills = async function skills() {
                <a class="btn" data-variant="primary" href="/">Teach Brain</a>
              </div>`
       }
+      ${pageFoot(page)}
     </div>`);
 
   wireExpanders(node);
-  wireListSearch(node);
+  wireListSearch(node, { page });
+  wirePageFoot(node, page);
   wireMenus(node);
   openCreatePanel(node, "skill");
 
@@ -3383,8 +3506,9 @@ function clockLabel(stamp) {
   return sameDay ? clock : `${dateLabel(stamp)} ${clock}`;
 }
 
-FRAMES.archive = async function archive() {
-  const data = await api("/api/archive");
+FRAMES.archive = async function archive(params = {}) {
+  const data = await api(pagedPath("/api/archive", params.limit));
+  const page = { ...data, rebuild: (limit) => FRAMES.archive({ ...params, limit }) };
 
   const card = (item) =>
     expandable({
@@ -3477,10 +3601,12 @@ FRAMES.archive = async function archive() {
                <a class="btn" data-variant="secondary" href="/library/sources">Back to Sources</a>
              </div>`
       }
+      ${pageFoot(page)}
     </div>`);
 
   wireExpanders(node);
-  wireListSearch(node);
+  wireListSearch(node, { page });
+  wirePageFoot(node, page);
 
   // The filter exists here and nowhere else, because this is the only
   // heterogeneous list in the app (§7.12).
@@ -3881,6 +4007,12 @@ export function createRouter({ root, nav, announcer, context = {} } = {}) {
       link.setAttribute("href", href(p) + (q ? `?${q}` : ""));
     }
   }
+
+  // `R-20`: a frame that reloads itself with a higher cap replaces its own
+  // node without going through `render`, so it has no way to reach
+  // `absolutise` — which lives in this closure because link rewriting is the
+  // router's business. It says so with an event instead.
+  document.addEventListener("brain:mounted", () => absolutise(content));
 
   let generation = 0;
 

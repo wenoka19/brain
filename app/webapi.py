@@ -85,6 +85,33 @@ def _json(payload: Any, status: int = 200) -> JSONResponse:
     return JSONResponse(payload, status_code=status, headers={"Cache-Control": "no-store"})
 
 
+# `R-20`: the ceiling on a single list request. It is a guard against a client
+# asking for the whole database in one response, not a product limit — it sits
+# far above what the credit plan can produce in half a year, so a real person
+# clicking "Show 200 more" should never reach it. If one ever does, the answer
+# is a cursor, not a bigger number here.
+_LIMIT_CEILING = 10_000
+
+
+def _limit(request: Request, default: int) -> int:
+    """How many rows this read may return.
+
+    Absent, unparseable or negative all fall back to the frame's own default,
+    because a broken `?limit=` must not be able to empty a page — the bug this
+    whole change exists to fix was a list that showed less than it had.
+    """
+    raw = request.query_params.get("limit")
+    if raw is None:
+        return default
+    try:
+        asked = int(raw)
+    except ValueError:
+        return default
+    if asked < 1:
+        return default
+    return min(asked, _LIMIT_CEILING)
+
+
 def _context(request: Request, *, surface: str = "web_ui") -> E.Context:
     cfg = settings()
     user_id = read_session_cookie(request.cookies.get(SESSION_COOKIE), cfg=cfg)
@@ -471,7 +498,7 @@ async def api_counts(request: Request) -> Response:
 async def api_sources(request: Request) -> Response:
     ctx = _context(request)
     _rate_limit(ctx, "list_sources", {}, repeatable=True)
-    return _result(E.op_list_sources(ctx))
+    return _result(E.op_list_sources(ctx, limit=_limit(request, 100)))
 
 
 @endpoint
@@ -487,7 +514,7 @@ async def api_source(request: Request) -> Response:
 async def api_transcripts(request: Request) -> Response:
     ctx = _context(request)
     _rate_limit(ctx, "list_transcripts", {}, repeatable=True)
-    return _result(E.op_list_transcripts(ctx))
+    return _result(E.op_list_transcripts(ctx, limit=_limit(request, 100)))
 
 
 @endpoint
@@ -510,14 +537,14 @@ async def api_archive_list(request: Request) -> Response:
     """
     ctx = _context(request)
     _rate_limit(ctx, "list_archive", {}, repeatable=True)
-    return _result(E.op_list_archive(ctx))
+    return _result(E.op_list_archive(ctx, limit=_limit(request, 200)))
 
 
 @endpoint
 async def api_rules(request: Request) -> Response:
     ctx = _context(request)
     _rate_limit(ctx, "list_rules", {}, repeatable=True)
-    return _result(E.op_list_rules(ctx))
+    return _result(E.op_list_rules(ctx, limit=_limit(request, 200)))
 
 
 @endpoint
@@ -525,7 +552,7 @@ async def api_skills(request: Request) -> Response:
     """§7.9's three sections and the review count."""
     ctx = _context(request)
     _rate_limit(ctx, "list_skills", {}, repeatable=True)
-    return _result(E.op_list_skills(ctx))
+    return _result(E.op_list_skills(ctx, limit=_limit(request, 200)))
 
 
 @endpoint
@@ -630,7 +657,7 @@ async def api_summaries(request: Request) -> Response:
     """§7.6's list."""
     ctx = _context(request)
     _rate_limit(ctx, "list_summaries", {}, repeatable=True)
-    return _result(E.op_list_summaries(ctx))
+    return _result(E.op_list_summaries(ctx, limit=_limit(request, 50)))
 
 
 @endpoint
