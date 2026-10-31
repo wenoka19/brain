@@ -168,11 +168,17 @@ class FetchWorker:
             return {"job_id": job_id, "outcome": "problem", "reason": "reader_error"}
 
         posted = self._post(f"/api/fetch-queue/{job_id}/content", content)
+        # The server stages the text and answers at once; the extraction is
+        # its own work, off its own event loop. So this says what actually
+        # happened here — the reading — and does not pretend to know how many
+        # claims came out of it minutes later.
         LOGGER.info(
-            "%s read and posted — %s claims, status %s",
-            job_id, posted.get("claims"), posted.get("status"),
+            "%s read — %s characters handed over%s",
+            job_id,
+            len(str(content.get("full_text") or "")),
+            "" if posted.get("accepted") else " (the server already had it)",
         )
-        return {"job_id": job_id, "outcome": "read", "claims": posted.get("claims")}
+        return {"job_id": job_id, "outcome": "read"}
 
     def _read(self, url: str) -> dict[str, Any]:
         """The same fetch the server used to run, on this machine's IP."""

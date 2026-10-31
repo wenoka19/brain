@@ -1122,6 +1122,8 @@ def lease_fetch_job(*, user_id: str | None = None, cfg: Settings | None = None):
         max_attempts=cfg.fetch_max_attempts,
         source_types=cfg.remote_fetch_types,
         count_attempt=False,
+        # Never a job whose text is already here waiting to be read.
+        exclude_staged=True,
     )
     if job is None:
         return None
@@ -1201,10 +1203,57 @@ def _content_from_payload(payload: dict[str, Any], job: dict[str, Any]) -> Fetch
     ).finalise()
 
 
+def hand_over_fetched_content(
+    job_id: str, payload: dict[str, Any], *, cfg: Settings | None = None
+) -> dict[str, Any]:
+    """Take the text a reader fetched, and answer immediately.
+
+    This is what the lease endpoint calls, and it does three cheap things:
+    check the job, write the payload, return. **It must never run the
+    pipeline.** The first version did, and on a single-process server that
+    held the event loop for the length of an extraction — minutes — so
+    `/healthz` stopped answering, Railway's proxy served `upstream error` to
+    the person's own browser, and the reader, timing out on its side,
+    re-leased the same video and charged it again.
+
+    The extraction belongs to the drain, which already runs off the loop.
+    """
+    cfg = cfg or settings()
+    control = control_db.control()
+    job = control_db.get_job(control, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["status"] in ("ready", "failed", "blocked_by_platform"):
+        return {"job_id": job_id, "status": job["status"], "accepted": False, "stale": True}
+    if not remote_fetch_wanted(job["source_type"], cfg=cfg):
+        raise ValueError(f"{job['source_type']} is not fetched remotely")
+
+    control_db.stage_fetched_content(control, job_id, payload)
+    # Back to `queued` with no lease at all: the drain takes it on its next
+    # pass rather than a second later, and the reader is free to go and lease
+    # the next video.
+    control_db.requeue_now(control, job_id)
+    control_db.audit(
+        control,
+        user_id=job["user_id"],
+        action="fetch_handover",
+        status="accepted",
+        surface="system",
+        target_id=job_id,
+        detail={"chars": len(str(payload.get("full_text") or ""))},
+    )
+    LOGGER.info("job %s: text handed over, queued for extraction", job_id)
+    return {"job_id": job_id, "status": "queued", "accepted": True}
+
+
 def accept_fetched_content(
     job_id: str, payload: dict[str, Any], *, cfg: Settings | None = None
 ) -> dict[str, Any]:
-    """Enter the pipeline with text a reader fetched elsewhere.
+    """Stage that text and run the pipeline on it now, in this thread.
+
+    The synchronous twin of `hand_over_fetched_content`, for the CLI, the
+    tests and anything draining in the foreground. Nothing serving HTTP calls
+    this: that is the whole lesson of `R-24`.
 
     The same door the local path uses: `_ingest_content` charges the credits,
     enforces the 120-minute ceiling, extracts, grounds and links. Nothing
@@ -1229,14 +1278,11 @@ def accept_fetched_content(
     if not remote_fetch_wanted(job["source_type"], cfg=cfg):
         raise ValueError(f"{job['source_type']} is not fetched remotely")
 
-    content = _content_from_payload(payload, dict(job))
-    finish = _job_finisher(dict(job), cfg=cfg)
-    if not content.full_text:
-        return finish("failed", message=VIDEO_UNAVAILABLE, reason="empty_content")
-    control_db.finish_step(
-        control, job_id, "read", detail=_step_detail_read(dict(job), content)
-    )
-    return _ingest_content(dict(job), content, cfg=cfg, finish=finish)
+    control_db.stage_fetched_content(control, job_id, payload)
+    # One code path for the extraction, whoever asked for it: `process_job`
+    # reads the staged text in place of fetching, and ends the job through the
+    # same `finish` every other source goes through.
+    return process_job(dict(job), cfg=cfg)
 
 
 def report_fetch_problem(
@@ -1347,6 +1393,11 @@ def _job_finisher(job: dict[str, Any], *, cfg: Settings):
         # `_ingest_content` for the success path, and `claim_next_job` never
         # re-leases a terminal job, so nothing can need the file afterwards.
         _release_upload(control, user_id, job, cfg=cfg)
+        # `R-24`: and the text a reader handed over, whichever way this ended.
+        # `claim_next_job` never re-leases a terminal job, so nothing can need
+        # it afterwards, and leaving it would keep a transcript in `control.db`
+        # for a job that is over.
+        control_db.clear_fetched_content(control, job_id)
         control_db.audit(
             control,
             user_id=user_id,
@@ -1386,7 +1437,20 @@ def process_job(job: dict[str, Any], *, cfg: Settings | None = None) -> dict[str
     control_db.set_job_status(control, job_id, "fetching")
     control_db.start_step(control, job_id, "read")
     try:
-        if job["source_type"] in ("pdf", "docx", "text", "image"):
+        # `R-24`: a video's text was fetched on another machine and parked by
+        # the lease endpoint. Reading it here puts the whole pipeline back on
+        # the one code path that already runs off the event loop, through
+        # `asyncio.to_thread` in `app/worker.py` — which is why an uploaded
+        # PDF never froze this server and the first version of that endpoint
+        # did.
+        staged = (
+            control_db.staged_fetched_content(control, job_id)
+            if remote_fetch_wanted(job["source_type"], cfg=cfg)
+            else None
+        )
+        if staged is not None:
+            content = _content_from_payload(staged, job)
+        elif job["source_type"] in ("pdf", "docx", "text", "image"):
             validated = gatekeeper.validate_file(job["input_target"], cfg=cfg)
             content = prov.fetcher.fetch_file(validated, cfg=cfg)
         else:

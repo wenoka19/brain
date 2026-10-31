@@ -519,11 +519,20 @@ async def api_fetch_lease(request: Request) -> Response:
 
 @endpoint
 async def api_fetch_content(request: Request) -> Response:
-    """Take the text a reader fetched and run the rest of the pipeline."""
+    """Take the text a reader fetched, and answer at once.
+
+    `R-24`: this used to call the pipeline. The handler is `async def` and the
+    pipeline is synchronous, so an extraction held the event loop of a
+    single-process server for minutes — `/healthz` stopped answering, the
+    platform served `upstream error` to the person's own browser, and the
+    reader timed out on its side and posted the same video again. The text is
+    staged and the drain reads it, off the loop, the way every other source
+    has always been read.
+    """
     cfg = _fetcher_auth(request)
     payload = await _body(request)
     try:
-        outcome = E.accept_fetched_content(
+        outcome = E.hand_over_fetched_content(
             request.path_params["job_id"], payload, cfg=cfg
         )
     except KeyError as exc:

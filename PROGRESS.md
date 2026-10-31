@@ -1867,3 +1867,98 @@ And `pyproject.toml` declares `deno`, with no floor: `app/` imports it
 directly, which is the rule `test_every_directly_imported_package_is_declared`
 enforces, while the *version* stays yt-dlp's business through its own extra.
 That test caught this within a minute of the import being written.
+
+
+---
+
+## R-25 — The endpoint that froze production (31 October 2026, 23:20)
+
+The reader worked. From the founder's Windows laptop:
+
+```
+22:52:49 leased job_08c05bef — youtube.com/watch?v=CZ2UFY1yFCc
+22:53:05 could not be read (no_transcript)
+```
+
+**YouTube served a residential machine.** No bot wall, no refusal — the whole
+point of `R-23`, proved on the first real video. That one simply had no
+captions.
+
+The second video took the web app down.
+
+```
+22:53:37 leased job_9f1690f0 — youtube.com/watch?v=XNZN6gYhpLU
+22:55:58 server unreachable (The read operation timed out) — retrying
+23:17:56 leased job_9f1690f0 — the SAME video
+```
+
+and from the browser: `upstream error`. Measured from here, `/healthz` did
+not answer at all — three attempts, twenty seconds each, zero bytes.
+
+### What was wrong
+
+`api_fetch_content` is `async def` and called `accept_fetched_content`, which
+is synchronous and runs the entire pipeline: the credit gate, chunking, an LLM
+call per chunk, embeddings, grounding, linking. On a single-process server
+that holds the **event loop** for the length of an extraction — minutes — so
+nothing else is served. `/healthz` included. Railway's proxy, getting no
+answer, served `upstream error` to the person's own browser.
+
+`app/worker.py` had the answer all along, and had had it since Phase 4:
+
+```python
+outcome = await asyncio.to_thread(self.drain_once)
+```
+
+That is why an uploaded PDF never did this. The new endpoint was the only
+place in the product where the pipeline ran on the loop.
+
+And it compounded: the reader's client gave up at its 120-second read
+timeout, concluded "server unreachable", re-leased the same job when the lease
+expired, re-fetched the video and posted it again — **charging a second
+extraction** each time, because a job mid-pipeline is not terminal and the
+idempotency check reads the status.
+
+### What changed
+
+The endpoint does what a queue endpoint should: it writes the text to
+`fetched_payloads` and answers. `process_job` reads that row in place of
+fetching, so the extraction joins the one code path that already runs off the
+loop, and `finish` drops the row on every exit.
+
+Three guards against the job going round in circles:
+
+- `claim_next_job(exclude_staged=True)` for the reader's lease — the handover
+  returns the job to the queue, and without this the reader would take it
+  straight back and re-download the transcript forever.
+- `claim_next_job` / `reap_exhausted_jobs` let a remote job through *once its
+  text is staged*: excluded while it is somebody else's work, claimable the
+  moment it is ours.
+- `requeue_now`, which is `defer_job`'s opposite and says so: not "come back
+  later" but "this is ready now".
+
+### Measured, after
+
+A local prod server, a 7,000-character transcript posted the way the reader
+posts it:
+
+| | before | after |
+|---|---|---|
+| the POST answers in | minutes (or timed out) | **0.013 s** |
+| `/healthz` during the extraction | no answer at all | **0.002 s**, throughout |
+| a slow post costs | a second extraction | nothing |
+
+The server log shows what it was doing while answering in two milliseconds:
+`POST https://api.z.ai/.../chat/completions` — a real LLM extraction, call
+after call, for minutes. Exactly the work that used to be inside the request.
+
+### Guards
+
+`test_the_handler_never_touches_the_pipeline` puts a tripwire on
+`_ingest_content` and posts content over HTTP: the moment this handler starts
+doing the drain's work again, it fails.
+`test_the_round_trip_answers_without_doing_the_work` asserts the answer is
+`queued` with nothing extracted yet, then that the ordinary drain turns it
+into `ready`.
+`test_the_reader_cannot_take_back_what_it_handed_over` leases, hands over, and
+asserts the next lease is empty.
