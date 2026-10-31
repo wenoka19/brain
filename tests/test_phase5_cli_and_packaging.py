@@ -35,7 +35,7 @@ class TestCli:
             action for action in parser._actions if hasattr(action, "choices") and action.choices
         )
         assert {"doctor", "selftest", "preview-ax", "dev"} <= set(sub.choices)
-        assert {"serve", "worker", "calibrate"} <= set(sub.choices)
+        assert {"serve", "worker", "calibrate", "youtube-check"} <= set(sub.choices)
 
     def test_doctor_passes_on_this_host(self, cfg, capsys):
         assert cli.main(["doctor"]) == 0
@@ -280,6 +280,53 @@ class TestPackaging:
         assert text.count("FROM ") >= 2
         assert "build-essential" in text.split("AS runtime")[0]
         assert "build-essential" not in text.split("AS runtime")[1]
+
+    def test_the_image_does_not_hand_roll_the_javascript_runtime(self):
+        """Two deploys failed here, and both failures were guesses.
+
+        The first shipped no JavaScript runtime at all, so every YouTube job
+        died on "No supported JavaScript runtime could be found". The second
+        added one by hand: `dpkg --print-architecture`, a case statement, a
+        curl of a hardcoded `deno-2.1.4` zip, and `deno --version` as proof it
+        ran. It did run — and 2.1.4 is below yt-dlp's minimum of 2.3.0, so
+        yt-dlp refused it and every video failed again, under an image that
+        had just verified itself.
+
+        pip knows both things the Dockerfile was guessing: the Deno authors
+        publish manylinux wheels per architecture, and yt-dlp's own `deno`
+        extra names the version it accepts. So the runtime is a dependency,
+        and the image carries no download of it.
+        """
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        body = "\n".join(
+            line for line in dockerfile.splitlines() if not line.strip().startswith("#")
+        )
+        assert "denoland" not in body, "the image is downloading deno by hand again"
+        assert "dpkg --print-architecture" not in body
+        assert "unzip" not in body
+        # And it refuses to exist if yt-dlp cannot read YouTube.
+        assert "RUN python -m app.cli youtube-check" in body
+
+    def test_the_runtime_and_the_solver_are_declared_dependencies(self):
+        """`yt-dlp` alone is not enough and has not been for a while: without
+        a JavaScript runtime it cannot read YouTube at all, and without the
+        EJS solver scripts it cannot answer a player challenge. Both are
+        yt-dlp extras, which keeps their versions yt-dlp's business rather
+        than ours.
+        """
+        spec = next(
+            dep
+            for dep in tomllib.loads((ROOT / "pyproject.toml").read_text())["project"][
+                "dependencies"
+            ]
+            if dep.startswith("yt-dlp")
+        )
+        assert "[" in spec and "]" in spec, spec
+        extras = {e.strip() for e in spec[spec.index("[") + 1 : spec.index("]")].split(",")}
+        assert {"default", "deno"} <= extras, spec
+        # The `deno` extra does not exist in older yt-dlp releases, where pip
+        # would ignore the name with a warning and install nothing.
+        assert ">=2026" in spec, spec
 
     def test_the_dockerfile_declares_no_volume(self):
         """Railway refuses a build that contains `VOLUME`: there the volume is

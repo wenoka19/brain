@@ -35,7 +35,30 @@ dependencies = [
   # Invoked as a PATH executable by `app/ingestion/fetchers.py`, never imported,
   # which is why its absence showed up as a `cli doctor` warning rather than an
   # ImportError. The wheel installs the console script.
-  "yt-dlp>=2024.8.6",
+  #
+  # The two extras are not optional, and neither is the floor. yt-dlp cannot
+  # read YouTube without a JavaScript runtime and the EJS challenge-solver
+  # scripts, and it is the authority on which versions of each it will accept:
+  #   * `deno`    -> `deno>=2.9.8`, the Deno authors' own PyPI redistribution
+  #                  (support@deno.com, MIT, wheels for manylinux x86_64 and
+  #                  aarch64), which pip resolves to the right architecture.
+  #                  The image used to curl a hardcoded `deno-2.1.4` zip after
+  #                  reading `dpkg --print-architecture` by hand: that binary
+  #                  ran, printed its version, satisfied `doctor`, and was
+  #                  below yt-dlp's minimum of 2.3.0, so every video failed.
+  #                  Delegating the version to the only project that knows it
+  #                  removes both the arithmetic and the arch detection.
+  #   * `default` -> `yt-dlp-ejs==0.8.0`, pinned by yt-dlp to the script
+  #                  version its own wheel vendors. The wheel ships the
+  #                  solver's core script but not its lib script, so without
+  #                  this package yt-dlp's only remaining sources are an NPM or
+  #                  GitHub download it refuses unless `--remote-components`
+  #                  allows it. Pinning that version here instead would be a
+  #                  second copy of someone else's constraint, drifting the
+  #                  moment they bump it.
+  # yt-dlp's `deno` extra does not exist in older releases, where pip would
+  # ignore the name with a warning, so the floor moves with it.
+  "yt-dlp[default,deno]>=2026.10.26",
   # Both of these arrive transitively through FastAPI, and `app/` imports them
   # DIRECTLY — `starlette.responses`/`requests`/`middleware.base`/`routing`/
   # `exceptions`/`testclient` across the control plane, and `pydantic.AnyHttpUrl`

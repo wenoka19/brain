@@ -1468,85 +1468,195 @@ class TestAMissingJsRuntimeBlamesTheServer:
         )
         assert self._reason(stderr) == "js_runtime_missing"
 
-    def test_doctor_fails_when_no_runtime_is_installed(self, cfg, monkeypatch, capsys):
+    def test_a_missing_solver_script_blames_the_server_too(self):
+        """A runtime can be present, supported, and have nothing to run.
+
+        yt-dlp's wheel vendors the solver's core script and not its lib
+        script, so without `yt-dlp-ejs` the only sources left are an NPM or a
+        GitHub download that yt-dlp refuses unless `--remote-components`
+        allows it. Measured: a venv with `yt-dlp[deno]` and no `default` extra
+        reports `JS runtimes: deno-2.9.8` and cannot solve a challenge. Ours,
+        not YouTube's, and the person is told the same thing either way.
+        """
+        stderr = (
+            "WARNING: [youtube] [jsc] Remote component NPM package (deno) was skipped. "
+            "It may be required to solve JS challenges. You can enable the download with "
+            "--remote-components ejs:npm. For more information and alternatives, refer to "
+            "https://github.com/yt-dlp/yt-dlp/wiki/EJS"
+        )
+        assert self._reason(stderr) == "js_solver_missing"
+
+    def test_the_runtime_is_still_checked_before_the_solver(self):
+        stderr = (
+            "WARNING: No supported JavaScript runtime could be found. "
+            "WARNING: Remote component challenge solver script was skipped."
+        )
+        assert self._reason(stderr) == "js_runtime_missing"
+
+
+#: The real `yt-dlp --no-config -v` debug header, copied verbatim from a run of
+#: 2026.10.26 with `yt-dlp[default,deno]` installed. Two of these lines are the
+#: whole of what the probe reads, and yt-dlp writes them to *stderr* and exits
+#: non-zero (there is no URL), which is why the probe ignores the return code.
+_HEADER_HEAD = (
+    "[debug] Command-line config: ['--no-config', '-v']\n"
+    "[debug] yt-dlp version stable@2026.10.26 from yt-dlp/yt-dlp [c91f8de0b] (pip)\n"
+)
+_LIBS_WITH_SOLVER = (
+    "[debug] Optional libraries: Cryptodome-3.24.1, brotli-1.2.1, certifi-2026.10.23, "
+    "mutagen-1.48.1, requests-2.34.2, sqlite3-3.53.1, urllib3-2.8.0, websockets-17.4, "
+    "yt_dlp_ejs-0.8.0\n"
+)
+_LIBS_WITHOUT_SOLVER = "[debug] Optional libraries: sqlite3-3.53.1\n"
+_TAIL = "[debug] Proxy map: {}\n[debug] Loaded 1747 extractors\n"
+
+
+def _header(runtimes: str, *, solver: bool = True) -> str:
+    return (
+        _HEADER_HEAD
+        + (_LIBS_WITH_SOLVER if solver else _LIBS_WITHOUT_SOLVER)
+        + f"[debug] JS runtimes: {runtimes}\n"
+        + _TAIL
+    )
+
+
+def _answers(header: str):
+    """Stand in for `_run`, asserting the probe asks the question it claims to.
+
+    No URL, no network, `--no-config`, and the return code is 2 because that
+    is what yt-dlp does when it is given no URL.
+    """
+    import subprocess as sp
+
+    def run(cmd, *, cfg):
+        assert cmd == ["yt-dlp", "--no-config", "-v"], cmd
+        return sp.CompletedProcess(cmd, 2, "", header)
+
+    return run
+
+
+class TestReadinessIsAskedOfYtDlpNotGuessedFromDisk:
+    """The defect three health checks in a row could not see.
+
+    `which yt-dlp` was true on the boot where every video failed. So was
+    `which deno`. So was `deno --version`, which printed `2.1.4` and exited 0,
+    and `doctor` said `[ok] yt-dlp JavaScript runtime — deno 2.1.4` and
+    `0 failure(s). Ready.` while the queue failed every job.
+
+    yt-dlp requires deno >= 2.3.0 and asks for >= 2.9.8 in its own `deno`
+    extra. Measured directly against the installed library:
+
+        DenoJsRuntime(path=<2.1.4>).info.supported  -> False
+        DenoJsRuntime(path=<2.9.8>).info.supported  -> True
+
+    An unsupported runtime makes `is_available()` false, which sends the
+    extractor to its JS-less clients, which is why the only other line in the
+    log was "No title found in player response". Nothing about the file on
+    disk could have told us that. yt-dlp could, and does, in two lines of
+    `-v`.
+    """
+
+    def _probe(self, header: str, cfg, monkeypatch):
+        from app.ingestion import fetchers
+
+        monkeypatch.setattr(fetchers, "_run", _answers(header))
+        return fetchers.youtube_readiness(cfg=cfg)
+
+    def test_a_supported_runtime_with_the_solver_is_ready(self, cfg, monkeypatch):
+        ready = self._probe(_header("deno-2.9.8"), cfg, monkeypatch)
+        assert ready.ok, ready.problem
+        assert ready.runtimes == "deno-2.9.8"
+        assert ready.solver == "yt_dlp_ejs-0.8.0"
+        assert ready.problem == ""
+
+    def test_the_version_production_shipped_is_refused(self, cfg, monkeypatch):
+        ready = self._probe(_header("deno-2.1.4 (unsupported)"), cfg, monkeypatch)
+        assert not ready.ok, "doctor passed the runtime yt-dlp had already refused"
+        assert "too old" in ready.problem
+        assert "2.1.4" in ready.problem
+        assert "yt-dlp[default,deno]" in ready.remedy
+
+    def test_no_runtime_at_all_is_named_as_such(self, cfg, monkeypatch):
+        ready = self._probe(_header("none"), cfg, monkeypatch)
+        assert not ready.ok
+        assert "no JavaScript runtime" in ready.problem
+
+    def test_a_cleared_runtime_list_is_not_a_runtime(self, cfg, monkeypatch):
+        """`--no-js-runtimes` prints `none (disabled)`, not `none`."""
+        ready = self._probe(_header("none (disabled)"), cfg, monkeypatch)
+        assert not ready.ok
+
+    def test_the_solver_scripts_are_the_other_half(self, cfg, monkeypatch):
+        ready = self._probe(_header("deno-2.9.8", solver=False), cfg, monkeypatch)
+        assert not ready.ok, "a runtime with nothing to run is not readiness"
+        assert "challenge-solver" in ready.problem
+
+    def test_one_supported_runtime_among_refused_ones_is_enough(self, cfg, monkeypatch):
+        """Only *all* of them being refused is a failure: yt-dlp will use the
+        one it accepts."""
+        ready = self._probe(_header("deno-2.1.4 (unsupported), node-24.1.0"), cfg, monkeypatch)
+        assert ready.ok, ready.problem
+
+    def test_a_missing_yt_dlp_is_an_answer_not_an_exception(self, cfg, monkeypatch):
+        from app.ingestion import fetchers
+        from app.ingestion.providers import ProviderError
+
+        def boom(cmd, *, cfg):
+            raise ProviderError("tool_missing", "`yt-dlp` is not installed on this host.")
+
+        monkeypatch.setattr(fetchers, "_run", boom)
+        ready = fetchers.youtube_readiness(cfg=cfg)
+        assert not ready.ok
+        assert "tool_missing" in ready.problem
+
+    def test_doctor_fails_on_the_runtime_production_shipped(self, cfg, monkeypatch, capsys):
         """The check lives in the prod block, because that is the image that
         has to carry the runtime."""
-        import shutil as sh
-
         from app import cli
         from app import config as config_module
+        from app.ingestion import fetchers
 
         monkeypatch.setenv("BRAIN_ENV", "prod")
         monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://example.test")
         monkeypatch.setenv("BRAIN_JWT_SECRET", "doctor-secret-key-long-enough-for-hs256")
         config_module.reload_settings()
+        monkeypatch.setattr(fetchers, "_run", _answers(_header("deno-2.1.4 (unsupported)")))
 
-        real = sh.which
-        monkeypatch.setattr(
-            cli.shutil, "which",
-            lambda name: "" if name in ("deno", "node", "bun", "qjs") else real(name),
-        )
         cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
         out = capsys.readouterr().out
-        assert "JavaScript runtime" in out
-        assert "0 failure(s)" not in out, "doctor called itself ready with no JS runtime"
+        assert "cannot read YouTube" in out
+        assert "deno-2.1.4 (unsupported)" in out
+        assert "0 failure(s)" not in out, "doctor called itself ready on a refused runtime"
 
-    def test_a_runtime_that_is_found_but_cannot_run_is_a_failure(
+    def test_doctor_is_ready_when_yt_dlp_says_it_can_read_youtube(
         self, cfg, monkeypatch, capsys
     ):
-        """`which` says a file exists and carries the executable bit. A deno
-        built for the wrong architecture passes that and dies the moment
-        yt-dlp calls it — which is how production printed
-        `[ok] yt-dlp JavaScript runtime — deno` on the same boot where every
-        video failed for want of one. Finding it is not running it."""
-        import subprocess as sp
-
         from app import cli
         from app import config as config_module
+        from app.ingestion import fetchers
 
         monkeypatch.setenv("BRAIN_ENV", "prod")
         monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://example.test")
         monkeypatch.setenv("BRAIN_JWT_SECRET", "doctor-secret-key-long-enough-for-hs256")
         config_module.reload_settings()
+        monkeypatch.setattr(fetchers, "_run", _answers(_header("deno-2.9.8")))
 
-        monkeypatch.setattr(
-            cli.shutil, "which",
-            lambda name: "/usr/local/bin/deno" if name == "deno" else "",
-        )
-        monkeypatch.setattr(
-            cli.subprocess, "run",
-            lambda *a, **k: sp.CompletedProcess(
-                a[0], 126, "", "cannot execute binary file: Exec format error"
-            ),
-        )
         cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
         out = capsys.readouterr().out
-        assert "deno unusable" in out
-        assert "Exec format error" in out
-        assert "0 failure(s)" not in out, "doctor passed a runtime that cannot run"
+        assert "can read YouTube" in out and "deno-2.9.8" in out
+        assert "yt_dlp_ejs-0.8.0" in out
 
-    def test_doctor_is_happy_when_a_runtime_is_there(self, cfg, monkeypatch, capsys):
-        import shutil as sh
-
+    def test_the_build_gate_exits_nonzero_on_a_refused_runtime(self, cfg, monkeypatch, capsys):
+        """`entrypoint.sh` keeps going when `doctor` complains, by design: a
+        doctor failure must not take the web app down. So the same answer is
+        asked again where failing is free — in the image build."""
         from app import cli
-        from app import config as config_module
+        from app.ingestion import fetchers
 
-        monkeypatch.setenv("BRAIN_ENV", "prod")
-        monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://example.test")
-        monkeypatch.setenv("BRAIN_JWT_SECRET", "doctor-secret-key-long-enough-for-hs256")
-        config_module.reload_settings()
+        monkeypatch.setattr(fetchers, "_run", _answers(_header("deno-2.1.4 (unsupported)")))
+        assert cli.main(["youtube-check"]) == 1
+        assert "cannot read YouTube" in capsys.readouterr().out
 
-        real = sh.which
-        import subprocess as sp
-
-        monkeypatch.setattr(
-            cli.shutil, "which",
-            lambda name: "/usr/local/bin/deno" if name == "deno" else real(name),
-        )
-        monkeypatch.setattr(
-            cli.subprocess, "run",
-            lambda *a, **k: sp.CompletedProcess(a[0], 0, "deno 2.1.4", ""),
-        )
-        cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
-        out = capsys.readouterr().out
-        assert "yt-dlp JavaScript runtime" in out and "deno 2.1.4" in out
+        monkeypatch.setattr(fetchers, "_run", _answers(_header("deno-2.9.8")))
+        assert cli.main(["youtube-check"]) == 0
+        assert "can read YouTube" in capsys.readouterr().out

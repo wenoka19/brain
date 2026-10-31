@@ -109,6 +109,36 @@ def _probe_providers(cfg) -> list[tuple[str, str, str]]:
     return out
 
 
+def cmd_youtube_check(args: argparse.Namespace) -> int:
+    """Exit non-zero unless yt-dlp can actually read YouTube on this host.
+
+    The image runs this at build time, so a container that cannot read
+    YouTube never ships: it is offline, needs no URL, no credentials and no
+    volume, and it asks yt-dlp itself rather than looking for deno on disk.
+
+    `doctor` reports the same answer at boot, but `entrypoint.sh` keeps going
+    when doctor complains — by design, because a doctor failure must not take
+    the web app down with it. That is exactly why this gate belongs in the
+    build, where failing is free and nobody is waiting.
+    """
+    from app.config import settings
+    from app.ingestion.fetchers import youtube_readiness
+
+    youtube = youtube_readiness(cfg=settings())
+    if youtube.ok:
+        print(f"[ ok ] yt-dlp can read YouTube — runtime {youtube.runtimes}, "
+              f"solver {youtube.solver or 'builtin'}")
+        return 0
+    print(f"[fail] yt-dlp cannot read YouTube — {youtube.problem}")
+    if youtube.remedy:
+        print(f"       remedy: {youtube.remedy}")
+    if youtube.runtimes:
+        print(f"       JS runtimes: {youtube.runtimes}")
+    if youtube.libraries:
+        print(f"       optional libraries: {youtube.libraries}")
+    return 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from app.config import VENDOR_LABELS as config_labels
     from app.config import settings
@@ -303,53 +333,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 "unset — /mcp will answer 421 for any Host it was not told about",
             )
             warnings += 1
-        if shutil.which("yt-dlp"):
-            line("ok", "yt-dlp on PATH")
-        else:
-            line("warn", "yt-dlp", "not found — YouTube ingestion will fail")
-            warnings += 1
-        # yt-dlp on PATH is no longer enough. It needs a JavaScript runtime to
-        # read YouTube, and without one every video fails with "No title found
-        # in player response" — which production did, while `doctor` reported
-        # `yt-dlp on PATH` and called itself ready.
-        # Running it, not just finding it. `which` only says a file exists and
-        # carries the executable bit: a binary built for the wrong
-        # architecture passes that and fails the moment yt-dlp calls it, which
-        # is how production showed `[ok] yt-dlp JavaScript runtime — deno` on
-        # the same boot where every video failed for want of one.
-        runtime = ""
-        for candidate in ("deno", "node", "bun", "qjs"):
-            path = shutil.which(candidate)
-            if not path:
-                continue
-            try:
-                proc = subprocess.run(
-                    [path, "--version"], capture_output=True, text=True, timeout=20, check=False
-                )
-            except Exception as exc:
-                line("bad", f"{candidate} unusable", f"found at {path} but would not run: {exc}")
-                failures += 1
-                continue
-            if proc.returncode == 0:
-                first = ((proc.stdout or "").strip().splitlines() or [candidate])[0]
-                runtime = first.strip()[:60]
-                break
+        # Asking yt-dlp what it can do, instead of looking for the files it
+        # needs. Three health checks in a row got this wrong by looking:
+        # `which yt-dlp` was true on the boot where every video failed, then
+        # `which deno` was true, then `deno --version` printed 2.1.4 and
+        # exited 0. Each one was a fact about the filesystem standing in for a
+        # capability of the program — and the program had already decided that
+        # deno 2.1.4 is below its minimum (2.3.0), so it fell back to its
+        # JS-less clients and no video had a title.
+        #
+        # `yt-dlp --no-config -v` answers both halves of the question in two
+        # lines of its own debug header, offline, with no URL.
+        from app.ingestion.fetchers import youtube_readiness
+
+        youtube = youtube_readiness(cfg=cfg)
+        if youtube.ok:
             line(
-                "bad",
-                f"{candidate} unusable",
-                f"found at {path} but exited {proc.returncode}: "
-                f"{((proc.stderr or '').strip().splitlines() or [''])[0][:120]}",
+                "ok",
+                "yt-dlp can read YouTube",
+                f"JS runtime {youtube.runtimes}; solver {youtube.solver or 'builtin'}",
             )
-            failures += 1
-        if runtime:
-            line("ok", "yt-dlp JavaScript runtime", runtime)
         else:
             line(
                 "bad",
-                "yt-dlp JavaScript runtime",
-                "none of deno/node/bun found — YouTube extraction is deprecated without "
-                "one and every video fails. Install deno in the image",
+                "yt-dlp cannot read YouTube",
+                f"{youtube.problem} — {youtube.remedy}",
             )
+            if youtube.runtimes:
+                line("warn", "  JS runtimes yt-dlp sees", youtube.runtimes)
+                warnings += 1
             failures += 1
 
     # ---- portability -------------------------------------------------------
@@ -1399,6 +1411,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually call the model and embedding hosts, instead of only reading the config",
     )
     doctor.set_defaults(func=cmd_doctor)
+
+    ytcheck = sub.add_parser(
+        "youtube-check",
+        help="exit non-zero unless yt-dlp can actually read YouTube on this host",
+    )
+    ytcheck.set_defaults(func=cmd_youtube_check)
 
     selftest = sub.add_parser("selftest", help="exercise the whole product deterministically")
     selftest.add_argument("--keep", action="store_true", help="keep the temporary data directory")

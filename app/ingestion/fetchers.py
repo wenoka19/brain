@@ -12,6 +12,7 @@ Hard rules enforced here:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -123,6 +124,125 @@ def _run(cmd: list[str], *, cfg: Settings) -> subprocess.CompletedProcess:
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# Can this host read YouTube at all?
+# ---------------------------------------------------------------------------
+#: What `yt-dlp -v` appends to a runtime it found and will refuse to use.
+_UNSUPPORTED = "(unsupported)"
+
+
+@dataclasses.dataclass(frozen=True)
+class YoutubeReadiness:
+    """What yt-dlp itself says it can do on this host."""
+
+    ok: bool
+    runtimes: str = ""
+    libraries: str = ""
+    problem: str = ""
+    remedy: str = ""
+
+    @property
+    def solver(self) -> str:
+        """The `yt_dlp_ejs-0.8.0` token out of the optional-libraries line."""
+        for part in self.libraries.split(","):
+            token = part.strip()
+            if token.startswith("yt_dlp_ejs"):
+                return token
+        return ""
+
+
+def youtube_readiness(*, cfg: Settings | None = None) -> YoutubeReadiness:
+    """Ask yt-dlp what it can do, instead of looking for the files it needs.
+
+    `yt-dlp --no-config -v` with no URL prints yt-dlp's own debug header and
+    exits. Two of those lines are the whole answer, and neither costs a
+    network call::
+
+        [debug] Optional libraries: ..., yt_dlp_ejs-0.8.0
+        [debug] JS runtimes: deno-2.9.8
+
+    The runtime line has three readings, and the middle one is the defect this
+    function exists for:
+
+    * `none` — nothing installed. yt-dlp warns "No supported JavaScript
+      runtime could be found" and every video fails.
+    * `deno-2.1.4 (unsupported)` — installed, executes, answers `--version`,
+      and is refused anyway. yt-dlp requires deno >= 2.3.0
+      (`DenoJsRuntime.MIN_SUPPORTED_VERSION`) and asks for `deno>=2.9.8` in
+      its own `deno` extra. Measured: `DenoJsRuntime(path=…2.1.4).info` →
+      `supported=False`, so `is_available()` is false, so the extractor falls
+      back to its JS-less clients and the video has no title.
+      **This is what production shipped.** `doctor` ran the binary, printed
+      `[ok] yt-dlp JavaScript runtime — deno 2.1.4` and `0 failure(s). Ready.`
+      on the same boot where every video failed for want of a runtime that was
+      sitting right there, executable, one minor version too old.
+    * `deno-2.9.8` — the one that works.
+
+    `yt_dlp_ejs` is the second half. yt-dlp's wheel vendors the solver's
+    *core* script but not its *lib* script, so without that package the only
+    remaining sources are an NPM or GitHub download, both of which yt-dlp
+    refuses unless `--remote-components` allows them — which this server does
+    not pass, and must not need to. A supported runtime with no solver script
+    still cannot answer a player challenge.
+
+    Three health checks in a row got this wrong by looking instead of asking:
+    `which yt-dlp`, then `which deno`, then `deno --version`. Each one was a
+    fact about the filesystem standing in for a capability of the program. The
+    program is right here and will say.
+    """
+    cfg = cfg or settings()
+    try:
+        proc = _run(["yt-dlp", "--no-config", "-v"], cfg=cfg)
+    except ProviderError as exc:
+        return YoutubeReadiness(
+            False,
+            problem=f"yt-dlp could not be run ({exc.reason}): {exc.message}",
+            remedy="install it: pip install 'yt-dlp[default,deno]'",
+        )
+
+    runtimes = libraries = ""
+    for raw in f"{proc.stderr or ''}\n{proc.stdout or ''}".splitlines():
+        text = raw.strip()
+        if "JS runtimes:" in text:
+            runtimes = text.split("JS runtimes:", 1)[1].strip()
+        elif "Optional libraries:" in text:
+            libraries = text.split("Optional libraries:", 1)[1].strip()
+
+    install = "install it: pip install 'yt-dlp[default,deno]'"
+    found = [part.strip() for part in runtimes.split(",") if part.strip()]
+    if not found or runtimes.startswith("none"):
+        return YoutubeReadiness(
+            False,
+            runtimes=runtimes or "none",
+            libraries=libraries,
+            problem="yt-dlp has no JavaScript runtime, so YouTube cannot be read at all",
+            remedy=install,
+        )
+    if all(_UNSUPPORTED in part for part in found):
+        return YoutubeReadiness(
+            False,
+            runtimes=runtimes,
+            libraries=libraries,
+            problem=(
+                f"yt-dlp found a JavaScript runtime and refuses it as too old ({runtimes}); "
+                "it answers --version perfectly well and is no runtime at all"
+            ),
+            remedy=install,
+        )
+    if "yt_dlp_ejs" not in libraries:
+        return YoutubeReadiness(
+            False,
+            runtimes=runtimes,
+            libraries=libraries,
+            problem=(
+                "the challenge-solver scripts are missing (no yt_dlp_ejs), so yt-dlp "
+                "cannot answer YouTube's player challenge"
+            ),
+            remedy=install,
+        )
+    return YoutubeReadiness(True, runtimes=runtimes, libraries=libraries)
+
+
 def parse_vtt(text: str) -> list[dict[str, Any]]:
     """Parse WebVTT into ``[{start, end, text}]``, de-duplicating rolling captions."""
     cues: list[dict[str, Any]] = []
@@ -207,6 +327,21 @@ def _youtube_refusal(stderr: str, url: str) -> ProviderError:
         )
         return ProviderError(
             "js_runtime_missing",
+            "This Brain cannot read YouTube right now: a tool is missing on the server. "
+            "Nothing you can fix.",
+        )
+    # A runtime can be present, supported, and have nothing to run: the wheel
+    # vendors the solver's core script and not its lib script, so without
+    # `yt-dlp-ejs` the only sources left are an NPM or GitHub download that
+    # yt-dlp refuses unless `--remote-components` allows it. Same class of
+    # failure as the missing runtime, same honesty owed: ours, not YouTube's.
+    if "challenge solver" in text or "remote component" in text:
+        LOGGER.error(
+            "yt-dlp has a JavaScript runtime but no challenge-solver script — install "
+            "yt-dlp-ejs (yt-dlp's `default` extra). yt-dlp said: %s", head,
+        )
+        return ProviderError(
+            "js_solver_missing",
             "This Brain cannot read YouTube right now: a tool is missing on the server. "
             "Nothing you can fix.",
         )

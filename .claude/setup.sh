@@ -51,9 +51,16 @@ PYCHECK
 
 # `yt-dlp` is run as a PATH executable, not imported, so an installed-but-not-on-PATH
 # wheel would still break YouTube ingestion. Say so here rather than at ingest time.
-command -v yt-dlp >/dev/null \
-  && echo "[brain/setup] yt-dlp on PATH" \
-  || echo "[brain/setup] WARNING: yt-dlp installed but not on PATH — YouTube ingestion will fail"
+#
+# And being on PATH is not the question. Production had yt-dlp on PATH, deno on
+# PATH, and `deno --version` exiting 0, and could not read a single video: the
+# deno it carried was below yt-dlp's minimum, so yt-dlp refused it and fell back
+# to its JS-less clients. `youtube-check` asks yt-dlp itself, offline.
+if BRAIN_ENV=prod python3 -m app.cli youtube-check; then
+  :
+else
+  echo "[brain/setup] WARNING: YouTube ingestion will fail on this host (see above)"
+fi
 
 mkdir -p .brain_data/users
 echo "[brain/setup] done"
