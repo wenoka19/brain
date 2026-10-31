@@ -765,6 +765,7 @@ const TYPE_ICON = {
  *  a tooltip silently becomes wrong. */
 const REMEDY = {
   blocked_by_platform: "Make it public, then retry",
+  platform_blocked_caller: "YouTube refused this server, not the video — paste the transcript instead",
   blocked_url: "That address is not one Brain can reach — check it, then retry",
   no_transcript: "No captions on this one — add them, or paste the text instead",
   no_text_layer: "No text layer — retype or re-scan",

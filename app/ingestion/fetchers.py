@@ -13,6 +13,7 @@ Hard rules enforced here:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -29,6 +30,8 @@ from app.security.ssrf import SSRFBlocked, safe_get
 VTT_TIMESTAMP_RE = re.compile(
     r"(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})"
 )
+LOGGER = logging.getLogger("brain.fetchers")
+
 VTT_TAG_RE = re.compile(r"<[^>]+>")
 MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
@@ -154,17 +157,66 @@ def parse_vtt(text: str) -> list[dict[str, Any]]:
     return cues
 
 
+#: What YouTube says when it is refusing the *caller*, not the video.
+#: A datacentre IP gets this; a person on a laptop does not.
+_BOT_WALL = (
+    "sign in to confirm",
+    "not a bot",
+    "failed to extract any player response",
+    "unable to download api page",
+)
+#: What it says when the video itself is genuinely unavailable to anyone.
+_VIDEO_WALL = (
+    "private video",
+    "members-only",
+    "age-restricted",
+    "video unavailable",
+    "removed by the uploader",
+)
+
+
+def _youtube_refusal(stderr: str, url: str) -> ProviderError:
+    """Tell apart "this video is private" from "YouTube refused this server".
+
+    The old test was `any(k in stderr for k in ("private", "members-only",
+    "sign in", "age"))`, and both halves of it were wrong.
+
+    `"sign in"` matches "Sign in to confirm you're not a bot" — YouTube
+    blocking the *caller*, which is what a datacentre IP gets. Reporting that
+    as "private, members-only or age-restricted" sends the owner to check a
+    video that is perfectly public, and nothing they do to it will help.
+    Three of the most public videos on YouTube failed that way in production.
+
+    `"age"` is a bare substring, so it also matched "message", "usage" and
+    "package" — any unrelated error carrying one of those words was reported
+    as an age restriction.
+
+    The raw stderr was thrown away, which is why none of this was visible.
+    """
+    text = (stderr or "").lower()
+    head = " ".join((stderr or "").split())[:400]
+    if any(k in text for k in _BOT_WALL):
+        LOGGER.warning("youtube refused this server for %s — yt-dlp said: %s", url, head)
+        return ProviderError(
+            "platform_blocked_caller",
+            "YouTube refused this server, not the video. The video is probably fine; "
+            "paste its transcript instead, or try again later.",
+        )
+    if any(k in text for k in _VIDEO_WALL):
+        LOGGER.info("youtube refused the video %s — yt-dlp said: %s", url, head)
+        return ProviderError(
+            "blocked_by_platform",
+            "YouTube refused that video (private, members-only or age-restricted).",
+        )
+    LOGGER.warning("yt-dlp failed on %s — stderr: %s", url, head)
+    return ProviderError("fetch_failed", "yt-dlp could not read that video's metadata.")
+
+
 def fetch_youtube(target, *, cfg: Settings | None = None) -> FetchedContent:
     cfg = cfg or settings()
     meta_proc = _run(build_ytdlp_metadata_cmd(target.canonical_url, cfg=cfg), cfg=cfg)
     if meta_proc.returncode != 0:
-        stderr = (meta_proc.stderr or "").lower()
-        if any(k in stderr for k in ("private", "members-only", "sign in", "age")):
-            raise ProviderError(
-                "blocked_by_platform",
-                "YouTube refused that video (private, members-only or age-restricted).",
-            )
-        raise ProviderError("fetch_failed", "yt-dlp could not read that video's metadata.")
+        raise _youtube_refusal(meta_proc.stderr or "", target.canonical_url)
 
     try:
         meta = json.loads(meta_proc.stdout or "{}")

@@ -1390,3 +1390,48 @@ class TestEngineContext:
         from app.ingestion import gatekeeper as gk
 
         assert E._upload_price(gk.validate_file(path, cfg=cfg), cfg=cfg) is None
+
+
+class TestYouTubeRefusalIsDiagnosable:
+    """Three of the most public videos on YouTube failed in production with
+    "private, members-only or age-restricted", and the raw yt-dlp output was
+    thrown away so nobody could see why.
+
+    The old test was `any(k in stderr for k in ("private", "members-only",
+    "sign in", "age"))`. Both halves of that were wrong.
+    """
+
+    def _reason(self, stderr: str) -> str:
+        from app.ingestion.fetchers import _youtube_refusal
+
+        return _youtube_refusal(stderr, "https://youtu.be/x").reason
+
+    def test_the_bot_wall_is_not_reported_as_a_private_video(self):
+        """YouTube blocking the caller is not something the owner can fix by
+        changing the video — telling them to make it public is a dead end."""
+        stderr = "ERROR: [youtube] x: Sign in to confirm you're not a bot."
+        assert self._reason(stderr) == "platform_blocked_caller"
+
+    def test_a_genuinely_private_video_still_says_so(self):
+        assert self._reason("ERROR: [youtube] x: Private video") == "blocked_by_platform"
+        assert self._reason("ERROR: members-only content") == "blocked_by_platform"
+        assert self._reason("ERROR: age-restricted, sign in") == "blocked_by_platform"
+
+    def test_the_word_message_is_not_an_age_restriction(self):
+        """`"age"` was a bare substring, so "message", "usage" and "package"
+        all read as age restrictions."""
+        for noise in ("Unexpected message from the server",
+                      "Exceeded usage quota",
+                      "Missing package ffmpeg"):
+            assert self._reason(f"ERROR: {noise}") == "fetch_failed", noise
+
+    def test_every_reason_it_can_raise_has_a_remedy(self):
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        frames = (root / "app/static/frames.js").read_text()
+        block = frames[frames.index("const REMEDY = {") : frames.index('/** §7.7: "Never')]
+        mapped = set(re.findall(r"^  ([a-z_]+):", block, re.M))
+        for reason in ("platform_blocked_caller", "blocked_by_platform", "fetch_failed"):
+            assert reason in mapped, reason
