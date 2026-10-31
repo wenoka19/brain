@@ -980,6 +980,47 @@ class TestSubprocessHardening:
             assert secret not in blob
         assert env["HOME"] != str(Path.home())
 
+    def test_on_windows_the_child_can_actually_start(self, cfg, monkeypatch):
+        """The POSIX-only list starved `deno.exe` on a real Windows laptop.
+
+        Measured there: `deno.exe --version` printed 2.9.8, `yt-dlp -v` with
+        the operator's own environment printed `JS runtimes: deno-2.9.8`, and
+        the same yt-dlp under this function printed `JS runtimes: none`.
+        Windows resolves crypto, DNS and the temp path through `SYSTEMROOT`,
+        so a native binary exits immediately without it — and yt-dlp reports
+        that as a missing JavaScript runtime, which is the same wrong
+        conclusion a missing dependency produced twice before.
+        """
+        monkeypatch.setattr(fetchers, "_WINDOWS", True)
+        for name, value in (
+            ("SYSTEMROOT", r"C:\Windows"),
+            ("PATHEXT", ".COM;.EXE;.BAT"),
+            ("LOCALAPPDATA", r"C:\Users\Someone\AppData\Local"),
+            ("LLM_API_KEY", "sk-super-secret"),
+            ("BRAIN_JWT_SECRET", "jwt-secret"),
+        ):
+            monkeypatch.setenv(name, value)
+
+        env = fetchers.scrubbed_env()
+        # What a native binary cannot start without.
+        assert env["SYSTEMROOT"] == r"C:\Windows"
+        # What yt-dlp's own `_find_exe` needs to search PATH on Windows.
+        assert env["PATHEXT"] == ".COM;.EXE;.BAT"
+        # Windows reads these two; it has never read `TMPDIR`.
+        assert env["TEMP"] == env["TMP"] == env["TMPDIR"]
+        # And the whole point of the function still holds.
+        assert "LLM_API_KEY" not in env and "BRAIN_JWT_SECRET" not in env
+        blob = " ".join(env.values())
+        assert "sk-super-secret" not in blob and "jwt-secret" not in blob
+
+    def test_the_windows_list_carries_no_secret_shaped_names(self):
+        """The allowlist is read by a human once and trusted forever, so it is
+        asserted here rather than reviewed there."""
+        for name in fetchers._WINDOWS_ESSENTIAL:
+            assert not any(
+                word in name for word in ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL")
+            ), name
+
     def test_run_passes_the_scrubbed_env_and_never_a_shell(self, cfg, monkeypatch):
         captured = {}
 

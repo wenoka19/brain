@@ -59,6 +59,14 @@ dependencies = [
   # yt-dlp's `deno` extra does not exist in older releases, where pip would
   # ignore the name with a warning, so the floor moves with it.
   "yt-dlp[default,deno]>=2026.10.26",
+  # Declared without a floor on purpose. `app/ingestion/fetchers.py` imports
+  # this package directly — `find_deno_bin()` knows where pip put the binary,
+  # which is strictly more than yt-dlp's own discovery looks at — and the rule
+  # this file enforces is that a direct import is declared. The *version* is
+  # yt-dlp's business: its `deno` extra above asks for >= 2.9.8, and pip
+  # resolves both constraints together. Repeating that number here would be a
+  # second copy of someone else's decision, drifting the moment they bump it.
+  "deno",
   # Both of these arrive transitively through FastAPI, and `app/` imports them
   # DIRECTLY — `starlette.responses`/`requests`/`middleware.base`/`routing`/
   # `exceptions`/`testclient` across the control plane, and `pydantic.AnyHttpUrl`
