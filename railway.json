@@ -22,10 +22,11 @@
     }
   },
   "_notes": {
-    "volume": "Attach a Railway volume to this service with mount path /data — SQLite needs a real filesystem, and a single replica owns it. The Dockerfile declares no VOLUME (Railway rejects builds that do) and no USER: the container starts as root only to chown the mount, which arrives root-owned, then entrypoint.sh re-execs itself as uid 10001.",
+    "volume": "Attach a Railway volume to this service with mount path /data \u2014 SQLite needs a real filesystem, and a single replica owns it. The Dockerfile declares no VOLUME (Railway rejects builds that do) and no USER: the container starts as root only to chown the mount, which arrives root-owned, then entrypoint.sh re-execs itself as uid 10001.",
     "required_secrets": [
       "BRAIN_JWT_SECRET",
       "BRAIN_PUBLIC_URL",
+      "LLM_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_SECRET_ACCESS_KEY",
       "R2_ENDPOINT",
@@ -34,8 +35,10 @@
       "LITESTREAM_REPLICA_URL"
     ],
     "replicas": "Keep numReplicas at 1. Two web replicas on one volume would each open the same SQLite files.",
-    "storage": "The same four R2 credentials serve two jobs: Litestream ships control.db continuously, and app/storage/r2_sync.py snapshots each tenant database after a write. R2_ENDPOINT_URL and R2_ENDPOINT are interchangeable — set either and both consumers read it.",
+    "storage": "The same four R2 credentials serve two jobs: Litestream ships control.db continuously, and app/storage/r2_sync.py snapshots each tenant database after a write. R2_ENDPOINT_URL and R2_ENDPOINT are interchangeable \u2014 set either and both consumers read it.",
     "scaling": "Stage 2+: MAX_LOCAL_TENANTS caps tenant files on local disk (0 = unlimited), and BRAIN_SHARD_INDEX/BRAIN_SHARD_TOTAL plus BRAIN_SHARD_URLS or BRAIN_SHARD_INSTANCES spread tenants across nodes. Both default to off, and both need R2 configured.",
-    "proxy": "Railway terminates TLS and forwards plain HTTP. The entrypoint runs uvicorn with --proxy-headers --forwarded-allow-ips=* so the app sees the real scheme and client address, and BRAIN_PUBLIC_URL must be the https origin clients will use — every discovery document is built from it."
+    "proxy": "Railway terminates TLS and forwards plain HTTP. The entrypoint runs uvicorn with --proxy-headers --forwarded-allow-ips=* so the app sees the real scheme and client address, and BRAIN_PUBLIC_URL must be the https origin clients will use \u2014 every discovery document is built from it.",
+    "models": "LLM_API_KEY (or ZAI_API_KEY) powers extraction, vision and embeddings. The embedding default for a Z.ai base URL is `embedding-3`, which api.z.ai rejects with 400 'Unknown Model' \u2014 it is a bigmodel.cn id. Point embeddings at a host that serves them: EMBEDDING_BASE_URL + EMBEDDING_MODEL, or DASHSCOPE_API_KEY to move them to Alibaba's Qwen3 endpoint. Run `python -m app.cli doctor --probe` after any change: it calls the hosts instead of trusting the names.",
+    "audience": "BRAIN_AUDIENCE is optional and now defaults to BRAIN_PUBLIC_URL + /mcp. Set it only to pin a different RFC 8707 resource identifier."
   }
 }

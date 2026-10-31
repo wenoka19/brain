@@ -561,3 +561,57 @@ class TestCalibrate:
         capsys.readouterr()
         after = sorted(p.name for p in cfg.data_dir.glob("*")) if cfg.data_dir.exists() else []
         assert after == before
+
+
+class TestDoctorCallsTheHostsItReportsOn:
+    """`doctor` printed the configured model id and called it `ok`.
+
+    Production ran that way and looked healthy, while `api.z.ai` rejected
+    every embedding request with 400 "Unknown Model, please check the model
+    code." for `embedding-3`. Nobody could sign up, and the first sign that
+    anything was wrong was a 502. A name in a config file is not a working
+    endpoint.
+    """
+
+    def test_a_rejecting_embedding_host_is_reported_as_a_failure(self, cfg, monkeypatch):
+        from app.ingestion import providers as P
+
+        class Rejects:
+            def embed(self, texts):
+                raise P.ProviderError(
+                    "model_error",
+                    'The model host rejected the request (400): {"error":'
+                    '{"code":"1211","message":"Unknown Model, please check the model code."}}',
+                )
+
+        monkeypatch.setattr(cfg.__class__, "live_embeddings", property(lambda self: True))
+        monkeypatch.setattr(
+            P, "build_providers", lambda c: type("P", (), {"embedder": Rejects()})()
+        )
+        rows = cli._probe_providers(cfg)
+        assert rows, "the probe reported nothing at all"
+        status, label, detail = rows[0]
+        assert status == "bad", rows
+        assert "Unknown Model" in detail
+        assert "embeddings" in label
+
+    def test_a_working_embedding_host_is_reported_with_its_width(self, cfg, monkeypatch):
+        from app.ingestion import providers as P
+
+        class Works:
+            def embed(self, texts):
+                return [[0.1] * 256 for _ in texts]
+
+        monkeypatch.setattr(cfg.__class__, "live_embeddings", property(lambda self: True))
+        monkeypatch.setattr(
+            P, "build_providers", lambda c: type("P", (), {"embedder": Works()})()
+        )
+        rows = cli._probe_providers(cfg)
+        assert [r[0] for r in rows] == ["ok"], rows
+        assert "256" in rows[0][2]
+
+    def test_the_probe_is_off_unless_asked_for(self):
+        """`doctor` stays free and offline by default; the container asks."""
+        parser = cli.build_parser()
+        assert parser.parse_args(["doctor"]).probe is False
+        assert parser.parse_args(["doctor", "--probe"]).probe is True

@@ -445,3 +445,44 @@ class TestAProviderFailureSaysWhatFailed:
         assert response.status_code == 500
         assert "/data/users" not in response.text
         assert response.json()["reason"] == "internal_error"
+
+
+class TestSignUpSurvivesABrokenEmbeddingHost:
+    """A first sign-in seeds three demo items, and seeding embeds them.
+
+    With `embedding-3` rejected by `api.z.ai`, that raised through
+    `/api/login` and the whole sign-in answered 502: nobody could create an
+    account on production at all. An empty first screen is a worse welcome
+    than a seeded one; it is not a reason to refuse someone the door.
+    """
+
+    def test_the_door_opens_even_when_the_demo_cannot_be_seeded(self, cfg, monkeypatch):
+        from starlette.testclient import TestClient
+
+        from app.core import engine as E
+        from app.ingestion.providers import ProviderError
+        from app.main import create_app
+
+        def no_embeddings(*args, **kwargs):
+            raise ProviderError("model_error", "Unknown Model, please check the model code.")
+
+        monkeypatch.setattr(E, "seed_first_run_library", no_embeddings)
+        client = TestClient(create_app())
+        response = client.post("/api/login", json={"email": "newcomer@example.com"})
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ok"] is True
+        assert body["email"] == "newcomer@example.com"
+        assert body["seeded"] is False
+        assert client.cookies.get("brain_session"), "no session cookie was issued"
+
+    def test_a_seeded_first_run_still_reports_it(self, cfg):
+        from starlette.testclient import TestClient
+
+        from app.main import create_app
+
+        client = TestClient(create_app())
+        body = client.post("/api/login", json={"email": "seeded@example.com"}).json()
+        assert body["ok"] is True
+        assert body["seeded"] is True

@@ -10,6 +10,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import auth
+from app import config
 from app import mcp_server as M
 from app.core import engine as E
 from app.core import formatting as F
@@ -1522,3 +1523,50 @@ class TestDeletionIsNotReachableOverMCP:
 
         assert tenant_db.get_source(ctx.tenant, source_id)["status"] == "archived"
         M.reset_server()
+
+
+class TestTheResourceIdentifierIsThisServer:
+    """`BRAIN_AUDIENCE` is not among `railway.json`'s required secrets, so a
+    real deployment kept the placeholder: production advertised
+    `resource: https://brain.local/mcp` while living at its Railway origin.
+
+    RFC 8707 audience binding then pins every token to a host that does not
+    exist, and `authorize` refuses any other resource — so a client that reads
+    the discovery document and asks for the origin it actually reached is
+    turned away. When nobody says otherwise, the resource is this server.
+    """
+
+    def test_it_follows_the_public_url_when_nobody_set_an_audience(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://brain-production.up.railway.app")
+        monkeypatch.delenv("BRAIN_AUDIENCE", raising=False)
+        cfg = config.reload_settings()
+        assert auth.resource_identifier(cfg) == "https://brain-production.up.railway.app/mcp"
+        assert auth.issuer(cfg) == "https://brain-production.up.railway.app"
+
+    def test_an_explicit_audience_still_wins(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "https://brain-production.up.railway.app")
+        monkeypatch.setenv("BRAIN_AUDIENCE", "https://chosen.example/mcp")
+        cfg = config.reload_settings()
+        assert auth.resource_identifier(cfg) == "https://chosen.example/mcp"
+
+    def test_a_terminated_http_origin_is_upgraded(self, monkeypatch):
+        """Railway speaks plain HTTP behind its TLS terminator, and an `http`
+        resource in a discovery document is mixed content to a browser."""
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "http://brain-production.up.railway.app")
+        monkeypatch.delenv("BRAIN_AUDIENCE", raising=False)
+        cfg = config.reload_settings()
+        assert auth.resource_identifier(cfg).startswith("https://")
+
+    def test_loopback_stays_plain_http(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_PUBLIC_URL", "http://127.0.0.1:8080")
+        monkeypatch.delenv("BRAIN_AUDIENCE", raising=False)
+        cfg = config.reload_settings()
+        assert auth.resource_identifier(cfg) == "http://127.0.0.1:8080/mcp"
+
+    def test_with_no_public_url_the_placeholder_stands(self, monkeypatch):
+        """And `issuer()` still derives from it, with no recursion."""
+        monkeypatch.delenv("BRAIN_PUBLIC_URL", raising=False)
+        monkeypatch.delenv("BRAIN_AUDIENCE", raising=False)
+        cfg = config.reload_settings()
+        assert auth.resource_identifier(cfg) == auth.DEFAULT_AUDIENCE
+        assert auth.issuer(cfg) == "https://brain.local"

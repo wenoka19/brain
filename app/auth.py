@@ -69,9 +69,38 @@ def signing_key(cfg: Settings | None = None) -> str:
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
 
+#: `Settings.audience`'s own default. A deployment that never sets
+#: `BRAIN_AUDIENCE` keeps this, and it is a placeholder, not an address.
+DEFAULT_AUDIENCE = "https://brain.local/mcp"
+
+
 def resource_identifier(cfg: Settings | None = None) -> str:
+    """The `resource` every token is bound to (RFC 8707).
+
+    `BRAIN_AUDIENCE` is not in `railway.json`'s required secrets, so a real
+    deployment kept the placeholder: production advertised
+    `resource: https://brain.local/mcp` while living at its Railway origin.
+    The audience binding CLAUDE.md §2.4 asks for then guarantees nothing — it
+    pins tokens to a host that does not exist — and `authorize` refuses any
+    other resource, so a client that reads the discovery document and asks for
+    the origin it actually reached is turned away.
+
+    When nobody has said otherwise, the resource is this server's own origin.
+    No recursion with `issuer()`: it derives from here only when
+    `BRAIN_PUBLIC_URL` is unset, and this derives from `BRAIN_PUBLIC_URL` only
+    when it is set.
+    """
     cfg = cfg or settings()
-    return cfg.audience
+    if cfg.audience != DEFAULT_AUDIENCE:
+        return cfg.audience
+    public = (os.environ.get("BRAIN_PUBLIC_URL") or "").strip().rstrip("/")
+    if not public:
+        return cfg.audience
+    if public.startswith("http://"):
+        host = urlsplit(public).hostname or ""
+        if host not in LOOPBACK_HOSTS and host != "testserver":
+            public = "https://" + public[len("http://") :]
+    return f"{public}/mcp"
 
 
 def issuer(cfg: Settings | None = None) -> str:

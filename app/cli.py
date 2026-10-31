@@ -61,6 +61,45 @@ def scoped_env(**overrides: str):
 # ===========================================================================
 # doctor
 # ===========================================================================
+def _probe_providers(cfg) -> list[tuple[str, str, str]]:
+    """Actually call the two hosts, with the smallest possible request.
+
+    `doctor` printed the configured model id and called it `ok`, so a deploy
+    whose embedding model the host does not serve looked perfectly healthy and
+    failed at first use instead — as a 502 on sign-up, with the real reason
+    only visible in the response body. Production said:
+    `embedding-3` → `api.z.ai` → 400 "Unknown Model, please check the model
+    code." A name in a config file is not a working endpoint, and only a call
+    can tell them apart.
+    """
+    from app.ingestion.providers import ProviderError, build_providers
+
+    out: list[tuple[str, str, str]] = []
+    try:
+        prov = build_providers(cfg)
+    except Exception as exc:  # pragma: no cover - defensive
+        return [("bad", "providers", f"could not be built: {exc}")]
+
+    if cfg.live_embeddings:
+        try:
+            vector = prov.embedder.embed(["brain doctor probe"])[0]
+            out.append((
+                "ok",
+                "embeddings reachable",
+                f"{cfg.resolved_embedding_model} answered with {len(vector)} dimensions",
+            ))
+        except ProviderError as exc:
+            out.append((
+                "bad",
+                "embeddings unreachable",
+                f"{cfg.resolved_embedding_model} @ {cfg.resolved_embedding_base_url} — "
+                f"{exc.reason}: {exc.message}",
+            ))
+        except Exception as exc:
+            out.append(("bad", "embeddings unreachable", f"{type(exc).__name__}: {exc}"))
+    return out
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from app.config import VENDOR_LABELS as config_labels
     from app.config import settings
@@ -227,6 +266,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             line("warn", "embeddings", "no key — using the hashed bag-of-words embedder")
             warnings += 1
+        if args.probe:
+            for status, label, detail in _probe_providers(cfg):
+                line(status, label, detail)
+                if status == "bad":
+                    failures += 1
+                elif status == "warn":
+                    warnings += 1
         line(
             "ok",
             "retrieval floors",
@@ -1290,6 +1336,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     doctor = sub.add_parser("doctor", help="check this host can run brain")
+    # Off by default so `doctor` stays free and offline; on in the container,
+    # where a model id the host does not serve is exactly what we want to hear
+    # about before the first person signs up.
+    doctor.add_argument(
+        "--probe",
+        action="store_true",
+        help="actually call the model and embedding hosts, instead of only reading the config",
+    )
     doctor.set_defaults(func=cmd_doctor)
 
     selftest = sub.add_parser("selftest", help="exercise the whole product deterministically")

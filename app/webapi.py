@@ -15,6 +15,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -31,6 +32,8 @@ from app.db import control as control_db
 from app.ingestion.gatekeeper import GatekeeperError
 from app.ingestion.providers import ProviderError
 from app.security import ratelimit
+
+LOGGER = logging.getLogger("brain.webapi")
 
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "brain_session"
@@ -245,7 +248,17 @@ async def api_login(request: Request) -> Response:
     # what the product is. Three editable demo items (Rule 4c) mean the first
     # screen shows a claim card, a skill card and a disagreement — all of which
     # the user can edit or archive like any other.
-    seeded = E.seed_first_run_library(user["user_id"], cfg=cfg)
+    # Best-effort, and never fatal. Seeding embeds the demo claims, so a
+    # misconfigured embedding host made the whole sign-in 502 and no new
+    # account could be created at all — measured on production, where
+    # `embedding-3` is rejected by `api.z.ai` with "Unknown Model". An empty
+    # first screen is a worse welcome than a seeded one; it is not a reason to
+    # refuse someone the door.
+    try:
+        seeded = E.seed_first_run_library(user["user_id"], cfg=cfg)
+    except Exception:
+        LOGGER.exception("could not seed the first-run library for %s", user["user_id"])
+        seeded = False
 
     csrf = base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
     response = _json({
