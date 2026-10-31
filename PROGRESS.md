@@ -1377,3 +1377,112 @@ found: they fixed nothing and would have changed a layout §3.3 specifies.
   not a dropped guarantee.
 - The sync watermark, the visual-viewport keyboard inset, and a single
   Escape-ordering handler all went with `app.js` and are not rebuilt.
+
+---
+
+## R-20 — The interface audit, and the five defects it found (31 October 2026)
+
+The founder sent five screenshots and said the design "is not there yet", then
+asked for something broader than the screenshots: a walk through **every screen
+and every action in the web app**, each one captured and analysed, before any
+discussion of what deviates from the plan.
+
+### How it was done
+
+A real server (`python -m app.cli dev`, seeded, with an ingestion run to
+`ready` so the detail screens had content), driven by Playwright at 1440×900
+and 390×844 on separate tenants:
+
+1. **Navigation** — the 14 routes, at rest and with every disclosure open.
+2. **Flows** — omnibar, ingestion, forms, themes, profile.
+3. **An exhaustive control crawl** — every clickable element on every screen,
+   clicked in isolation from a reloaded page: 26 screens, 149 actions on
+   desktop and 137 on mobile, with detection of controls that do nothing.
+4. **Sequenced journeys** — 40 steps: edit, archive, restore, confirm, undo,
+   rename, revoke, export, sign out.
+
+Every state was **measured in the DOM**, not just looked at. That distinction
+earned its keep in both directions: four of the five defects had never shown up
+in 1,418 passing tests, and five findings the crawl reported were artefacts of
+the probes themselves — the toast (the real one is appended to `body`, not the
+shell's `#toast`), the export (an `<a>`, not a `<button>`), the Archive filter
+pills (they filter by visibility, which a presence check cannot see), the `[+]`
+button (it opens a file chooser, which registers as no DOM change) and the
+sticky sidebar (a full-page-screenshot artefact). Each was re-tested and
+dropped. Verifying a detector's output is not optional.
+
+### What was wrong
+
+- **The guided steps collapsed into a 26px column.** `.steps-list > li` is a
+  `26px 1fr` grid and its counter is a `::before`, so the counter is grid item
+  #1 and auto-placement put every second real child into the 26px track. One
+  declaration produced the whole of what two screenshots showed: command paths
+  one word per line, the code block at 56px, the Copy button stretched to 806px
+  above it. `/skills` escaped only because `steps-plain` re-declares
+  `display: list-item`.
+- **The phone's top bar grew with the page.** `.shell` is `min-height: 100svh`
+  with two auto rows, and the default stretching `align-content` split the
+  leftover height between them: 261px on `/rules`, 255px on
+  `/library/transcripts`, against the 49px a long page gives it.
+- **`ProviderError` reached the person as a class name.** `endpoint()` caught
+  `ApiError` and `GatekeeperError` and let the rest fall into the net that
+  answers `Something went wrong ({type(exc).__name__})`. Saving a rule against
+  a live model said exactly that, while the exception carried a reason code and
+  a sentence written to be read. Compounding it, `REMEDY` was keyed on the
+  fetchers' reasons only, so all nine model and embedding failures fell through
+  to "Make it reachable, then retry" — advice about a source, for a bad API
+  key. The test meant to prevent this read `fetchers.py` alone.
+- **The connection menu was clipped by 35px**, which is exactly where `Revoke`
+  sits. `.conn-list` carried `overflow: hidden` only to round its corners.
+- **The omnibar refused what its own backend could do.** The placeholder cycled
+  "Ask Brain anything…" while `submit()` answered everything without an `http`
+  with "Brain reads sources, not questions, for now." Asked directly,
+  `/api/omnibar` answers "archive yesterday's video" with a resolved source, a
+  confirmation and an undo — Checkpoint B's own worked example. The three
+  endpoints had been mounted since Phase 4 and the page never called them.
+
+Two more the phone showed: a 132px thumbnail that never shrinks left the source
+title 162px and four lines; and a status pill alone in a `1fr` track stretched
+to a 270px bar instead of reading `Live`.
+
+### What was left alone
+
+`.card-group` and `.result-table` carry the same `overflow: hidden` but host no
+menu, so nothing is clipped and nothing was changed. The sticky sidebar, the
+absence of horizontal overflow on every route, the Archive filters, the
+`Archived.`/`Undo` toast, the export download, the confirm dialogs, inline
+rename, Ctrl+K and the whole ingestion pipeline were all verified working and
+not touched.
+
+### Guards
+
+`tests/browser/layout_regressions.js` and its wrapper measure eight facts, each
+one a number that was wrong in the shipped app. Reverting any fix fails them:
+the code block measures 56px, the step children report `grid-column: auto`.
+The remedy test now reads `providers.py` as well, and removing one entry fails.
+
+### Left undone, deliberately
+
+- **The resting Rules row has no clickable `[1420s ↗]` badge.** Checkpoint B
+  asks for one. The meta sits inside `button.exp-head`, and an anchor inside a
+  button is invalid for the same reason the card already avoids nested buttons,
+  so this needs the card restructured — a design decision, not a fix. The label
+  itself is fixed: the row reads `23:40` and `p. 14` rather than `1420` and
+  `14`, which is what the source detail already showed for the same claim.
+- **An unknown URL still returns Starlette's plain-text `Not Found`**, with no
+  shell and no designed screen. §7 names no 404 frame, so there is nothing to
+  build to.
+- **The work block does not collapse itself** to `Processed in 2m 14s · 6
+  steps` as §4.4 specifies, and the "You can leave this page" line stays after
+  all six steps are ticked.
+- **`filter` mode has nowhere to go on Home.** The bar says it was not a
+  command and names what it does take. The router's own "Showing matches"
+  describes a search surface that does not exist on that page, and building one
+  is a Checkpoint B decision.
+- **LLM ↔ web-app parity.** The founder's standing principle is that anything
+  doable in the web app should be doable by an LLM calling the tool. MCP
+  exposes 8 tools; the web app performs roughly twenty more operations
+  (rename, re-process, summarise, restore, permanent delete, roll and revoke a
+  key, edit a rule, review and revert a skill, profile settings, export). That
+  is its own piece of work — new tools, new permissions, new audit rows — and
+  wiring the omnibar is only its first brick.
