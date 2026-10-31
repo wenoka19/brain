@@ -1475,10 +1475,12 @@ The remedy test now reads `providers.py` as well, and removing one entry fails.
 - **The work block does not collapse itself** to `Processed in 2m 14s · 6
   steps` as §4.4 specifies, and the "You can leave this page" line stays after
   all six steps are ticked.
-- **`filter` mode has nowhere to go on Home.** The bar says it was not a
-  command and names what it does take. The router's own "Showing matches"
-  describes a search surface that does not exist on that page, and building one
-  is a Checkpoint B decision.
+- **`filter` mode shows nothing on Home.** The router's "Showing matches"
+  names a results panel that page does not have. A replacement sentence was
+  written here and the founder removed it: inventing product copy is exactly
+  what CLAUDE.md §0 Rule 1 forbids, and the fix for a message with nowhere to
+  point is to not show it, not to reword it. `clarify` still shows the
+  question the router itself wrote.
 - **LLM ↔ web-app parity.** The founder's standing principle is that anything
   doable in the web app should be doable by an LLM calling the tool. MCP
   exposes 8 tools; the web app performs roughly twenty more operations

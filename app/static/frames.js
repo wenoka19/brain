@@ -280,15 +280,11 @@ FRAMES.home = async function home(_params, ctx) {
     }
 
     if (plan.mode !== "command") {
-      // `clarify` carries a question the router wrote. `filter` means it did
-      // not read as a command, and Home has no list to filter — so it says
-      // that, rather than the router's "Showing matches", which would be a
-      // sentence about a surface that is not on this page.
-      say(
-        plan.mode === "clarify" && plan.message
-          ? plan.message
-          : "That did not read as a command. Paste a link to add a source, or try “archive …”, “rename …”."
-      );
+      // `clarify` carries a question the router itself wrote, so it is shown.
+      // `filter` is not shown at all: the router's "Showing matches" names a
+      // results panel Home does not have, and writing a replacement sentence
+      // here would be inventing product copy. The branch says nothing.
+      say(plan.mode === "clarify" && plan.message ? plan.message : "");
       return;
     }
 
