@@ -299,9 +299,10 @@ FRAMES.home = async function home(_params, ctx) {
       const verb = plan.action ? plan.action.replace(/_/g, " ") : "Run";
       const agreed = await confirmDialog({
         title: plan.confirm_text || "Run this?",
-        body: plan.target_label
-          ? `Brain matched that to “${plan.target_label}”.`
-          : "Brain matched that to one item.",
+        // The title already names the match, so repeating it here says
+        // nothing. What the person cannot see is whether this is a one-way
+        // door.
+        body: "Brain matched your words to this one. You can undo it afterwards.",
         confirmLabel: verb.charAt(0).toUpperCase() + verb.slice(1),
       });
       if (!agreed) {
