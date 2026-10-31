@@ -1794,3 +1794,76 @@ screen. That is the whole design in one measurement.
   to "paste the text instead". The engine and the route have existed since
   Checkpoint B; the button does not. That is a Checkpoint B touchpoint and it
   is not invented here.
+
+
+---
+
+## R-24 — The reader's first Windows boot (31 October 2026)
+
+`R-23`'s reader was installed on the founder's Windows laptop. Everything
+resolved — `deno-2.9.8-py3-none-win_amd64.whl` downloaded, `yt-dlp 2026.10.26`
+and `yt-dlp-ejs 0.8.0` installed, `Successfully installed` — and
+`youtube-check` answered:
+
+```
+[fail] yt-dlp cannot read YouTube — yt-dlp has no JavaScript runtime
+       JS runtimes: none
+```
+
+Three measurements on that machine, in this order, settled it:
+
+| command | answer |
+|---|---|
+| `python -c "import deno; print(deno.find_deno_bin())"` | `...\Python311\Scripts\deno.exe` |
+| `deno.exe --version` | `deno 2.9.8 (stable, release, x86_64-pc-windows-msvc)` |
+| `yt-dlp --no-config -v` *(operator's own environment)* | `JS runtimes: deno-2.9.8` |
+| the same yt-dlp, through `scrubbed_env()` | **`JS runtimes: none`** |
+
+The binary was fine, the path was right, yt-dlp found it. **The bug was mine.**
+
+### What was wrong
+
+`scrubbed_env()` existed to keep `LLM_API_KEY`, `BRAIN_JWT_SECRET` and the R2
+credentials away from a program that parses attacker-supplied pages. It
+returned five names: `PATH`, `HOME`, `TMPDIR`, `LC_ALL`, `LANG`. That is a
+POSIX list. Windows resolves crypto, DNS, locale and the temp path through
+`SYSTEMROOT` and its siblings, so a native binary exits immediately without
+them — and yt-dlp reads that silence as "no JavaScript runtime", which is the
+**third** time in two days that a dependency of ours has worn YouTube's
+clothes.
+
+### Two fixes, because there were two ways to lose
+
+- **The environment.** `_WINDOWS_ESSENTIAL` rides along with real values on
+  Windows, and `TEMP`/`TMP` point at the scratch directory because Windows has
+  never read `TMPDIR`. The allowlist shape is unchanged: a name is on it
+  because a program needs it to *run*, and no secret is. Config files stay out
+  of the picture through `--no-config` on both yt-dlp and deno, which is where
+  that guarantee actually lived.
+- **The discovery.** `js_runtime_args()` states deno's path instead of hoping
+  yt-dlp looks where pip put it. The `deno` package checks the scripts
+  directory, the per-user scheme and a `pip --target` layout — strictly more
+  than yt-dlp's own search — and when it resolves nothing this returns nothing,
+  so a reader with node or bun is not broken by it. Verified that
+  `deno:C:\path\deno.exe` parses: yt-dlp splits the runtime name on the first
+  colon only.
+
+Both the probe and the fetch carry the same arguments. A probe that asked a
+different question than the fetch would be free to disagree with the thing it
+is checking, which is the entire failure mode of the two health checks this
+one replaced.
+
+### Guards
+
+`test_on_windows_the_child_can_actually_start` sets the platform through a
+patchable constant — `os.name` cannot be patched, because `pathlib` reads it
+at every instantiation and refuses to build a `WindowsPath` on Linux — and
+asserts `SYSTEMROOT`, `PATHEXT`, `TEMP`/`TMP`, and that no secret crossed.
+`test_the_windows_list_carries_no_secret_shaped_names` reads the allowlist for
+`KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIAL`, so the next name added to
+it is checked by a test rather than by a reviewer's attention.
+
+And `pyproject.toml` declares `deno`, with no floor: `app/` imports it
+directly, which is the rule `test_every_directly_imported_package_is_declared`
+enforces, while the *version* stays yt-dlp's business through its own extra.
+That test caught this within a minute of the import being written.

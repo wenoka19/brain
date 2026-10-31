@@ -40,6 +40,34 @@ MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 # ---------------------------------------------------------------------------
 # yt-dlp
 # ---------------------------------------------------------------------------
+def js_runtime_args() -> list[str]:
+    """Tell yt-dlp where deno is, instead of hoping it looks where pip put it.
+
+    yt-dlp finds a runtime by looking in its interpreter's scripts directory
+    and then, on Windows, along `PATH`. That is usually right, and twice in
+    two days it was not the whole story — so the path is stated rather than
+    discovered whenever the `deno` package can state it. That package checks
+    the scripts directory, the per-user scheme and a `pip --target` layout,
+    which is strictly more than yt-dlp looks at.
+
+    When it cannot resolve a file, this returns nothing and yt-dlp's own
+    discovery is left exactly as it was: a reader with node or bun installed,
+    or deno on `PATH` from somewhere else, is not broken by this.
+
+    `deno:C:\\path\\deno.exe` parses correctly — yt-dlp splits the runtime
+    name on the first colon only, verified against a Windows-shaped path.
+    """
+    try:
+        from deno import find_deno_bin
+
+        path = str(find_deno_bin())
+    except Exception:
+        return []
+    if not path or not Path(path).is_file():
+        return []
+    return ["--js-runtimes", f"deno:{path}"]
+
+
 def build_ytdlp_metadata_cmd(url: str, *, cfg: Settings | None = None) -> list[str]:
     """Argument array for metadata only. ``--`` isolates the URL from flags."""
     cfg = cfg or settings()
@@ -51,6 +79,7 @@ def build_ytdlp_metadata_cmd(url: str, *, cfg: Settings | None = None) -> list[s
         "--no-exec",
         "--no-playlist",
         "--skip-download",
+        *js_runtime_args(),
         "--dump-single-json",
         "--max-filesize", cfg.ytdlp_max_filesize,
         "--socket-timeout", "15",
@@ -70,6 +99,7 @@ def build_ytdlp_subtitle_cmd(url: str, outdir: str | Path, *, cfg: Settings | No
         "--no-exec",
         "--no-playlist",
         "--skip-download",
+        *js_runtime_args(),
         "--write-subs",
         "--write-auto-subs",
         "--sub-langs", "en.*,en",
@@ -83,6 +113,41 @@ def build_ytdlp_subtitle_cmd(url: str, outdir: str | Path, *, cfg: Settings | No
     ]
 
 
+#: The Windows variables a native binary needs in order to start at all.
+#:
+#: Not a convenience list. `R-23` put the reader on a Windows laptop and
+#: `youtube-check` reported `JS runtimes: none` on a machine where everything
+#: was installed correctly. Measured there, in this order:
+#:
+#:     deno.exe --version              -> deno 2.9.8 (x86_64-pc-windows-msvc)
+#:     yt-dlp --no-config -v           -> JS runtimes: deno-2.9.8
+#:     the same yt-dlp, under this env -> JS runtimes: none
+#:
+#: The binary was fine and yt-dlp found it; this function was starving it.
+#: Windows resolves crypto, DNS, locale and the temp path through `SYSTEMROOT`
+#: and friends, so `deno.exe` exits immediately without them — and yt-dlp
+#: reads that silence as "no JavaScript runtime", which is the third time in
+#: two days that a missing dependency has worn YouTube's clothes.
+#:
+#: None of these names is a secret: they describe the machine, not the
+#: operator. What this function exists to withhold is withheld exactly as
+#: before, because the rule is an allowlist and `LLM_API_KEY` is not on it.
+#: Config files are kept out of the picture by `--no-config` on both yt-dlp
+#: and deno, not by hiding the user's profile directory from Windows.
+#: Resolved once, at import: the operating system does not change under a
+#: running process. A constant rather than a call so a test can set it, which
+#: `os.name` cannot be — `pathlib` reads that at every instantiation and
+#: refuses to build a `WindowsPath` on Linux.
+_WINDOWS = os.name == "nt"
+
+_WINDOWS_ESSENTIAL = (
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PUBLIC",
+    "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+)
+
+
 def scrubbed_env() -> dict[str, str]:
     """The only variables a fetcher subprocess is allowed to see.
 
@@ -92,14 +157,28 @@ def scrubbed_env() -> dict[str, str]:
     credential. It needs none of them. `HOME` is redirected to a scratch
     directory so nothing reads or writes a real dotfile, and `PATH` is kept only
     so the binary itself can be found.
+
+    On Windows that list is not enough to start a process at all, so the names
+    in `_WINDOWS_ESSENTIAL` ride along with their real values. The allowlist
+    shape is unchanged: a name is here because a program needs it to run, and
+    no secret is on it.
     """
-    return {
+    scratch = tempfile.gettempdir()
+    env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": tempfile.gettempdir(),
-        "TMPDIR": tempfile.gettempdir(),
+        "HOME": scratch,
+        "TMPDIR": scratch,
         "LC_ALL": "C.UTF-8",
         "LANG": "C.UTF-8",
     }
+    if _WINDOWS:
+        # Windows reads these two, never `TMPDIR`.
+        env["TEMP"] = env["TMP"] = scratch
+        for name in _WINDOWS_ESSENTIAL:
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
+    return env
 
 
 def _run(cmd: list[str], *, cfg: Settings) -> subprocess.CompletedProcess:
@@ -192,7 +271,11 @@ def youtube_readiness(*, cfg: Settings | None = None) -> YoutubeReadiness:
     """
     cfg = cfg or settings()
     try:
-        proc = _run(["yt-dlp", "--no-config", "-v"], cfg=cfg)
+        # The same runtime arguments the fetch will use. A probe that asked a
+        # different question would be free to disagree with the thing it is
+        # supposed to be checking, which is the whole failure mode of the two
+        # health checks this one replaced.
+        proc = _run(["yt-dlp", "--no-config", *js_runtime_args(), "-v"], cfg=cfg)
     except ProviderError as exc:
         return YoutubeReadiness(
             False,

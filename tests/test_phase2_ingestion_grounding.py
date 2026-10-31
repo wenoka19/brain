@@ -1578,7 +1578,10 @@ def _answers(header: str):
     import subprocess as sp
 
     def run(cmd, *, cfg):
-        assert cmd == ["yt-dlp", "--no-config", "-v"], cmd
+        # A prefix, not an equality: `js_runtime_args()` may state deno's path
+        # between them, and the probe must carry exactly what the fetch does.
+        assert cmd[:2] == ["yt-dlp", "--no-config"], cmd
+        assert cmd[-1] == "-v", cmd
         return sp.CompletedProcess(cmd, 2, "", header)
 
     return run
