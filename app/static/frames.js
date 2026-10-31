@@ -2449,7 +2449,11 @@ FRAMES.rules = async function rules() {
       id: rule.id,
       icon: "rules",
       title: rule.claim,
-      sub: [origin, rule.provenance.locator].filter(Boolean).join(" · "),
+      // `locatorLabel` turns `1420` into `23:40` and `14` into `p. 14`.
+      // The raw `locator_value` was printed here while the source detail
+      // rendered the same claim through `locatorLabel`, so one rule read
+      // `· 1420` on this page and `23:40` on the other.
+      sub: [origin, locatorLabel(rule)].filter(Boolean).join(" · "),
       bodyHtml: `
         <p class="rule-full">${esc(detail || rule.claim)}</p>
         ${
@@ -2461,7 +2465,7 @@ FRAMES.rules = async function rules() {
           <span class="chip">${icon("sources")}${esc(origin)}</span>
           ${
             rule.provenance.deep_link
-              ? `<a class="chip" href="${esc(rule.provenance.deep_link)}" target="_blank" rel="noopener">${icon("clock")}${esc(rule.provenance.locator)}</a>`
+              ? `<a class="chip" href="${esc(rule.provenance.deep_link)}" target="_blank" rel="noopener">${icon("clock")}${esc(locatorLabel(rule))}</a>`
               : ""
           }
         </div>
@@ -3799,9 +3803,20 @@ FRAMES.profile = async function profile() {
             controlHtml: switchHtml("keep_uploads", data.retention.keep_uploads),
           })}
           ${settingRow({
+            // The help promised "Markdown in a zip" and the one link handed
+            // back `brain-library.json`: there is no zip, and the endpoint
+            // serves one file in whichever of the two formats is asked for.
+            // Checkpoint B's block 5 says "a one-click JSON / Markdown
+            // export", so both are offered and the sentence says what
+            // arrives.
             label: "Export everything",
-            help: "Sources, transcripts, summaries, rules and skills, as Markdown in a zip.",
-            controlHtml: `<a class="btn" data-variant="secondary" href="/api/export">Export</a>`,
+            help: "Sources, transcripts, summaries, rules and skills, as one file.",
+            controlHtml: `<span class="btn-row">
+              <a class="btn" data-variant="secondary" href="/api/export?format=markdown"
+                 download>Markdown</a>
+              <a class="btn" data-variant="secondary" href="/api/export?format=json"
+                 download>JSON</a>
+            </span>`,
           })}
           ${settingRow({
             label: "Delete my library",
@@ -4058,6 +4073,11 @@ export function createRouter({ root, nav, announcer, context = {} } = {}) {
  *  reload is a number nobody trusts.
  */
 export async function refreshCounts() {
+  // The sign-in page has no counts to show and no session to read them with,
+  // so asking produced a guaranteed 401 in the console on every load of the
+  // one page a signed-out person ever sees. Two of them, with the theme
+  // read — enough noise to bury a real error.
+  if (onSignIn()) return;
   let counts;
   try {
     ({ counts } = await api("/api/counts"));
@@ -4161,7 +4181,13 @@ export function wireShell(router) {
  *  arrives a frame late is a flash, a render that waits on the network is a
  *  blank page.
  */
+/** True on the one route that is reachable without a session. */
+function onSignIn() {
+  return matchRoute(window.location.pathname)?.route?.frame === "signin";
+}
+
 async function applyStoredTheme() {
+  if (onSignIn()) return;
   try {
     const me = await api("/api/profile");
     const theme = me.theme_mode === "dark" ? "dark" : "light";

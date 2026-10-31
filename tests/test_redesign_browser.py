@@ -263,3 +263,10 @@ class TestTheLayoutDefectsTheAuditFound:
         pill = layout["pill"]
         assert pill, "no status pill was measured"
         assert pill["width"] < 120, f"the pill is {pill['width']}px wide"
+
+    def test_the_sign_in_page_asks_for_nothing_it_cannot_have(self, layout):
+        """`applyStoredTheme` and `refreshCounts` ran on every route, so the
+        one page reachable without a session logged a 401 for the theme and
+        two for the counts before the form was even touched."""
+        assert layout["signinRenders"], "the sign-in form did not render"
+        assert layout["signinRefused"] == [], layout["signinRefused"]

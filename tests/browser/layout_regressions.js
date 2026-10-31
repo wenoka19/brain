@@ -57,6 +57,24 @@ async function signIn(page) {
   try {
     browser = await chromium.launch({ args: ['--no-sandbox'] });
 
+    // ---- the sign-in page, with no session at all ------------------------
+    // The shell asked for the theme and the counts before anyone had signed
+    // in, so the one page a signed-out person ever sees logged three 401s on
+    // every load — enough noise to bury a real error.
+    const coldCtx = await browser.newContext({ viewport: DESK });
+    const cold = await coldCtx.newPage();
+    const refused = [];
+    cold.on('response', (r) => {
+      if (r.status() >= 400) refused.push(r.status() + ' ' + r.url().replace(BASE, ''));
+    });
+    await cold.goto(BASE + '/signin', { waitUntil: 'networkidle' });
+    await sleep(900);
+    out.signinRefused = refused;
+    out.signinRenders = await cold.evaluate(
+      () => document.querySelectorAll('input[type=email]').length > 0
+    );
+    await coldCtx.close();
+
     // ---- desktop ---------------------------------------------------------
     const deskCtx = await browser.newContext({ viewport: DESK });
     const desk = await deskCtx.newPage();
