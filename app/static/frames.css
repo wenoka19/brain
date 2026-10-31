@@ -277,7 +277,16 @@
      list named `main.content` rather than anything inside it, which is what
      a grid column refusing to shrink looks like. The desktop rule at the top
      of this file already had the `minmax`; this one did not. */
-  .shell { grid-template-columns: minmax(0, 1fr); }
+  /* `min-height: 100svh` with two auto rows and the default stretching
+     align-content hands the leftover height to BOTH rows, so the top bar grew
+     with whatever space the page did not use: measured 261px on `/rules` and
+     255px on `/library/transcripts` against the 49px it takes on a page long
+     enough to fill the screen. The bar is its content; the canvas takes the
+     rest. */
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
 
   .topbar {
     display: flex;
@@ -542,6 +551,14 @@
 
 .source-head .read-title { margin-bottom: var(--space-1); }
 .source-head .read-meta { margin-bottom: var(--space-2); }
+
+/* The thumbnail is `flex: 0 0 auto` at 132px, so on a 390px phone it left the
+   title — the one thing the screen is about — 162px and four lines. Below the
+   sidebar breakpoint the thumbnail steps aside and the title gets the width. */
+@media (max-width: 719px) {
+  .source-head { flex-wrap: wrap; }
+  .source-head > div:not(.menu-wrap) { flex: 1 1 100%; min-width: 0; }
+}
 
 .work { margin-top: var(--space-6); }
 
@@ -1126,11 +1143,24 @@ mark {
   padding: 0 2px;
 }
 
+/* `overflow: hidden` was here to keep the first and last rows inside the
+   rounded corners, and it also clipped the row's own `⋯` menu: measured 35px
+   cut off, which is exactly where `Revoke` sits. Clip the corners with a
+   radius on the end rows instead, so the menu can leave the box. */
 .conn-list {
   border-radius: var(--radius-md);
   background: var(--bg-card);
   box-shadow: inset 0 0 0 var(--border-width) var(--border-subtle);
-  overflow: hidden;
+}
+
+.conn:first-child {
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+}
+
+.conn:last-child {
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
 }
 
 .conn {
@@ -1156,6 +1186,11 @@ mark {
   .connect-row .input { flex: 1 0 100%; }
   .conn { grid-template-columns: minmax(0, 1fr) auto auto; }
   .conn .item-meta { grid-column: 1 / -1; }
+
+  /* With the meta on its own row the pill lands alone in the `1fr` track, and
+     a grid item stretches unless told otherwise: `Live` rendered as a 270px
+     green bar. `.pill`'s `flex: 0 0 auto` says nothing to a grid parent. */
+  .conn .pill { justify-self: start; }
 }
 
 /* ======================================================================

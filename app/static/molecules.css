@@ -610,11 +610,22 @@
 
 .steps-list > li {
   display: grid;
-  grid-template-columns: 26px 1fr;
+  grid-template-columns: 26px minmax(0, 1fr);
   gap: var(--space-4);
   padding: var(--space-4) 0;
   counter-increment: step;
 }
+
+/* The counter is a `::before`, so it is grid item #1 and auto-placement sends
+   every second real child back into the 26px track: on `/connections` the
+   command paths, the notes and the `pre` rendered one word per line while the
+   Copy button sat full-width above them. Every real child belongs in the
+   content column; only the counter sits in the first. */
+.steps-list > li > * { grid-column: 2; }
+
+/* A blockified `inline-flex` button stretches its track. A step's button is a
+   control, not a banner. */
+.steps-list > li > .btn { justify-self: start; }
 
 .steps-list > li + li {
   border-top: var(--border-width) solid var(--border-subtle);
