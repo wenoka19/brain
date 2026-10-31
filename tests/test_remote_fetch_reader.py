@@ -378,13 +378,62 @@ class TestAnUnfitReaderIsInvisible:
 # 6 — the endpoints
 # ===========================================================================
 class TestTheReaderEndpoints:
-    def test_the_whole_round_trip_over_http(self, reader, ctx, queued_video):
+    def test_the_round_trip_answers_without_doing_the_work(self, reader, ctx, queued_video):
+        """`R-24`: the endpoint stages and returns; the drain extracts.
+
+        The first version ran the pipeline inside the request. The handler is
+        `async def` and the pipeline is synchronous, so one long transcript
+        held the event loop of a single-process server for minutes: `/healthz`
+        stopped answering, the platform served `upstream error` to the
+        person's own browser, and the reader timed out and posted the same
+        video again — charging the extraction twice.
+
+        So both halves are asserted here. The answer is immediate and says
+        `queued`, nothing has been extracted when it arrives, and the ordinary
+        drain then turns it into `ready`.
+        """
         leased = reader.post("/api/fetch-queue/lease").json()
         assert leased["job"]["job_id"] == queued_video
+
         posted = reader.post(
             f"/api/fetch-queue/{queued_video}/content", json=PAYLOAD
         ).json()
-        assert posted["ok"] is True and posted["status"] == "ready"
+        assert posted["ok"] is True
+        assert posted["accepted"] is True
+        assert posted["status"] == "queued", "the endpoint must not run the pipeline"
+        assert control_db.get_job(control_db.control(), queued_video)["claims_extracted"] == 0
+
+        processed = E.run_pending_jobs_sync(ctx.user_id, limit=3)
+        assert [row["status"] for row in processed] == ["ready"], processed
+
+    def test_the_handler_never_touches_the_pipeline(self, reader, monkeypatch, queued_video):
+        """The sharpest form of the `R-24` guard.
+
+        It is not enough that the answer *looks* immediate: nothing expensive
+        may run inside the request at all. `_ingest_content` is the gate every
+        extraction passes through, so a tripwire on it fails the moment this
+        handler starts doing the drain's work again — which is what took
+        production down.
+        """
+        def explode(*args, **kwargs):
+            raise AssertionError(
+                "the HTTP handler ran the pipeline; this froze the whole server"
+            )
+
+        monkeypatch.setattr(E, "_ingest_content", explode)
+        reader.post("/api/fetch-queue/lease")
+        answer = reader.post(
+            f"/api/fetch-queue/{queued_video}/content", json=PAYLOAD
+        ).json()
+        assert answer["accepted"] is True
+
+    def test_the_reader_cannot_take_back_what_it_handed_over(self, reader, queued_video):
+        """The handover puts the job back in the queue. Without excluding
+        staged jobs from the reader's lease, it would take the same video
+        again and re-download the transcript forever."""
+        reader.post("/api/fetch-queue/lease")
+        reader.post(f"/api/fetch-queue/{queued_video}/content", json=PAYLOAD)
+        assert reader.post("/api/fetch-queue/lease").json()["job"] is None
 
     def test_a_problem_can_be_reported_over_http(self, reader, queued_video):
         reader.post("/api/fetch-queue/lease")

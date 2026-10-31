@@ -126,6 +126,29 @@ CREATE TABLE IF NOT EXISTS job_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_job_steps ON job_steps(job_id, ordinal);
 
+-- `R-24`: text a reader fetched elsewhere, waiting for this server to read it.
+--
+-- The reason this table exists rather than the obvious alternative: the first
+-- version of `/api/fetch-queue/{job}/content` ran the whole pipeline inside
+-- the HTTP request. The handler is `async def` and the pipeline is
+-- synchronous, so a long transcript held the event loop of a single-process
+-- server for minutes — and froze everything, `/healthz` included, until
+-- Railway's proxy answered `upstream error` to the person's own browser.
+-- Meanwhile the reader's client gave up at its read timeout, re-leased the
+-- same job and posted it again, charging the extraction a second time.
+--
+-- `app/worker.py` had the answer all along: it runs `process_job` through
+-- `asyncio.to_thread`, which is why an uploaded PDF never did this. So the
+-- endpoint now does what a queue endpoint should — it writes the text here
+-- and answers at once — and the job joins the same drain every other source
+-- goes through. One row per job, replaced if a reader posts twice, and gone
+-- the moment the job is processed.
+CREATE TABLE IF NOT EXISTS fetched_payloads (
+    job_id     TEXT PRIMARY KEY REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
+    payload    TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Authorization codes are short-lived (60s), single-use and PKCE-bound. They
 -- live in the database rather than in process memory so the token exchange
 -- still works behind more than one uvicorn worker.
@@ -650,7 +673,10 @@ def reap_exhausted_jobs(
     # worker's lower bound would fail a video for being patient.
     if exclude_source_types:
         marks = ",".join("?" for _ in exclude_source_types)
-        where += f" AND source_type NOT IN ({marks})"
+        where += (
+            f" AND (source_type NOT IN ({marks})"
+            f" OR job_id IN (SELECT job_id FROM fetched_payloads))"
+        )
         params.extend(exclude_source_types)
     if user_id is not None:
         where += " AND user_id = ?"
@@ -1183,6 +1209,39 @@ def waiting_fetch_jobs(
     return {"waiting": int(row["waiting"] or 0), "oldest_sec": int(row["oldest"] or 0)}
 
 
+def stage_fetched_content(conn: sqlite3.Connection, job_id: str, payload: dict[str, Any]) -> None:
+    """Park the text a reader fetched, for this server's own worker to read.
+
+    Replaces any earlier row for the same job: a reader that posts twice —
+    because its first answer was slow, or because its lease was re-offered —
+    hands over the same work, not a second charge.
+    """
+    conn.execute(
+        "INSERT INTO fetched_payloads (job_id, payload) VALUES (?, ?) "
+        "ON CONFLICT(job_id) DO UPDATE SET payload = excluded.payload, "
+        "created_at = CURRENT_TIMESTAMP",
+        (job_id, json.dumps(payload)),
+    )
+
+
+def staged_fetched_content(conn: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT payload FROM fetched_payloads WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def clear_fetched_content(conn: sqlite3.Connection, job_id: str) -> None:
+    """Drop the staged text once the job is over, whichever way it ended."""
+    conn.execute("DELETE FROM fetched_payloads WHERE job_id = ?", (job_id,))
+
+
 def defer_job(
     conn: sqlite3.Connection, job_id: str, *, seconds: int, note: str = ""
 ) -> None:
@@ -1205,6 +1264,21 @@ def defer_job(
         "UPDATE ingestion_jobs SET status = 'queued', locked_until = ?, "
         "error_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
         (iso(now_utc() + timedelta(seconds=max(1, int(seconds)))), note or "", job_id),
+    )
+
+
+def requeue_now(conn: sqlite3.Connection, job_id: str) -> None:
+    """Put a job back in the queue with no lease and no delay.
+
+    `defer_job`'s sibling, and the difference matters: a deferral is "come
+    back to this later", while this is "it is ready to be worked on now".
+    Used when a reader hands text over — the drain should pick it up on its
+    next pass, not a second later.
+    """
+    conn.execute(
+        "UPDATE ingestion_jobs SET status = 'queued', locked_until = NULL, "
+        "error_reason = '', updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+        (job_id,),
     )
 
 
@@ -1357,6 +1431,7 @@ def claim_next_job(
     source_types: Sequence[str] | None = None,
     exclude_source_types: Sequence[str] = (),
     count_attempt: bool = True,
+    exclude_staged: bool = False,
 ) -> dict[str, Any] | None:
     """Lease the next runnable job (recovering leases that expired mid-flight).
 
@@ -1367,6 +1442,10 @@ def claim_next_job(
       claims a video whose fetch has to happen on a residential connection.
     * `source_types` is what the reader's lease endpoint passes, so it claims
       nothing else.
+    * `exclude_staged=True` is what the reader's lease passes, so it never
+      takes back a video whose text it has already handed over. Without it
+      the handover puts the job back in the queue and the reader leases it
+      again, re-downloading the same transcript forever.
     * `count_attempt=False` leases without spending one of the job's attempts.
       A reader that goes offline mid-job, or a laptop that closes, must not
       consume the budget for a video nobody has read yet; only a *reported*
@@ -1385,9 +1464,17 @@ def claim_next_job(
             marks = ",".join("?" for _ in source_types)
             sql += f"AND source_type IN ({marks}) "
             params.extend(source_types)
+        if exclude_staged:
+            sql += "AND job_id NOT IN (SELECT job_id FROM fetched_payloads) "
         if exclude_source_types:
             marks = ",".join("?" for _ in exclude_source_types)
-            sql += f"AND source_type NOT IN ({marks}) "
+            # `R-24`: excluded while its text is still somebody else's problem,
+            # claimable the moment that text has arrived. A video whose
+            # transcript is staged is this server's work like any other job.
+            sql += (
+                f"AND (source_type NOT IN ({marks}) "
+                f"OR job_id IN (SELECT job_id FROM fetched_payloads)) "
+            )
             params.extend(exclude_source_types)
         if user_id:
             sql += "AND user_id = ? "
