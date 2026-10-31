@@ -1488,3 +1488,49 @@ The remedy test now reads `providers.py` as well, and removing one entry fails.
   key, edit a rule, review and revert a skill, profile settings, export). That
   is its own piece of work — new tools, new permissions, new audit rows — and
   wiring the omnibar is only its first brick.
+
+
+---
+
+## R-21 — The cold-start race CI caught (31 October 2026)
+
+Merging R-20 to `main` turned CI red on Python 3.12 only — 3.11, 3.13, the
+Docker build and the browser job all passed the same commit. The failure was
+`TestSingleflightHydration::test_concurrent_requests_for_a_cold_tenant_share_one_download`
+with `database is locked`, in a file R-20 never touched.
+
+It was not R-20's. The parent commit — green in CI, unmodified — fails the same
+test about **once in twenty-five** runs on an unloaded machine. The thing CI
+found was a pre-existing race that a contended runner exposes reliably.
+
+### What was actually wrong
+
+`r2_sync.hydrate` is singleflighted, so a cold tenant is downloaded once. What
+runs *after* it was not. The connection pool is per thread, so every caller
+runs its own `_open`, and `_open` does two things that take an exclusive write
+lock: `PRAGMA journal_mode = WAL`, which switches the journal, and
+`init_schema`, which creates the FTS5 and vec0 tables and then applies the
+migrations.
+
+So a page load firing `/api/cards`, `/api/profile` and `/api/jobs` at a cold
+tenant had three connections building the same schema at once.
+
+Measured directly, eight threads opening one fresh file, sixty rounds:
+
+| | failed rounds |
+|---|---|
+| as shipped | **54 / 60** |
+| schema init serialised | 4 / 60 |
+| whole open serialised | **0 / 60** (also 0 at 16 and 32 threads) |
+
+The first error was not a lock at all — it was
+`duplicate column name: archived_by`: two threads applying the same migration.
+A flaky test was the mild symptom; concurrent DDL on a live tenant was the
+defect. Serialising only `init_schema` left one failure in fifteen, because
+`PRAGMA journal_mode = WAL` takes its own lock before that point, so the lock
+covers the whole of `_open`. It costs nothing on the warm path: a cached
+connection never reaches `_open` at all.
+
+The guard runs five rounds of eight concurrent opens, each on a fresh file,
+because the race only exists while the schema is being built. One round caught
+the regression about two times in three; five catch it six times out of six.

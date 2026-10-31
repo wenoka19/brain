@@ -692,6 +692,55 @@ class TestSingleflightHydration:
         assert bucket.gets == 1, f"one GET, not {bucket.gets}"
         assert list(cfg.tenant_db_path(user_id).parent.glob("*.hydrating")) == []
 
+    def test_concurrent_opens_of_one_file_do_not_race_on_the_schema(self, cfg):
+        """Hydration was singleflighted; opening was not.
+
+        The pool is per thread, so every caller ran its own `_open` — and
+        `_open` does `PRAGMA journal_mode = WAL`, which switches the journal
+        under an exclusive lock, then `init_schema`, which is DDL plus
+        migrations. Eight callers therefore built the same FTS5 and vec0
+        tables at once and raced on the ALTER TABLEs behind them.
+
+        Measured on the shipped code: 54 of 60 rounds failed, the first with
+        `duplicate column name: archived_by` — two threads applying one
+        migration — and the rest with `database is locked`. That is a cold
+        node's first burst of traffic, and it is what made
+        `test_concurrent_requests_for_a_cold_tenant_share_one_download` fail
+        about once in twenty-five runs on an unloaded machine and reliably on
+        a contended CI runner.
+        """
+        errors: list[Exception] = []
+        counts: list[int] = []
+
+        # A fresh file per round, because the race is only in the build: once
+        # the schema exists every open is a no-op and nothing contends. One
+        # round caught the regression about two times in three; five make the
+        # guard reliable without making it slow.
+        for round_number in range(5):
+            path = cfg.tenant_db_path(f"concurrentopen{round_number}")
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
+            barrier = threading.Barrier(8)
+
+            def open_it(target: Path = path) -> None:
+                try:
+                    barrier.wait()
+                    conn = tenant_db._open(target, cfg)
+                    counts.append(
+                        conn.execute("SELECT count(*) FROM epistemic_claims").fetchone()[0]
+                    )
+                except Exception as exc:  # noqa: BLE001 - recorded and asserted on
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=open_it) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60)
+
+        assert errors == [], errors
+        assert counts == [0] * 40, "every caller saw a usable schema"
+
     def test_a_second_open_after_hydration_costs_nothing(self, cfg):
         bucket = FakeBucket().install()
         user_id = self._cold_tenant(cfg, bucket)

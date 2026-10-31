@@ -397,16 +397,42 @@ def _pool_for_thread() -> _LRUConnections:
     return pool
 
 
+#: One lock per database file, held across `init_schema`.
+#:
+#: `r2_sync.hydrate` is singleflighted, so a cold tenant is downloaded once.
+#: What follows it was not: every caller then opens its own connection — the
+#: pool is per thread — and each runs `init_schema`, which is DDL, and DDL
+#: takes an exclusive write lock. A page load firing `/api/cards`,
+#: `/api/profile` and `/api/jobs` at a cold tenant therefore had three
+#: connections building the same FTS5 and vec0 tables at once, each waiting
+#: out the others' `busy_timeout`. On an unloaded machine they serialise well
+#: inside the 5s budget; on a contended one they do not, and the loser raises
+#: `database is locked` — which is what `TestSingleflightHydration` catches
+#: intermittently, and what a cold production node would hit under its first
+#: burst of traffic.
+_schema_locks: dict[str, threading.Lock] = {}
+_schema_locks_guard = threading.Lock()
+
+
+def _schema_lock(path: Path) -> threading.Lock:
+    with _schema_locks_guard:
+        return _schema_locks.setdefault(str(path), threading.Lock())
+
+
 def _open(path: Path, cfg: Settings) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    for pragma in PRAGMAS:
-        conn.execute(pragma)
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-    init_schema(conn, cfg=cfg)
+    # The whole open is serialised per file, not just `init_schema`:
+    # `PRAGMA journal_mode = WAL` takes its own exclusive lock to switch the
+    # journal, so leaving it outside left one failure in fifteen.
+    with _schema_lock(path):
+        conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        for pragma in PRAGMAS:
+            conn.execute(pragma)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        init_schema(conn, cfg=cfg)
     return conn
 
 
