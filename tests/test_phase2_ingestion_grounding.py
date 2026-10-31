@@ -103,6 +103,55 @@ class TestURLGatekeeper:
         assert exc.value.reason == reason
         assert exc.value.message  # always a human-readable explanation
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "https://www.tiktok.com/@someone/video/7123456789012345678",
+            "https://vm.tiktok.com/ZMabc123/",
+            "https://www.instagram.com/reel/Cabc123def/",
+            "https://instagram.com/p/Cabc123def/",
+            "https://www.facebook.com/watch/?v=123456789",
+            "https://fb.watch/abc123/",
+        ],
+    )
+    def test_the_other_platforms_are_recognised_not_read_as_articles(self, cfg, raw):
+        """`R-23`: the failure these links produced was a lie about the link.
+
+        Every host this gatekeeper did not know fell through to the generic
+        article branch, and `LiveFetcher.fetch_url` sends anything that is not
+        `youtube` or `github` to `fetch_article`. So a TikTok link was
+        downloaded as HTML and handed to BeautifulSoup, which on a JavaScript
+        shell yields nothing — and the person read "Nothing readable was
+        there", which blames their link for a gap in this product.
+
+        The refusal names what is actually missing. `article` is the one
+        answer this must never give.
+        """
+        with pytest.raises(GatekeeperError) as exc:
+            gatekeeper.normalize_url(raw, cfg=cfg)
+        assert exc.value.reason == "unsupported_content_type"
+        assert exc.value.message
+
+    def test_those_refusals_cost_no_dns_lookup_either(self, cfg):
+        """Same promise as the `.mp4` rule: the gatekeeper is cheap. A
+        platform link is refused on its hostname alone, before resolution."""
+        import app.security.ssrf as ssrf_module
+
+        calls: list[str] = []
+
+        def tripwire(host: str):
+            calls.append(host)
+            raise AssertionError(f"resolved {host} before refusing it")
+
+        original = ssrf_module.default_resolver
+        ssrf_module.default_resolver = lambda: tripwire
+        try:
+            with pytest.raises(GatekeeperError):
+                gatekeeper.normalize_url("https://www.tiktok.com/@x/video/7123", cfg=cfg)
+        finally:
+            ssrf_module.default_resolver = original
+        assert calls == []
+
     def test_scope_rules_run_before_dns(self, cfg):
         """An `.mp4` on a private host is rejected for scope, not for SSRF —
         proof that the cheap check happens first."""

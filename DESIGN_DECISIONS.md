@@ -186,3 +186,77 @@ Everything else third-party is *fenced* on the way to a model
 steps, unfenced, as instructions. So skills and imported `SKILL.md` files are
 **refused** at the door by `lint_skill_safety` instead. Transcripts, articles
 and PDFs keep the fencing treatment, because they are only ever quoted back.
+
+
+---
+
+## R-23 — Where a video is fetched from (31 October 2026)
+
+Recorded here rather than only in `PROGRESS.md` because it changes §1.3 of
+`CLAUDE.md` — the V1 ingestion scope — and because the founder decided it
+against a recommendation of mine that was wrong.
+
+### What was measured first
+
+YouTube refused the production server with "Sign in to confirm you're not a
+bot". Three independent sources agree on what that is: yt-dlp's maintainers
+("nothing that can be affected from the yt-dlp side"), the bgutil PO-token
+provider ("a PO Token does not bypass IP-based login restrictions"), and
+`youtube-transcript-api`, whose own error text names the category —
+"an IP belonging to a cloud provider ... most IPs from cloud providers are
+blocked by YouTube" — and which ships a `WebshareProxyConfig` class as its
+answer. Its endpoints are `/watch` and `/youtubei/v1/player`: the same ones
+yt-dlp uses. There is no cleverer endpoint.
+
+And there is no official door either: the YouTube Data API's
+`captions.download` must be authorised by someone who can edit the video, so
+third-party captions have no official path at any price.
+
+### The decision
+
+**Fetching moves off the server, to a machine on a residential connection.**
+A separate worker — the founder's own computer first, a small always-on
+machine later — leases video jobs from `brain` over outbound HTTPS, fetches
+them on its own IP, and posts the text back. Everything after the fetch stays
+exactly where it is.
+
+Scope, as the founder set it:
+
+- **Four platforms through the worker:** YouTube, TikTok, Instagram, Facebook.
+- **Documents and images stay on the server.** They have no IP problem: the
+  person uploads them and `pypdf` / `python-docx` / the vision model read them
+  in place. Moving them would make a working path depend on a computer being
+  awake and would ship 20MB uploads out and back for nothing.
+- **The V1 refusals hold.** No raw video file upload, no raw audio file
+  upload. A person uploads a document or an image, nothing else.
+
+### The invariant this buys
+
+**The server never touches media.** The worker downloads the video or the
+caption file; only text crosses to the server. That keeps the upload cap, the
+credits model and the 120-minute ceiling exactly as they are, and it means the
+platform traffic and the knowledge base have no shared storage at all.
+
+### What was rejected, and why it is recorded
+
+I recommended renting a residential proxy for the server: ~2–5 €/month, it
+covers the phone web app, and it is one environment variable. The founder
+asked the question that settles it — *"so the solution is to pay for a
+service that does the work YouTube blocks me from doing?"* — and he is right
+that the honest answer matters more than the convenient one. A proxy buys a
+network position, not a permission; automated server-side extraction is
+contrary to YouTube's terms whatever the IP, and a vendor transcript API is
+the same act with the risk outsourced. A person's own machine reading a page
+that person may read is a different thing, and it is the thing that keeps
+working. The proxy stays available as one environment variable on the worker
+if volume ever demands it — which is precisely why the worker, and not the
+server, is where the fetch lives.
+
+### Known consequences, accepted
+
+- The worker has to be running. A job with no worker online stays `queued`
+  and completes when one appears: `claim_next_job`'s lease already gives that
+  for free, so "off" means late, never lost.
+- TikTok, Instagram and Facebook have a second problem the IP does not touch:
+  there are usually no captions to fetch at all, so their text has to come
+  from speech. That is a capability, not a fix, and it is sized separately.
