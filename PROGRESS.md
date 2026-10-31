@@ -1665,3 +1665,132 @@ dropped, or if either extra leaves `pyproject.toml`.
   seeded directly, with no `ingestion_jobs` row, and the page polls it anyway.
   Harmless and cosmetic, in the web app rather than the pipeline, and not what
   this entry is about.
+
+
+---
+
+## R-23 — The fetch moves off the server (31 October 2026)
+
+`R-22` gave yt-dlp the JavaScript runtime it needed, and the next deploy
+answered with the wall underneath it:
+
+```
+[ ok ] yt-dlp can read YouTube — JS runtime deno-2.9.8; solver yt_dlp_ejs-0.8.0
+ERROR: [youtube] UP_6GOyjDtg: Sign in to confirm you're not a bot.
+```
+
+The runtime was right. The IP was the problem, and three independent sources
+agree it is not one this code can solve: yt-dlp's maintainers ("nothing that
+can be affected from the yt-dlp side"), the bgutil PO-token provider ("a PO
+Token does not bypass IP-based login restrictions"), and
+`youtube-transcript-api`, whose own error text names the category — "an IP
+belonging to a cloud provider ... most IPs from cloud providers are blocked by
+YouTube" — and which ships a residential-proxy class as its answer. Its
+endpoints are `/watch` and `/youtubei/v1/player`: the same two yt-dlp uses.
+There is no cleverer endpoint, and no official one either: `captions.download`
+must be authorised by someone who can edit the video.
+
+### The architecture, as the founder set it
+
+Fetching leaves the server. A reader on a residential connection leases video
+jobs over outbound HTTPS, fetches them on its own IP, and posts the text back.
+Everything after the fetch stays exactly where it was.
+
+```
+   the reader (residential IP)                 Railway (datacentre IP)
+   brain fetch-worker ──── lease ──────────▶   jobs of a remote source type
+                     ◀─── {job_id, url} ───
+   fetch_youtube()        ──── content ───▶    _ingest_content():
+   (the same function)                         ceiling, credits, extraction,
+                                               grounding, tension links
+```
+
+V1's scope, decided the same evening: **YouTube, documents, images.** TikTok,
+Instagram and Facebook are out — which removed the entire speech-to-text axis,
+because YouTube has captions and those three do not.
+
+### What this is not
+
+- **Not a new job status.** `ingestion_jobs.status` carries a CHECK
+  constraint, so a new value means rebuilding that table under a live
+  database — and it would put a word on the person's screen that means
+  nothing to them. Routing is by **source type**: a video stays `queued`, then
+  `fetching` when a reader holds it. The work block says "Working on it", as
+  it already did. No new state exists to be designed.
+- **Not `op_rescue_job`.** It takes a job id and text and would have been the
+  shortcut. It also rebuilds cues as `Pasted part N` and forces
+  `locator_type="section"`, so every claim from a video would lose its
+  timestamp and its `?t=1420`. A test now holds both behaviours side by side,
+  because the contrast is the reason a second endpoint exists.
+- **Not a residential proxy.** That was the recommendation, at ~2–5 €/month,
+  and the founder asked the question that settles it: *"so the solution is to
+  pay for a service that does the work YouTube blocks me from doing?"* A proxy
+  buys a network position, not a permission. It remains one environment
+  variable away on the reader, which is exactly why the reader, and not the
+  server, is where the fetch lives.
+
+### Designing the failure states out, not wording them
+
+The instruction was explicit: *if a state can be avoided by building
+something, build it.* So:
+
+| state | what prevents it |
+|---|---|
+| a reader with stale tooling fails every video | it **asks yt-dlp** before leasing (`fit_to_read`) and takes no work while unfit. It cannot fail a video for a fault of its own, because it never holds one. |
+| a closed laptop exhausts a job's attempts | the lease spends **no** attempt (`count_attempt=False`). Only a *reported* failure does. |
+| a platform refusal becomes a verdict | `report_fetch_problem` **defers**: status back to `queued`, `locked_until` ten minutes out, `error_message` untouched. The person's screen does not change. |
+| the in-process worker races the reader | both the drain and `app/worker.py` pass `exclude_source_types`, and `reap_exhausted_jobs` skips remote types so a patient video is never reaped. |
+| a reader posts twice | `accept_fetched_content` is idempotent by status, so a late retry cannot re-charge a finished job. |
+| nobody notices a queue nobody reads | `doctor` **fails** when `BRAIN_FETCHER_TOKEN` is unset with remote types configured — no reader could authenticate, and every video would wait forever — and warns when the oldest waiting video passes fifteen minutes. |
+| the browser polls a waiting job forty times a minute | the thread's poll settles to 5s after twenty ticks. Not a word on screen changes. |
+
+What the person reads, when a video really ends, is one sentence:
+`Video unavailable right now, try later.` The causes differ and not one of them
+is actionable, so the precise reason stays on the job row and in the audit log.
+Two exceptions keep their own copy, because waiting cannot help and each names
+something the person *can* do: a video with no captions, and a private one.
+
+### Security
+
+The reader learns three fields — job id, the URL the gatekeeper already
+validated, medium — and nothing else: not the user, not the note that steers
+extraction, not a database path. `source_type` is read from the job row, so a
+reader cannot change what kind of thing a source is; `locator_type` must be one
+the schema allows. What it posts is untrusted input and goes through
+`finalise()`, which strips control characters and invisible Unicode exactly as
+a local fetch does. A bearer token compared with `compare_digest`, never
+written to `control.db`, and a missing token and a wrong one answer the same
+401 with the same sentence — a reader must not be able to learn whether the
+feature is on, let alone whether a job is waiting.
+
+### Verified
+
+31 tests in `tests/test_remote_fetch_reader.py`, and then the real thing: a
+prod-mode server on `127.0.0.1:8099` and the reader in its own process, with no
+database access. It checked itself fit (deno 2.9.8), leased the job over HTTP,
+failed to fetch (this VM's DNS refuses `youtube.com`), reported the problem,
+and the server answered:
+
+```
+status: queued   attempts: 1   locked_until: +10m
+error_reason: reader_error      (operator only)
+error_message: ''               <- what the person would read
+```
+
+The failure happened, was recorded for the operator, and never reached the
+screen. That is the whole design in one measurement.
+
+### Left to do
+
+- **`BRAIN_FETCHER_TOKEN` on Railway**, and the same value on the reader.
+  Until then `doctor` fails on purpose, loudly.
+- **The reader has to be running.** A job with none online waits, and
+  `claim_next_job`'s lease makes that late rather than lost — but for anyone
+  other than the founder it means video works when a reader is up. The honest
+  answer to that is step two (a small always-on machine, or that one
+  environment variable), not a sentence on a screen.
+- **`op_rescue_job` is still unreachable from the web app.** `rescue` appears
+  zero times in `app/static/`, while `REMEDY` tells two of the exception cases
+  to "paste the text instead". The engine and the route have existed since
+  Checkpoint B; the button does not. That is a Checkpoint B touchpoint and it
+  is not invented here.

@@ -660,6 +660,7 @@ function openThread(node, { sourceId, jobId, label, instruction, cycling }) {
 function watchThread({ node, sourceId, work, hint, add }) {
   const steps = work.querySelector(".work-steps");
   const header = work.querySelector(".work-head span");
+  let ticks = 0;
 
   const tick = async () => {
     if (!node.isConnected) return;
@@ -674,7 +675,15 @@ function watchThread({ node, sourceId, work, hint, add }) {
 
     const dead = ["failed", "blocked_by_platform"].includes(progress.status);
     if (!progress.finished && !dead) {
-      setTimeout(tick, 1500);
+      // `R-23`: a video is fetched by a reader on a residential connection,
+      // so a job can legitimately wait minutes before its first step moves.
+      // At a flat 1.5s that is forty requests a minute for a page that has
+      // nothing new to show. The first twenty ticks stay quick, because a
+      // local fetch finishes inside them; after that it settles down. The
+      // block says exactly what it said before — this changes the polling,
+      // not a word on the screen.
+      ticks += 1;
+      setTimeout(tick, ticks > 20 ? 5000 : 1500);
       return;
     }
 
@@ -765,7 +774,14 @@ const TYPE_ICON = {
  *  a tooltip silently becomes wrong. */
 const REMEDY = {
   blocked_by_platform: "Make it public, then retry",
-  platform_blocked_caller: "YouTube refused this server, not the video — paste the transcript instead",
+  /* `R-23`, the founder's decision: the causes differ — the platform refused
+     the reader, the reader's tooling is behind, nothing picked it up — and
+     not one of them is anything the person can act on. So they say the same
+     short thing, and the real reason stays on the job row and in Activity
+     where the operator reads it. `no_transcript` and a private video are the
+     two exceptions below: waiting cannot help there, and each tells the
+     person something they can actually do. */
+  platform_blocked_caller: "Video unavailable right now, try later",
   blocked_url: "That address is not one Brain can reach — check it, then retry",
   no_transcript: "No captions on this one — add them, or paste the text instead",
   no_text_layer: "No text layer — retype or re-scan",
@@ -777,8 +793,8 @@ const REMEDY = {
   unsupported_file: "Brain does not read this kind of file yet — paste the text instead",
   image_too_large: "That image is over the size cap — shrink it and try again",
   tool_missing: "Brain is missing a tool for this type. Nothing you can fix",
-  js_runtime_missing: "The server is missing a tool YouTube needs. Nothing you can fix",
-  js_solver_missing: "The server is missing a tool YouTube needs. Nothing you can fix",
+  js_runtime_missing: "Video unavailable right now, try later",
+  js_solver_missing: "Video unavailable right now, try later",
   vision_unavailable: "Reading images is not switched on for this Brain. Nothing you can fix",
 
   /* The model host, not the source. These reach the person through the same

@@ -16,6 +16,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Iterator
 
 from app.config import Settings, settings
@@ -624,7 +625,11 @@ def job_charge(conn: sqlite3.Connection, job_id: str) -> int:
 
 
 def reap_exhausted_jobs(
-    conn: sqlite3.Connection, *, user_id: str | None = None, max_attempts: int = 3
+    conn: sqlite3.Connection,
+    *,
+    user_id: str | None = None,
+    max_attempts: int = 3,
+    exclude_source_types: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """Fail the jobs nothing will ever claim again, and refund what they spent.
 
@@ -639,6 +644,14 @@ def reap_exhausted_jobs(
     """
     where = "status NOT IN ('ready','failed','blocked_by_platform') AND attempts >= ?"
     params: list[Any] = [max_attempts]
+    # `R-23`: a job whose fetch happens on another machine is not this loop's
+    # to give up on. Its ceiling is higher (`fetch_max_attempts`) and only a
+    # *reported* failure spends an attempt, so reaping it here on this
+    # worker's lower bound would fail a video for being patient.
+    if exclude_source_types:
+        marks = ",".join("?" for _ in exclude_source_types)
+        where += f" AND source_type NOT IN ({marks})"
+        params.extend(exclude_source_types)
     if user_id is not None:
         where += " AND user_id = ?"
         params.append(user_id)
@@ -1147,6 +1160,72 @@ def ingestion_defaults(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]
     return dict(row)
 
 
+def waiting_fetch_jobs(
+    conn: sqlite3.Connection, source_types: Sequence[str]
+) -> dict[str, Any]:
+    """How many jobs are waiting for a reader, and how long the oldest has.
+
+    `R-23`'s one blind spot, reported rather than left silent: a video waits
+    patiently by design, so a queue nobody is reading looks exactly like a
+    queue that is being read. This is what `doctor` turns into a sentence.
+    """
+    if not source_types:
+        return {"waiting": 0, "oldest_sec": 0}
+    marks = ",".join("?" for _ in source_types)
+    row = conn.execute(
+        f"SELECT COUNT(*) AS waiting, "
+        f"       COALESCE(MAX(strftime('%s','now') - strftime('%s', created_at)), 0) AS oldest "
+        f"FROM ingestion_jobs "
+        f"WHERE status NOT IN ('ready','failed','blocked_by_platform') "
+        f"AND source_type IN ({marks})",
+        tuple(source_types),
+    ).fetchone()
+    return {"waiting": int(row["waiting"] or 0), "oldest_sec": int(row["oldest"] or 0)}
+
+
+def defer_job(
+    conn: sqlite3.Connection, job_id: str, *, seconds: int, note: str = ""
+) -> None:
+    """Hand a job back to the queue, to be offered again later.
+
+    `R-23`'s answer to "do not show the person a failure you can avoid". A
+    reader that cannot read right now — the platform refused it, its own
+    tooling is out of date — has learnt nothing permanent about the video. So
+    the job goes back to `queued` with a future `locked_until`, the lease
+    disappears, and the attempt the lease spent is given back. Nothing
+    terminal is written, nothing reaches the screen, and the work block keeps
+    saying what it already said.
+
+    `error_message` is deliberately left alone: it is what the person reads
+    when a job really ends, and a deferral has not ended anything. Neither is
+    `attempts`: on this path the lease spends none and only a *reported*
+    failure does, through `spend_attempt`, so there is nothing to give back.
+    """
+    conn.execute(
+        "UPDATE ingestion_jobs SET status = 'queued', locked_until = ?, "
+        "error_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+        (iso(now_utc() + timedelta(seconds=max(1, int(seconds)))), note or "", job_id),
+    )
+
+
+def spend_attempt(conn: sqlite3.Connection, job_id: str) -> int:
+    """Spend one attempt, and report how many have now been spent.
+
+    Called when a reader *reports* a failure, which is the only thing that
+    counts: a lease that expires in silence costs nothing, or a closed laptop
+    would exhaust a video that was never read.
+    """
+    conn.execute(
+        "UPDATE ingestion_jobs SET attempts = attempts + 1, "
+        "updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+        (job_id,),
+    )
+    row = conn.execute(
+        "SELECT attempts FROM ingestion_jobs WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    return int(row["attempts"]) if row else 0
+
+
 def set_job_status(
     conn: sqlite3.Connection,
     job_id: str,
@@ -1275,8 +1354,24 @@ def claim_next_job(
     user_id: str | None = None,
     lease_seconds: int = 120,
     max_attempts: int = 3,
+    source_types: Sequence[str] | None = None,
+    exclude_source_types: Sequence[str] = (),
+    count_attempt: bool = True,
 ) -> dict[str, Any] | None:
-    """Lease the next runnable job (recovering leases that expired mid-flight)."""
+    """Lease the next runnable job (recovering leases that expired mid-flight).
+
+    `R-23` added the two filters and the flag, and they are what routes a job
+    to a machine instead of a new status:
+
+    * `exclude_source_types` is what the in-process worker passes, so it never
+      claims a video whose fetch has to happen on a residential connection.
+    * `source_types` is what the reader's lease endpoint passes, so it claims
+      nothing else.
+    * `count_attempt=False` leases without spending one of the job's attempts.
+      A reader that goes offline mid-job, or a laptop that closes, must not
+      consume the budget for a video nobody has read yet; only a *reported*
+      failure does, through `report_fetch_failure`.
+    """
     lease_until = iso(now_utc() + timedelta(seconds=lease_seconds))
     now = iso(now_utc())
     with transaction(conn):
@@ -1286,6 +1381,14 @@ def claim_next_job(
             "AND (locked_until IS NULL OR locked_until < ?) AND attempts < ? "
         )
         params: list[Any] = [now, max_attempts]
+        if source_types:
+            marks = ",".join("?" for _ in source_types)
+            sql += f"AND source_type IN ({marks}) "
+            params.extend(source_types)
+        if exclude_source_types:
+            marks = ",".join("?" for _ in exclude_source_types)
+            sql += f"AND source_type NOT IN ({marks}) "
+            params.extend(exclude_source_types)
         if user_id:
             sql += "AND user_id = ? "
             params.append(user_id)
@@ -1294,7 +1397,8 @@ def claim_next_job(
         if row is None:
             return None
         conn.execute(
-            "UPDATE ingestion_jobs SET locked_until = ?, attempts = attempts + 1, "
+            "UPDATE ingestion_jobs SET locked_until = ?, "
+            f"attempts = attempts + {1 if count_attempt else 0}, "
             "status = CASE WHEN status = 'queued' THEN 'fetching' ELSE status END, "
             "updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
             (lease_until, row["job_id"]),

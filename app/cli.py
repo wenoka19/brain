@@ -109,6 +109,42 @@ def _probe_providers(cfg) -> list[tuple[str, str, str]]:
     return out
 
 
+def cmd_fetch_worker(args: argparse.Namespace) -> int:
+    """Run the reader: lease videos from a brain server and post the text back.
+
+    This is the process that runs on a machine with a residential connection,
+    because YouTube refuses anonymous requests from datacentre IPs. It needs
+    no inbound port: it calls the server.
+
+    It takes no work while its own tooling is unfit, which is deliberate — a
+    reader that cannot read must be invisible rather than fail someone's
+    video for a fault of its own.
+    """
+    import logging
+    import os
+
+    from app.config import settings
+    from app.fetch_worker import FetchWorker
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    server = (args.server or os.environ.get("BRAIN_SERVER_URL") or "").strip()
+    token = (args.token or os.environ.get("BRAIN_FETCHER_TOKEN") or "").strip()
+    if not server:
+        print("--server (or BRAIN_SERVER_URL) is required: the brain this reader serves")
+        return 2
+    if not token:
+        print("--token (or BRAIN_FETCHER_TOKEN) is required: it must match the server's")
+        return 2
+
+    worker = FetchWorker(server, token, cfg=settings())
+    print(f"[brain] reader started against {server}")
+    read = worker.run(once=args.once)
+    print(f"[brain] reader stopped after reading {read} source(s)")
+    return 0
+
+
 def cmd_youtube_check(args: argparse.Namespace) -> int:
     """Exit non-zero unless yt-dlp can actually read YouTube on this host.
 
@@ -363,6 +399,42 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 line("warn", "  JS runtimes yt-dlp sees", youtube.runtimes)
                 warnings += 1
             failures += 1
+
+        # ---- `R-23`: the reader that fetches what this IP cannot --------
+        # A video waits by design, so a queue nobody is reading looks exactly
+        # like a queue that is being read. Two things are therefore said out
+        # loud, because neither shows up anywhere else until a person is
+        # already waiting.
+        if cfg.remote_fetch_types:
+            kinds = ", ".join(cfg.remote_fetch_types)
+            if cfg.fetcher_token:
+                line("ok", "video reader", f"token set — {kinds} fetched off this host")
+            else:
+                line(
+                    "bad",
+                    "video reader",
+                    f"BRAIN_FETCHER_TOKEN unset, so no reader can authenticate and every "
+                    f"{kinds} source would wait forever. Set it here and on the reader",
+                )
+                failures += 1
+            from app.db import control as control_db_mod
+
+            queue = control_db_mod.waiting_fetch_jobs(
+                control_db_mod.control(), cfg.remote_fetch_types
+            )
+            if not queue["waiting"]:
+                line("ok", "video queue", "empty")
+            elif queue["oldest_sec"] > 900:
+                line(
+                    "warn",
+                    "video queue",
+                    f"{queue['waiting']} waiting, oldest {queue['oldest_sec'] // 60}m — "
+                    "is a reader running?",
+                )
+                warnings += 1
+            else:
+                line("ok", "video queue", f"{queue['waiting']} waiting, oldest "
+                     f"{queue['oldest_sec']}s")
 
     # ---- portability -------------------------------------------------------
     from app.storage import r2_sync
@@ -1411,6 +1483,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually call the model and embedding hosts, instead of only reading the config",
     )
     doctor.set_defaults(func=cmd_doctor)
+
+    reader = sub.add_parser(
+        "fetch-worker",
+        help="run the reader: lease videos from a brain server, fetch them here, post back",
+    )
+    reader.add_argument("--server", default="", help="https://… of the brain this reader serves")
+    reader.add_argument("--token", default="", help="must match the server's BRAIN_FETCHER_TOKEN")
+    reader.add_argument(
+        "--once", action="store_true", help="take at most one job, then exit (for a cron or a test)"
+    )
+    reader.set_defaults(func=cmd_fetch_worker)
 
     ytcheck = sub.add_parser(
         "youtube-check",
